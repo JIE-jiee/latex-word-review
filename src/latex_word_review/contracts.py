@@ -517,8 +517,52 @@ def _validate_source_map(document: Mapping[str, Any], payload: Mapping[str, Any]
     mappings = payload["mappings"]
     _unique((item["unit_id"] for item in mappings), path=("payload", "mappings"))
     actual = {status: 0 for status in ("exact", "degraded", "unmapped", "conflict")}
-    for item in mappings:
+    for mapping_index, item in enumerate(mappings):
         actual[item["status"]] += 1
+        provenance = item["text_provenance"]
+        segments = provenance["segments"]
+        review_cursor = 0
+        source_cursor = 0
+        for segment_index, segment in enumerate(segments):
+            path = (
+                "payload",
+                "mappings",
+                mapping_index,
+                "text_provenance",
+                "segments",
+                segment_index,
+            )
+            if (
+                segment["review_start"] != review_cursor
+                or segment["source_start_byte"] != source_cursor
+                or segment["review_end"] <= segment["review_start"]
+                or segment["source_end_byte"] <= segment["source_start_byte"]
+            ):
+                raise ContractError(
+                    ErrorCode.SCHEMA_INVALID,
+                    "text provenance segments must be positive and contiguous",
+                    path=path,
+                )
+            expected_patchable = segment["transformation"] == "identity"
+            if segment["auto_patchable"] is not expected_patchable:
+                raise ContractError(
+                    ErrorCode.SCHEMA_INVALID,
+                    "text provenance patchability disagrees with its transformation",
+                    path=(*path, "auto_patchable"),
+                )
+            review_cursor = segment["review_end"]
+            source_cursor = segment["source_end_byte"]
+        _require_equal(
+            provenance["review_length"],
+            review_cursor,
+            path=("payload", "mappings", mapping_index, "text_provenance", "review_length"),
+        )
+        location = item["source_location"]
+        _require_equal(
+            location["end_byte"] - location["start_byte"],
+            source_cursor,
+            path=("payload", "mappings", mapping_index, "text_provenance", "segments"),
+        )
     coverage = payload["coverage"]
     _require_equal(coverage["total"], len(mappings), path=("payload", "coverage", "total"))
     for status, count in actual.items():

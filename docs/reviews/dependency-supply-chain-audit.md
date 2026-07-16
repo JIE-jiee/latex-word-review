@@ -1,15 +1,15 @@
-# 依赖与供应链审计（2026-07-16）
+# 依赖与供应链审计（2026-07-17）
 
 ## 结论
 
-截至 **2026-07-16 20:28:50 JST**，当前 `uv.lock` 的默认运行时闭包与“全部可选
+截至 **2026-07-17 02:25:21 JST**，当前 `uv.lock` 的默认运行时闭包与“全部可选
 extra + 全部 dependency group”闭包，分别经 `pip-audit 2.10.1` 的 OSV 和 PyPI
 服务检查，四项结果均为 **0 个已知漏洞**。本结论是有时间点和范围限制的发布候选快照，
 不是对未来漏洞、未披露漏洞、原生库或完整构建供应链的永久保证。
 
 审计使用冻结锁文件导出，保留包哈希，且通过 `--no-emit-project` 排除本项目自身，因而本页
 报告的是第三方 Python 依赖风险，不替代项目源码安全审查。原始 JSON、冻结 TXT 和摘要保存在
-本地忽略目录 `build/final-dependency-audit-v3/`，不作为应提交的发布资产。
+本地忽略目录 `build/final-dependency-audit-v4/`，不作为应提交的发布资产。
 
 ## 历史发现与修复
 
@@ -27,10 +27,10 @@ Hatchling 1.31.0 也被精确固定并进入开发锁。正式构建使用锁定
 
 | 锁定闭包 | 服务 | 被审计的发行包 | 已知漏洞记录 | 证据 |
 |---|---:|---:|---:|---|
-| 默认运行时 | OSV | 10 | 0 | `runtime-default-osv.json` |
-| 默认运行时 | PyPI | 10 | 0 | `runtime-default-pypi.json` |
-| 全部 extras + 全部 groups | OSV | 66 | 0 | `all-extras-all-groups-osv.json` |
-| 全部 extras + 全部 groups | PyPI | 66 | 0 | `all-extras-all-groups-pypi.json` |
+| 默认运行时 | OSV | 11 | 0 | `runtime-default-osv.json` |
+| 默认运行时 | PyPI | 11 | 0 | `runtime-default-pypi.json` |
+| 全部 extras + 全部 groups | OSV | 67 | 0 | `all-extras-all-groups-osv.json` |
+| 全部 extras + 全部 groups | PyPI | 67 | 0 | `all-extras-all-groups-pypi.json` |
 
 两种闭包来自同一个通过 `uv lock --check` 的锁文件。审计命令使用 `--no-deps` 和
 `--disable-pip`：依赖解析由 `uv.lock` 和冻结导出完成，`pip-audit` 只查询导出中已列出的
@@ -42,14 +42,14 @@ Hatchling 1.31.0 也被精确固定并进入开发锁。正式构建使用锁定
 uv lock --check
 
 uv export --frozen --no-dev --no-emit-project --no-annotate --no-header `
-  --output-file build/final-dependency-audit-v3/runtime-default.txt
+  --output-file build/final-dependency-audit-v4/runtime-default.txt
 
 uv export --frozen --all-extras --all-groups --no-emit-project --no-annotate --no-header `
-  --output-file build/final-dependency-audit-v3/all-extras-all-groups.txt
+  --output-file build/final-dependency-audit-v4/all-extras-all-groups.txt
 
 $env:PYTHONUTF8 = '1'
 $AUDIT_PY = 'build/dependency-audit/pip-audit-venv/Scripts/python.exe'
-$OUT = 'build/final-dependency-audit-v3'
+$OUT = 'build/final-dependency-audit-v4'
 
 & $AUDIT_PY -m pip_audit -r "$OUT/runtime-default.txt" --no-deps --disable-pip `
   --vulnerability-service osv --format json --output "$OUT/runtime-default-osv.json" `
@@ -68,9 +68,9 @@ $OUT = 'build/final-dependency-audit-v3'
 ## 直接依赖闭包
 
 对 `src/latex_word_review/**/*.py` 做 AST import 清点，并另外检查动态导入后，生产代码直接
-使用的第三方顶层模块是 `jsonschema`、`lxml`、`referencing`、`rfc8785` 和
-`tex2word`。前四项是静态 import；`tex2word` 由受限 worker 通过
-`importlib.import_module("tex2word")` 动态加载。五项均已在 `[project.dependencies]`
+使用的第三方顶层模块是 `jsonschema`、`lxml`、`referencing`、`regex`、`rfc8785` 和
+`tex2word`。前五项是静态 import；`tex2word` 由受限 worker 通过
+`importlib.import_module("tex2word")` 动态加载。六项均已在 `[project.dependencies]`
 显式声明，没有发现依赖某个传递包“顺带安装”的未声明第三方 import。
 
 `pylatexenc` 等默认闭包成员是 `tex2word` 或 JSON Schema 栈的传递依赖，并非本项目源码的
@@ -80,8 +80,8 @@ $OUT = 'build/final-dependency-audit-v3'
 ## 许可证检查
 
 为避免只检查开发环境，审计把 `all-extras-all-groups.txt` 以 `--require-hashes` 同步到全新
-Python 3.12 隔离环境，再读取全部 66 个已安装发行包的 `License-Expression`、`License`
-和许可证 classifier：**66 个均有可识别许可证元数据，未知项为 0**。
+Python 3.12 隔离环境，再读取全部 67 个已安装发行包的 `License-Expression`、`License`
+和许可证 classifier：**67 个均有可识别许可证元数据，未知项为 0**。
 
 直接运行时依赖的许可证为：
 
@@ -90,6 +90,7 @@ Python 3.12 隔离环境，再读取全部 66 个已安装发行包的 `License-
 | `jsonschema` | 4.26.0 | MIT |
 | `lxml` | 6.1.1 | BSD-3-Clause |
 | `referencing` | 0.37.0 | MIT |
+| `regex` | 2026.7.10 | Apache-2.0 AND CNRI-Python |
 | `rfc8785` | 0.1.4 | Apache-2.0 classifier |
 | `tex2word` | 1.0.5 | MIT |
 
@@ -100,13 +101,13 @@ Public Domain、BSD 和 GPL classifier，它只位于发布/开发工具链；`p
 包管理器单独安装，不会被复制进本项目 wheel/sdist；若未来发布容器、冻结可执行文件或
 vendor 依赖，必须按实际再分发内容重新生成 notices 并做逐文件审查。
 
-根 `THIRD_PARTY_NOTICES.md` 已覆盖五个直接运行时依赖、公共 fixture 的模板来源、外部
+根 `THIRD_PARTY_NOTICES.md` 已覆盖六个直接运行时依赖、公共 fixture 的模板来源、外部
 可执行程序边界和开发工具边界。当前项目 wheel/sdist 不内嵌这些 Python 依赖，因此没有因
 本轮锁版本变化新增第三方二进制到发行包。
 
 ## 明确的覆盖边界
 
-- 结果仅反映 2026-07-16 20:28:17–20:28:50 JST 查询时 OSV/PyPI 已收录的记录；服务可能
+- 结果仅反映 2026-07-17 02:24–02:25 JST 查询时 OSV/PyPI 已收录的记录；服务可能
   延迟、纠正或采用不同别名，0 不代表不存在未知、未披露或尚未入库的漏洞。
 - `pip-audit` 按 Python 发行包名称和版本查询，不深审 wheel 内或其链接的原生库。尤其是
   `lxml` 的 libxml2/libxslt 边界，以及可选 `pypdfium2` 的 PDFium 原生组件，需要各自的

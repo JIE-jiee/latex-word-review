@@ -65,7 +65,7 @@ def test_public_demo_routes_everything_else_to_manual(change: dict[str, object])
 
 def test_public_e0_demo_runs_snapshot_through_apply_via_cli(tmp_path: Path) -> None:
     fixture_before = _tree_sha256(FIXTURE_SOURCE)
-    output = tmp_path / "public-e0-demo"
+    output = tmp_path / "中文-public-e0-demo"
     completed = subprocess.run(
         [
             sys.executable,

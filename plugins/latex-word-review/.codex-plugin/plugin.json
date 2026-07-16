@@ -1,0 +1,26 @@
+{
+  "name": "latex-word-review",
+  "version": "0.1.0",
+  "description": "Safely orchestrate an auditable LaTeX-to-Microsoft Word review cycle.",
+  "author": {
+    "name": "LaTeX Word Review contributors",
+    "url": "https://github.com/JIE-jiee/latex-word-review"
+  },
+  "homepage": "https://github.com/JIE-jiee/latex-word-review",
+  "repository": "https://github.com/JIE-jiee/latex-word-review",
+  "license": "Apache-2.0",
+  "keywords": ["latex", "word", "tracked-changes", "review"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "LaTeX Word Review",
+    "shortDescription": "Approval-gated LaTeX and Word review",
+    "longDescription": "Orchestrate immutable export, tracked-change ingestion, per-change approval, exact local LaTeX patches, verification, and audit evidence through the latex-word-review CLI.",
+    "developerName": "LaTeX Word Review contributors",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Prepare this LaTeX project for a tracked-changes review in Microsoft Word.",
+      "Process this returned Word review without changing the original LaTeX or accepting changes automatically."
+    ]
+  }
+}

@@ -28,6 +28,7 @@ from latex_word_review.doctor import diagnose_environment
 from latex_word_review.errors import ContractError, ErrorCode, ExitCode
 from latex_word_review.export import ExportBindings, export_review_docx
 from latex_word_review.hashing import digest_bytes, read_stable_bytes
+from latex_word_review.ids import derive_artifact_id
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
 from latex_word_review.inspection import inspect_docx
 from latex_word_review.jsonio import (
@@ -38,10 +39,18 @@ from latex_word_review.jsonio import (
 )
 from latex_word_review.latex_verify import VerificationPolicy, verify_latex_project
 from latex_word_review.ledger import build_ledger
+from latex_word_review.paths import resolve_within, validate_relative_path
 from latex_word_review.planner import plan_patch
 from latex_word_review.review_server import create_review_server
 from latex_word_review.revisions import build_changeset
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
+from latex_word_review.workflow import (
+    clean_workflow,
+    export_workflow,
+    initialize_workflow,
+    receive_workflow,
+    workflow_status,
+)
 from latex_word_review.workflow_objects import (
     bookmark_bindings_from_source_map,
     build_backend_capabilities_document,
@@ -56,6 +65,7 @@ from latex_word_review.workflow_objects import (
 
 Handler = Callable[[argparse.Namespace], int]
 _CONFIDENTIALITY = ("public_fixture", "local_private", "derived_private")
+_RUN_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _DECISIONS = (
     "pending",
     "accepted",
@@ -68,7 +78,13 @@ _DECISIONS = (
 
 def _emit(document: object, *, error: bool = False) -> None:
     stream = sys.stderr if error else sys.stdout
-    stream.write(canonical_json(document).decode("utf-8") + "\n")
+    data = canonical_json(document) + b"\n"
+    binary = getattr(stream, "buffer", None)
+    if binary is not None:
+        binary.write(data)
+        binary.flush()
+        return
+    stream.write(data.decode("utf-8"))
     stream.flush()
 
 
@@ -76,11 +92,126 @@ def _mkdir_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    junction_probe = getattr(path, "is_junction", None)
+    try:
+        return path.is_symlink() or bool(junction_probe is not None and junction_probe())
+    except OSError as exc:
+        raise ContractError(
+            ErrorCode.PATH_LINK_ESCAPE,
+            "run artifact link state is unavailable",
+        ) from exc
+
+
+def _run_manifest_artifacts(
+    output: Path,
+    specifications: Sequence[Sequence[str]],
+) -> list[dict[str, Any]]:
+    if not specifications:
+        return []
+    root = output.parent
+    if _is_link_or_junction(root):
+        raise ContractError(ErrorCode.PATH_LINK_ESCAPE, "run artifact root cannot be a link")
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "run artifact root is unavailable") from exc
+    if not resolved_root.is_dir():
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "run artifact root must be a directory")
+
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for specification in specifications:
+        if len(specification) != 4:
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "run artifact requires path, role, media type and confidentiality",
+            )
+        raw_path, role, media_type, confidentiality = specification
+        path = validate_relative_path(raw_path)
+        if path in seen:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "run artifact paths must be unique")
+        seen.add(path)
+        if not role or not media_type or confidentiality not in _CONFIDENTIALITY:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "run artifact metadata is invalid")
+        candidate = resolved_root
+        for component in path.split("/"):
+            candidate /= component
+            if _is_link_or_junction(candidate):
+                raise ContractError(
+                    ErrorCode.PATH_LINK_ESCAPE,
+                    "run artifact path crosses a link or junction",
+                )
+        artifact_path = resolve_within(resolved_root, path)
+        data = read_stable_bytes(artifact_path, max_bytes=_RUN_ARTIFACT_MAX_BYTES)
+        digest = digest_bytes(data)
+        artifacts.append(
+            {
+                "artifact_id": derive_artifact_id(digest.sha256),
+                "path": path,
+                "path_base": "run_root",
+                "role": role,
+                "media_type": media_type,
+                "size_bytes": digest.size_bytes,
+                "sha256": digest.sha256,
+                "immutable": True,
+                "confidentiality": confidentiality,
+            }
+        )
+    artifacts.sort(key=lambda item: cast("str", item["path"]))
+    return artifacts
+
+
 def _handle_new_run(args: argparse.Namespace) -> int:
     from latex_word_review.ids import new_run_id
 
     del args
     _emit({"run_id": new_run_id()})
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_workflow_init(args: argparse.Namespace) -> int:
+    result = initialize_workflow(
+        args.source,
+        args.run_root,
+        main_document=args.main,
+        confidentiality=args.confidentiality,
+        generated_at=args.generated_at,
+    )
+    _emit(result)
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_workflow_export(args: argparse.Namespace) -> int:
+    result = export_workflow(
+        args.run_root,
+        backend=args.backend,
+        timeout_s=args.timeout,
+        confidentiality=args.confidentiality,
+        generated_at=args.generated_at,
+    )
+    _emit(result)
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_workflow_receive(args: argparse.Namespace) -> int:
+    result = receive_workflow(
+        args.run_root,
+        args.returned_docx,
+        confidentiality=args.confidentiality,
+        generated_at=args.generated_at,
+    )
+    _emit(result)
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_workflow_status(args: argparse.Namespace) -> int:
+    _emit(workflow_status(args.run_root))
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_workflow_clean(args: argparse.Namespace) -> int:
+    _emit(clean_workflow(args.run_root, execute=args.execute))
     return int(ExitCode.SUCCESS)
 
 
@@ -256,6 +387,8 @@ def _handle_ingest(args: argparse.Namespace) -> int:
     )
     changeset = build_changeset(
         archive.docx_path,
+        export_baseline_path=args.baseline_docx,
+        export_baseline_sha256=cast("str", map_payload["review_docx_sha256"]),
         run_id=run_id,
         source_manifest_sha256=source_sha,
         source_map_sha256=compute_payload_sha256(source_map),
@@ -518,15 +651,17 @@ def _handle_run_manifest(args: argparse.Namespace) -> int:
     backends = [
         read_contract_file(path, expected_schema="BackendCapabilities") for path in args.backend
     ]
+    _mkdir_parent(args.output)
+    artifacts = _run_manifest_artifacts(args.output, args.artifact)
     document = build_run_manifest_document(
         source_manifest,
         objects=objects,
         backend_capabilities=backends,
+        artifacts=artifacts,
         current_phase=args.phase,
         status=args.status,
         generated_at=args.generated_at,
     )
-    _mkdir_parent(args.output)
     write_new_json(args.output, document, contract=True)
     _emit({"run_manifest_payload_sha256": compute_payload_sha256(document)})
     return int(ExitCode.SUCCESS)
@@ -619,6 +754,60 @@ def build_parser() -> argparse.ArgumentParser:
     new_run = commands.add_parser("new-run", help="generate a new UUIDv7 run ID")
     new_run.set_defaults(handler=_handle_new_run)
 
+    workflow = commands.add_parser(
+        "workflow",
+        help="run the fixed-layout, no-clobber Windows review workflow",
+    )
+    workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_init = workflow_commands.add_parser(
+        "init",
+        help="create a new run root and immutable source snapshot",
+    )
+    workflow_init.add_argument("source", type=Path)
+    workflow_init.add_argument("run_root", type=Path)
+    workflow_init.add_argument("--main")
+    workflow_init.add_argument(
+        "--confidentiality", choices=_CONFIDENTIALITY, default="derived_private"
+    )
+    _add_generated_at(workflow_init)
+    workflow_init.set_defaults(handler=_handle_workflow_init)
+    workflow_export = workflow_commands.add_parser(
+        "export",
+        help="create the immutable Word review baseline using fixed run paths",
+    )
+    workflow_export.add_argument("run_root", type=Path)
+    workflow_export.add_argument("--backend", choices=("tex2word", "pandoc"), default="tex2word")
+    workflow_export.add_argument("--timeout", type=float, default=60.0)
+    workflow_export.add_argument(
+        "--confidentiality", choices=_CONFIDENTIALITY, default="derived_private"
+    )
+    _add_generated_at(workflow_export)
+    workflow_export.set_defaults(handler=_handle_workflow_export)
+    workflow_receive = workflow_commands.add_parser(
+        "receive",
+        help="archive and ingest one returned Word original against the export baseline",
+    )
+    workflow_receive.add_argument("run_root", type=Path)
+    workflow_receive.add_argument("returned_docx", type=Path)
+    workflow_receive.add_argument(
+        "--confidentiality", choices=_CONFIDENTIALITY, default="local_private"
+    )
+    _add_generated_at(workflow_receive)
+    workflow_receive.set_defaults(handler=_handle_workflow_receive)
+    workflow_status_command = workflow_commands.add_parser(
+        "status",
+        help="verify sealed objects and report the exact next safe action",
+    )
+    workflow_status_command.add_argument("run_root", type=Path)
+    workflow_status_command.set_defaults(handler=_handle_workflow_status)
+    workflow_clean = workflow_commands.add_parser(
+        "clean",
+        help="list tool-owned stages; remove them only with --execute",
+    )
+    workflow_clean.add_argument("run_root", type=Path)
+    workflow_clean.add_argument("--execute", action="store_true")
+    workflow_clean.set_defaults(handler=_handle_workflow_clean)
+
     doctor = commands.add_parser("doctor", help="diagnose tools without installing anything")
     doctor.add_argument("--cwd", type=Path, default=Path.cwd())
     doctor.set_defaults(handler=_handle_doctor)
@@ -672,6 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("source_map", type=Path)
     ingest.add_argument("reader_capabilities", type=Path)
     ingest.add_argument("output", type=Path)
+    ingest.add_argument(
+        "--baseline-docx",
+        required=True,
+        type=Path,
+        help="immutable exported review DOCX bound by the SourceMap",
+    )
     ingest.add_argument("--artifact-path", default="returned/returned-original.docx")
     _add_generated_at(ingest)
     ingest.set_defaults(handler=_handle_ingest)
@@ -765,6 +960,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_manifest.add_argument("output", type=Path)
     run_manifest.add_argument("--object", type=Path, action="append", default=[])
     run_manifest.add_argument("--backend", type=Path, action="append", default=[])
+    run_manifest.add_argument(
+        "--artifact",
+        action="append",
+        nargs=4,
+        metavar=("PATH", "ROLE", "MEDIA_TYPE", "CONFIDENTIALITY"),
+        default=[],
+        help="register a stable file relative to the output directory",
+    )
     run_manifest.add_argument(
         "--phase",
         choices=(

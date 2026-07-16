@@ -15,10 +15,139 @@ from latex_word_review.paths import resolve_within
 
 SOURCE_UNIT_PROFILE_NAME = "conservative-plain-text"
 SOURCE_UNIT_PROFILE_VERSION = "1"
+TEXT_PROVENANCE_PROFILE_NAME = "normalized-text-to-utf8"
+TEXT_PROVENANCE_PROFILE_VERSION = "1"
 
 _ENVIRONMENT_RE = re.compile(r"\\(begin|end)\s*\{([A-Za-z*]+)\}")
 _UNSAFE_ASCII = frozenset("\\$%{}&#_^~")
 _UNSAFE_SEQUENCES = ("--", "``", "''")
+
+
+@dataclass(frozen=True, slots=True)
+class TextProvenanceSegment:
+    """One reversible or explicitly lossy normalized-text/source span."""
+
+    review_start: int
+    review_end: int
+    source_start_byte: int
+    source_end_byte: int
+    transformation: str
+    auto_patchable: bool
+
+    def as_contract(self) -> dict[str, object]:
+        return {
+            "review_start": self.review_start,
+            "review_end": self.review_end,
+            "source_start_byte": self.source_start_byte,
+            "source_end_byte": self.source_end_byte,
+            "transformation": self.transformation,
+            "auto_patchable": self.auto_patchable,
+        }
+
+
+def _utf8_boundaries(text: str) -> tuple[int, ...]:
+    boundaries = [0]
+    total = 0
+    for character in text:
+        total += len(character.encode("utf-8"))
+        boundaries.append(total)
+    return tuple(boundaries)
+
+
+def build_text_provenance(raw: bytes) -> tuple[str, tuple[TextProvenanceSegment, ...]]:
+    """Map normalized review characters to relative UTF-8 source spans.
+
+    Runs of Unicode whitespace intentionally remain non-patchable because the
+    review representation collapses them to one ASCII space.  Non-whitespace
+    runs are identity segments and can be narrowed further at ingest time.
+    """
+
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "source unit must be valid UTF-8") from exc
+    boundaries = _utf8_boundaries(text)
+    tokens: list[tuple[bool, int, int]] = []
+    start = 0
+    while start < len(text):
+        whitespace = text[start].isspace()
+        end = start + 1
+        while end < len(text) and text[end].isspace() == whitespace:
+            end += 1
+        tokens.append((whitespace, start, end))
+        start = end
+
+    review_parts: list[str] = []
+    segments: list[TextProvenanceSegment] = []
+    review_cursor = 0
+    for whitespace, char_start, char_end in tokens:
+        source_start = boundaries[char_start]
+        source_end = boundaries[char_end]
+        if whitespace:
+            rendered = " "
+            if text[char_start:char_end] == " ":
+                transformation = "identity"
+                auto_patchable = True
+            else:
+                transformation = "whitespace-collapse"
+                auto_patchable = False
+        else:
+            rendered = text[char_start:char_end]
+            transformation = "identity"
+            auto_patchable = True
+        review_parts.append(rendered)
+        next_cursor = review_cursor + len(rendered)
+        segment = TextProvenanceSegment(
+            review_start=review_cursor,
+            review_end=next_cursor,
+            source_start_byte=source_start,
+            source_end_byte=source_end,
+            transformation=transformation,
+            auto_patchable=auto_patchable,
+        )
+        if (
+            segments
+            and segments[-1].transformation == transformation
+            and segments[-1].auto_patchable is auto_patchable
+            and segments[-1].review_end == segment.review_start
+            and segments[-1].source_end_byte == segment.source_start_byte
+        ):
+            previous = segments[-1]
+            segments[-1] = TextProvenanceSegment(
+                review_start=previous.review_start,
+                review_end=segment.review_end,
+                source_start_byte=previous.source_start_byte,
+                source_end_byte=segment.source_end_byte,
+                transformation=transformation,
+                auto_patchable=auto_patchable,
+            )
+        else:
+            segments.append(segment)
+        review_cursor = next_cursor
+
+    normalized = "".join(review_parts).strip()
+    if normalized != normalize_review_text(text):
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "text provenance normalization differs")
+    if normalized != "".join(review_parts):
+        raise ContractError(
+            ErrorCode.INTERNAL_INVARIANT,
+            "source unit provenance unexpectedly contains edge whitespace",
+        )
+    return normalized, tuple(segments)
+
+
+def text_provenance_profile() -> dict[str, str]:
+    configuration = {
+        "name": TEXT_PROVENANCE_PROFILE_NAME,
+        "version": TEXT_PROVENANCE_PROFILE_VERSION,
+        "normalization": "unicode-whitespace-runs-to-ascii-space",
+        "automatic_transformations": ["identity"],
+    }
+    return {
+        "name": TEXT_PROVENANCE_PROFILE_NAME,
+        "version": TEXT_PROVENANCE_PROFILE_VERSION,
+        "configuration_sha256": sha256_canonical(configuration),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +166,7 @@ class SourceUnit:
     end_column: int
     ordinal: int
     neighbor_unit_ids: tuple[str, ...] = ()
+    text_provenance: tuple[TextProvenanceSegment, ...] = ()
 
     def source_location(self) -> dict[str, object]:
         return {
@@ -162,8 +292,7 @@ def _scan_file(
         block = []
         block_invalid = False
         raw = data[start:end]
-        text = raw.decode("utf-8")
-        normalized = normalize_review_text(text)
+        normalized, provenance = build_text_provenance(raw)
         if not _plain_candidate(normalized):
             return
         slice_digest = digest_bytes(raw).sha256
@@ -193,6 +322,7 @@ def _scan_file(
                 start_column=start_column,
                 end_column=end_column,
                 ordinal=0,
+                text_provenance=provenance,
             )
         )
 
@@ -305,9 +435,14 @@ def review_ir_payload(
 __all__ = [
     "SOURCE_UNIT_PROFILE_NAME",
     "SOURCE_UNIT_PROFILE_VERSION",
+    "TEXT_PROVENANCE_PROFILE_NAME",
+    "TEXT_PROVENANCE_PROFILE_VERSION",
     "SourceUnit",
+    "TextProvenanceSegment",
+    "build_text_provenance",
     "normalize_review_text",
     "review_ir_payload",
     "scan_source_units",
     "source_unit_profile",
+    "text_provenance_profile",
 ]

@@ -109,6 +109,7 @@ verification/latexdiff.tex             # only after real tool verification
 verification/latexdiff.pdf             # only after real tool verification
 ledger/ledger.json                     # only after real tool verification
 ledger/ledger.html                     # only after real tool verification
+delivery/run-manifest.json             # binds ledger and verification deliverables
 audit.zip                              # only after real tool verification
 ```
 
@@ -122,7 +123,7 @@ For deeper inspection:
 uv run --frozen latex-word-review validate build/my-public-e0-run/objects/changeset.json --schema ChangeSet
 uv run --frozen latex-word-review validate build/my-public-e0-run/objects/approval-final.json --schema ApprovalSet
 uv run --frozen latex-word-review validate build/my-public-e0-run/plan/patch-plan.json --schema PatchPlan
-uv run --frozen latex-word-review verify-bundle build/my-public-e0-run/audit.zip --run-manifest build/my-public-e0-run/objects/run-manifest.json --verification build/my-public-e0-run/verification/verification-report.json
+uv run --frozen latex-word-review verify-bundle build/my-public-e0-run/audit.zip --run-manifest build/my-public-e0-run/delivery/run-manifest.json --verification build/my-public-e0-run/verification/verification-report.json
 ```
 
 The last command applies only to a full verified run.

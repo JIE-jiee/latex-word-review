@@ -22,13 +22,17 @@ from latex_word_review.canonical import (
 )
 from latex_word_review.contracts import load_contract_json, validate_contract
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.hashing import digest_file
 from latex_word_review.ids import new_run_id, stable_id
 from latex_word_review.revisions import BookmarkBinding, build_changeset
+from latex_word_review.source_units import build_text_provenance
+from latex_word_review.word_semantics import project_word_semantics
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RETURNED_DOCX = (
     PROJECT_ROOT / "tests" / "fixtures" / "e0-minimal-paper" / "returned" / "returned-reviewed.docx"
 )
+BASE_DOCX = PROJECT_ROOT / "tests" / "fixtures" / "e0-minimal-paper" / "base" / "review-base.docx"
 RUN_ID = new_run_id(timestamp_ms=1_750_000_000_000, random_bits=7)
 HASH_A = "sha256:" + "a" * 64
 ACTOR = {"id": "synthetic-author", "display_name": "Synthetic Author"}
@@ -40,11 +44,22 @@ TIME_2 = "2026-07-16T13:01:00+09:00"
 def changeset() -> dict[str, Any]:
     if not RETURNED_DOCX.is_file():
         pytest.skip("public E0 fixture is intentionally absent from this distribution")
+    projection = project_word_semantics(BASE_DOCX)
+    bookmark = next(
+        bookmark
+        for story in projection.stories
+        for bookmark in story.bookmarks
+        if bookmark.name == "txr_insert_001"
+    )
+    assert bookmark.original is not None
+    raw = bookmark.original.text.encode("utf-8")
+    review_text, provenance = build_text_provenance(raw)
+    assert review_text == bookmark.original.text
     location = {
         "path": "source/main.tex",
         "start_byte": 0,
-        "end_byte": 0,
-        "slice_sha256": sha256_bytes(b""),
+        "end_byte": len(raw),
+        "slice_sha256": sha256_bytes(raw),
         "encoding": "utf-8",
         "newline": "lf",
         "start_line": 1,
@@ -55,9 +70,14 @@ def changeset() -> dict[str, Any]:
     binding = BookmarkBinding(
         unit_id="unit_" + "1" * 32,
         source_location=location,
+        normalized_text_sha256=sha256_bytes(review_text.encode("utf-8")),
+        review_length=len(review_text),
+        text_provenance=provenance,
     )
     return build_changeset(
         RETURNED_DOCX,
+        export_baseline_path=BASE_DOCX,
+        export_baseline_sha256=digest_file(BASE_DOCX, max_bytes=128 * 1024 * 1024).sha256,
         run_id=RUN_ID,
         source_manifest_sha256=HASH_A,
         source_map_sha256=HASH_A,

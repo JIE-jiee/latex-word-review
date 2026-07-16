@@ -1,6 +1,8 @@
 # Release artifact evidence
 
-Each successful release-candidate run uploads the two Python distributions plus four evidence files.
+Each successful release-candidate run uploads the two Python distributions, the four core package
+evidence files below, public-fixture QA JSON, and Windows real-TeX JUnit/toolchain records. The
+Actions artifact is retained for 14 days and is not a GitHub Release.
 
 | File | Meaning |
 |---|---|
@@ -36,6 +38,14 @@ bundled by that CPython installation; this bootstrap installer is not part of th
 runtime closure or SBOM and is allowed to install only the already local, hash-bound wheel set plus
 the separately checked project wheel. It performs no dependency resolution or source build.
 
+The sdist also ships the canonical Codex Skill, the Plugin manifest and embedded Skill, and the
+repository marketplace. Archive verification requires the canonical and embedded Skill files to be
+byte-identical, requires the marketplace to bind exactly the packaged Plugin, validates the Plugin
+identity/skills path, and rejects missing companion payloads or TODO placeholders. These files are
+distribution payload, not part of the wheel's Python runtime closure or CycloneDX SBOM. A successful
+sdist check is not a Codex installation proof; isolated marketplace/Plugin clean install and a new
+Agent forward test remain human promotion gates.
+
 ## Trust boundary
 
 The provenance is **unsigned** and repository-defined. Although it uses the SLSA v1 predicate URI
@@ -63,6 +73,6 @@ aliases, archive traversal/links/devices, ZIP symlinks, decompression/member/exp
 violations, undeclared binary/top-level payloads, forbidden runtime, test, or fixture material,
 private-path/secret patterns in text members,
 duplicate or drifted identity/Requires-Python/runtime/extra metadata, license/schema loss, checksum
-drift, and provenance subject drift. The sdist is an
-installation source archive, not a partial test archive; the complete tests and public fixture are
-distributed through the matching GitHub source tree.
+drift, and provenance subject drift. The sdist is an installation source archive, not a partial
+test archive; the complete tests and public fixture are distributed through the matching GitHub
+source tree.

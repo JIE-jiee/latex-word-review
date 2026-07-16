@@ -196,13 +196,39 @@ def test_resolution_policy_matrix_covers_all_fail_closed_reasons() -> None:
 
 
 def test_plain_text_and_range_policy_handles_insert_delete_and_boundaries() -> None:
-    blocked = planner_module._replacement_blocked
-    assert blocked("same", "same", "replacement")
-    assert blocked("line\n", "line", "replacement")
-    assert blocked("plain", "50%", "replacement")
-    assert blocked("unexpected", "insert", "insertion")
-    assert blocked("delete", "replacement", "deletion")
-    assert not blocked("plain", "safe", "replacement")
+    base = cast(
+        "dict[str, Any]",
+        copy.deepcopy(
+            _changeset("plain", [("replacement", 0, 5, "safe")])["payload"]["changes"][0]
+        ),
+    )
+
+    def eligibility(
+        before: str,
+        replacement: str,
+        kind: str = "replacement",
+        *,
+        prefix: str = "L",
+        suffix: str = "R",
+    ) -> planner_module.PatchEligibility:
+        change = copy.deepcopy(base)
+        change.update({"kind": kind, "before": before, "after": replacement})
+        return planner_module.evaluate_patch_eligibility(
+            change,
+            source_prefix=prefix,
+            source_suffix=suffix,
+        )
+
+    assert eligibility("same", "same").block_code is ErrorCode.PATCH_UNSAFE_KIND
+    assert eligibility("line\n", "line").block_code is ErrorCode.PATCH_UNSAFE_KIND
+    assert eligibility("plain", "50%").block_code is ErrorCode.PATCH_UNSAFE_KIND
+    assert eligibility("unexpected", "insert", "insertion").block_code is (
+        ErrorCode.PATCH_UNSAFE_KIND
+    )
+    assert eligibility("delete", "replacement", "deletion").block_code is (
+        ErrorCode.PATCH_UNSAFE_KIND
+    )
+    assert eligibility("plain", "safe").eligible
 
     overlap = planner_module._ranges_overlap
     assert not overlap(

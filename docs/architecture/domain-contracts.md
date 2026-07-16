@@ -477,12 +477,15 @@ Decision 字段：
 | `run_manifest_sha256` | `Sha256` | 最终 RunManifest payload |
 | `verification_report_sha256` | `Sha256` | VerificationReport payload |
 | `content_classification` | enum | `public_fixture`、`local_private` |
-| `entries` | array | 规范化相对路径、角色、大小、字节 SHA、来源对象 |
+| `entries` | array | 规范化相对路径、角色、大小、字节 SHA、来源对象和 ArtifactRef selector |
 | `excluded_entries` | array | 原始 Word、私有中间文件等未包含原因 |
 | `privacy_scan` | object | 状态、规则版本、报告 ArtifactRef |
 | `manifest_sha256` | `Sha256` | entries 规范化清单哈希 |
 | `reproducibility` | object | ZIP 顺序、时间戳策略和工具版本 |
 
+普通 entry 的 selector 必须解析到显式收录、且获 RunManifest 授权的 sealed source contract
+payload 内 immutable `ArtifactRef`；extensions 不提供 artifact authority。`$document` 只绑定合同自身的 canonical sealed bytes。Bundle
+必须显式收录其准确 RunManifest 与 VerificationReport，离线验证据此重建完整来源链。
 归档文件自身 SHA-256 由外层 RunManifest 的 ArtifactRef 或 `.sha256` sidecar 记录，避免“归档内部包含自身哈希”的循环。Bundle 默认不为公开发布脱敏；含论文正文时必须标为 `local_private`。
 
 ## 6. 审阅和运行状态机
@@ -572,7 +575,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "src_aaaaaaaaaaaaaaaaaaaaaaaaaa",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-15T08:00:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
     "payload": {
       "source_manifest_id": "src_aaaaaaaaaaaaaaaaaaaaaaaaaa",
       "main_document": "main.tex",
@@ -592,7 +595,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "ir_14141414141414141414141414",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-15T08:01:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:1515151515151515151515151515151515151515151515151515151515151515"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:1515151515151515151515151515151515151515151515151515151515151515"},
     "payload": {
       "source_manifest_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
       "source_tree_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -624,7 +627,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "map_21212121212121212121212121",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-15T08:02:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
     "payload": {
       "source_manifest_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
       "review_ir_sha256": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
@@ -653,7 +656,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "export_282828282828282828282828",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-15T08:03:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:2929292929292929292929292929292929292929292929292929292929292929"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": "backend-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:2929292929292929292929292929292929292929292929292929292929292929"},
     "payload": {
       "status": "success",
       "source_manifest_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
@@ -675,7 +678,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "changes_333333333333333333333333",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-16T09:10:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": "revision-reader-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:3434343434343434343434343434343434343434343434343434343434343434"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": "revision-reader-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:3434343434343434343434343434343434343434343434343434343434343434"},
     "payload": {
       "returned_original": {"artifact_id": "art_35353535353535353535353535", "path": "ingest/returned-original.docx", "path_base": "run_root", "role": "returned_original", "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "size_bytes": 41000, "sha256": "sha256:3535353535353535353535353535353535353535353535353535353535353535", "immutable": true, "confidentiality": "local_private"},
       "source_manifest_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
@@ -729,7 +732,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "apr_43434343434343434343434343",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-16T09:30:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
     "payload": {
       "approval_set_id": "apr_43434343434343434343434343",
       "revision": 1,
@@ -754,7 +757,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
     "object_id": "plan_4747474747474747474747474",
     "run_id": "run_019b0000-0000-7000-8000-000000000001",
     "generated_at": "2026-01-16T09:31:00+08:00",
-    "producer": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4848484848484848484848484848484848484848484848484848484848484848"},
+    "producer": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": null, "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4848484848484848484848484848484848484848484848484848484848484848"},
     "payload": {
       "patch_plan_id": "plan_4747474747474747474747474",
       "status": "ready",
@@ -764,7 +767,7 @@ PatchPlan 是不可变计划，不在 apply 后改写状态。apply/verify 的�
       "changeset_sha256": "sha256:4141414141414141414141414141414141414141414141414141414141414141",
       "approval_set_sha256": "sha256:4545454545454545454545454545454545454545454545454545454545454545",
       "policy_sha256": "sha256:4949494949494949494949494949494949494949494949494949494949494949",
-      "planner": {"name": "latex-word-review", "version": "0.1.0b1", "interface_version": "planner-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4848484848484848484848484848484848484848484848484848484848484848"},
+      "planner": {"name": "latex-word-review", "version": "0.1.0b2", "interface_version": "planner-v1alpha1", "distribution": "wheel", "executable_sha256": null, "configuration_sha256": "sha256:4848484848484848484848484848484848484848484848484848484848484848"},
       "operations": [
         {
           "operation_id": "op_50c07e7e5af38d4c",

@@ -20,7 +20,7 @@ from latex_word_review.ids import derive_artifact_id, derive_source_manifest_id,
 from latex_word_review.paths import validate_relative_path
 from latex_word_review.planner import POLICY_SHA256
 from latex_word_review.revisions import BookmarkBinding
-from latex_word_review.source_units import review_ir_payload
+from latex_word_review.source_units import TextProvenanceSegment, review_ir_payload
 
 Confidentiality = Literal["public_fixture", "local_private", "derived_private"]
 RunPhase = Literal[
@@ -104,6 +104,7 @@ def build_run_manifest_document(
     *,
     objects: Sequence[Mapping[str, Any]],
     backend_capabilities: Sequence[Mapping[str, Any]] = (),
+    artifacts: Sequence[Mapping[str, Any]] = (),
     current_phase: RunPhase = "verified",
     status: Literal["active", "blocked", "failed", "completed", "aborted"] = "completed",
     generated_at: str | None = None,
@@ -157,6 +158,38 @@ def build_run_manifest_document(
         "completed": "completed",
         "aborted": "failed",
     }[status]
+    collected_artifacts = _collect_artifacts(all_documents)
+    explicit_keys: set[tuple[object, object]] = set()
+    for value in artifacts:
+        artifact = dict(value)
+        artifact_key = (artifact.get("path_base"), artifact.get("path"))
+        if artifact_key in explicit_keys:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "run artifact paths must be unique")
+        explicit_keys.add(artifact_key)
+        existing = next(
+            (
+                item
+                for item in collected_artifacts
+                if (item.get("path_base"), item.get("path")) == artifact_key
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing != artifact:
+                raise ContractError(
+                    ErrorCode.HASH_SOURCE_MISMATCH,
+                    "run artifact conflicts with an existing workflow artifact",
+                )
+            continue
+        collected_artifacts.append(artifact)
+    collected_artifacts.sort(
+        key=lambda item: (
+            cast("str", item["path_base"]),
+            cast("str", item["path"]),
+            cast("str", item["sha256"]),
+        )
+    )
+
     payload_without_id = {
         "manifest_revision": 1,
         "previous_manifest_payload_sha256": None,
@@ -180,7 +213,7 @@ def build_run_manifest_document(
                 "diagnostic_ids": [],
             }
         ],
-        "artifacts": _collect_artifacts(all_documents),
+        "artifacts": collected_artifacts,
         "object_bindings": bindings,
         "source_origin_pre_sha256": source_payload["source_tree_sha256"],
         "source_origin_post_sha256": source_payload["source_tree_sha256"],
@@ -371,9 +404,25 @@ def bookmark_bindings_from_source_map(
             continue
         if name in result:
             raise ContractError(ErrorCode.MAP_AMBIGUOUS, "SourceMap repeats a bookmark name")
+        fingerprint = cast("Mapping[str, Any]", mapping["source_fingerprint"])
+        provenance = cast("Mapping[str, Any]", mapping["text_provenance"])
+        segments = cast("list[Mapping[str, Any]]", provenance["segments"])
         result[name] = BookmarkBinding(
             unit_id=cast("str", mapping["unit_id"]),
             source_location=cast("Mapping[str, Any]", mapping["source_location"]),
+            normalized_text_sha256=cast("str", fingerprint["normalized_text_sha256"]),
+            review_length=cast("int", provenance["review_length"]),
+            text_provenance=tuple(
+                TextProvenanceSegment(
+                    review_start=cast("int", segment["review_start"]),
+                    review_end=cast("int", segment["review_end"]),
+                    source_start_byte=cast("int", segment["source_start_byte"]),
+                    source_end_byte=cast("int", segment["source_end_byte"]),
+                    transformation=cast("str", segment["transformation"]),
+                    auto_patchable=cast("bool", segment["auto_patchable"]),
+                )
+                for segment in segments
+            ),
         )
     return result
 

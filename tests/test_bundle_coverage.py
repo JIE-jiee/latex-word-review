@@ -21,17 +21,22 @@ from latex_word_review.bundle import (
     object_binding,
     verify_audit_bundle,
 )
-from latex_word_review.canonical import canonical_json, seal_envelope
+from latex_word_review.canonical import canonical_json, seal_envelope, sha256_canonical
 from latex_word_review.errors import ContractError, ErrorCode
-from latex_word_review.ids import stable_id
+from latex_word_review.hashing import digest_bytes
+from latex_word_review.ids import derive_artifact_id, stable_id
 from tests.test_contracts import _golden_contracts
-from tests.test_ledger_bundle import _seal_verification_extensions
+from tests.test_ledger_bundle import _bundle_artifact, _seal_verification_extensions
 
 GENERATED_AT = "2026-07-16T15:00:00+09:00"
 
 
 def _documents() -> dict[str, dict[str, Any]]:
-    return _seal_verification_extensions(_golden_contracts())
+    documents = _seal_verification_extensions(_golden_contracts())
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["object_bindings"] = [object_binding(documents["VerificationReport"])]
+    documents["RunManifest"] = seal_envelope(run_manifest)
+    return documents
 
 
 def _assert_error(code: ErrorCode, operation: Callable[[], object]) -> None:
@@ -40,24 +45,55 @@ def _assert_error(code: ErrorCode, operation: Callable[[], object]) -> None:
     assert raised.value.code is code
 
 
-def _source_and_item(tmp_path: Path) -> tuple[Path, BundleItem]:
-    documents = _documents()
+def _bound_source(
+    tmp_path: Path,
+    documents: dict[str, dict[str, Any]],
+    files: list[tuple[str, str, bytes]],
+) -> tuple[Path, tuple[BundleItem, ...]]:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "evidence.json").write_bytes(b'{"safe":true}\n')
-    return source, BundleItem("evidence.json", "evidence", documents["ChangeSet"])
+    artifacts = [_bundle_artifact(path, role, data) for path, role, data in files]
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["artifacts"] = artifacts
+    run_manifest = seal_envelope(run_manifest)
+    documents["RunManifest"] = run_manifest
+    for path, _role, data in files:
+        (source / path).write_bytes(data)
+    (source / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
+    verification = documents["VerificationReport"]
+    (source / "verification-report.json").write_bytes(canonical_json(verification) + b"\n")
+    items = [
+        BundleItem(path, role, run_manifest, artifact["artifact_id"])
+        for (path, role, _data), artifact in zip(files, artifacts, strict=True)
+    ]
+    items.extend(
+        (
+            BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+            BundleItem(
+                "verification-report.json",
+                "verification_report",
+                verification,
+                "$document",
+            ),
+        )
+    )
+    return source, tuple(items)
+
+
+def _source_and_items(
+    tmp_path: Path, documents: dict[str, dict[str, Any]]
+) -> tuple[Path, tuple[BundleItem, ...]]:
+    return _bound_source(tmp_path, documents, [("evidence.json", "evidence", b'{"safe":true}\n')])
 
 
 def _make_valid_bundle(tmp_path: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
     documents = _documents()
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "evidence.json").write_bytes(b'{"safe":true}\n')
+    source, allowlist = _source_and_items(tmp_path, documents)
     destination = tmp_path / "audit.zip"
     create_audit_bundle(
         source,
         destination,
-        allowlist=[BundleItem("evidence.json", "evidence", documents["ChangeSet"])],
+        allowlist=allowlist,
         run_manifest=documents["RunManifest"],
         verification_report=documents["VerificationReport"],
         content_classification="public_fixture",
@@ -84,6 +120,211 @@ def _reseal_bundle_document(document: dict[str, Any]) -> dict[str, Any]:
     return seal_envelope(document)
 
 
+def test_bundle_rejects_tampered_file_with_valid_source_contract(tmp_path: Path) -> None:
+    documents = _documents()
+    source, allowlist = _source_and_items(tmp_path, documents)
+    (source / "evidence.json").write_bytes(b'{"tampered":true}\n')
+    _assert_error(
+        ErrorCode.BUNDLE_HASH_MISMATCH,
+        lambda: create_audit_bundle(
+            source,
+            tmp_path / "tampered-source.zip",
+            allowlist=allowlist,
+            run_manifest=documents["RunManifest"],
+            verification_report=documents["VerificationReport"],
+            content_classification="public_fixture",
+            generated_at=GENERATED_AT,
+        ),
+    )
+
+
+def test_offline_verifier_rejects_resealed_member_not_bound_by_artifact_ref(
+    tmp_path: Path,
+) -> None:
+    valid, _documents_value = _make_valid_bundle(tmp_path)
+    members = _members(valid)
+    document = cast(
+        "dict[str, Any]",
+        __import__("json").loads(members[bundle_module._AUDIT_MANIFEST_PATH]),
+    )
+    payload = cast("dict[str, Any]", document["payload"])
+    entries = cast("list[dict[str, Any]]", payload["entries"])
+    evidence = next(entry for entry in entries if entry["path"] == "evidence.json")
+    tampered = b'{"tampered":true}\n'
+    tampered_digest = digest_bytes(tampered)
+    members["evidence.json"] = tampered
+    evidence["size_bytes"] = tampered_digest.size_bytes
+    evidence["sha256"] = tampered_digest.sha256
+    payload["manifest_sha256"] = sha256_canonical(entries)
+
+    privacy_report = bundle_module._privacy_report(
+        {cast("str", entry["path"]): members[cast("str", entry["path"])] for entry in entries}
+    )
+    privacy_bytes = canonical_json(privacy_report) + b"\n"
+    members[bundle_module._PRIVACY_REPORT_PATH] = privacy_bytes
+    privacy_artifact = cast("dict[str, Any]", payload["privacy_scan"]["report"])
+    privacy_digest = digest_bytes(privacy_bytes)
+    privacy_artifact["size_bytes"] = privacy_digest.size_bytes
+    privacy_artifact["sha256"] = privacy_digest.sha256
+    payload["privacy_scan"]["status"] = privacy_report["status"]
+
+    forged = tmp_path / "resealed-unbound.zip"
+    document = _reseal_bundle_document(document)
+    members[bundle_module._AUDIT_MANIFEST_PATH] = canonical_json(document) + b"\n"
+    bundle_module._write_zip(forged, members)
+    _assert_error(ErrorCode.BUNDLE_HASH_MISMATCH, lambda: verify_audit_bundle(forged))
+
+
+def test_bundle_rejects_missing_artifact_selector(tmp_path: Path) -> None:
+    documents = _documents()
+    source, allowlist = _source_and_items(tmp_path, documents)
+    evidence = allowlist[0]
+    wrong_selector = derive_artifact_id(digest_bytes(b"absent artifact").sha256)
+    rejected = (
+        BundleItem(evidence.path, evidence.role, evidence.source_object, wrong_selector),
+        *allowlist[1:],
+    )
+    _assert_error(
+        ErrorCode.BUNDLE_HASH_MISMATCH,
+        lambda: create_audit_bundle(
+            source,
+            tmp_path / "wrong-selector.zip",
+            allowlist=rejected,
+            run_manifest=documents["RunManifest"],
+            verification_report=documents["VerificationReport"],
+            content_classification="public_fixture",
+            generated_at=GENERATED_AT,
+        ),
+    )
+
+
+def test_bundle_rejects_unregistered_same_run_source_contract(tmp_path: Path) -> None:
+    documents = _documents()
+    source = tmp_path / "source"
+    source.mkdir()
+    evidence_bytes = b'{"safe":true}\n'
+    (source / "evidence.json").write_bytes(evidence_bytes)
+    artifact = _bundle_artifact("evidence.json", "evidence", evidence_bytes)
+    changeset = copy.deepcopy(documents["ChangeSet"])
+    changeset["extensions"]["org.latex-word-review.bundle-artifacts"] = {"artifacts": [artifact]}
+    changeset = seal_envelope(changeset)
+    (source / "changeset.json").write_bytes(canonical_json(changeset) + b"\n")
+    (source / "run-manifest.json").write_bytes(canonical_json(documents["RunManifest"]) + b"\n")
+    (source / "verification-report.json").write_bytes(
+        canonical_json(documents["VerificationReport"]) + b"\n"
+    )
+    allowlist = (
+        BundleItem("changeset.json", "changeset", changeset, "$document"),
+        BundleItem("evidence.json", "evidence", changeset, artifact["artifact_id"]),
+        BundleItem(
+            "run-manifest.json",
+            "run_manifest",
+            documents["RunManifest"],
+            "$document",
+        ),
+        BundleItem(
+            "verification-report.json",
+            "verification_report",
+            documents["VerificationReport"],
+            "$document",
+        ),
+    )
+    _assert_error(
+        ErrorCode.BUNDLE_HASH_MISMATCH,
+        lambda: create_audit_bundle(
+            source,
+            tmp_path / "unregistered-source.zip",
+            allowlist=allowlist,
+            run_manifest=documents["RunManifest"],
+            verification_report=documents["VerificationReport"],
+            content_classification="public_fixture",
+            generated_at=GENERATED_AT,
+        ),
+    )
+
+
+def test_bundle_rejects_run_manifest_extension_as_artifact_authority(tmp_path: Path) -> None:
+    documents = _documents()
+    source = tmp_path / "source"
+    source.mkdir()
+    evidence_bytes = b'{"safe":true}\n'
+    (source / "evidence.json").write_bytes(evidence_bytes)
+    artifact = _bundle_artifact("evidence.json", "evidence", evidence_bytes)
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["extensions"]["org.latex-word-review.bundle-artifacts"] = {"artifacts": [artifact]}
+    run_manifest = seal_envelope(run_manifest)
+    (source / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
+    (source / "verification-report.json").write_bytes(
+        canonical_json(documents["VerificationReport"]) + b"\n"
+    )
+    _assert_error(
+        ErrorCode.BUNDLE_HASH_MISMATCH,
+        lambda: create_audit_bundle(
+            source,
+            tmp_path / "extension-authority.zip",
+            allowlist=(
+                BundleItem("evidence.json", "evidence", run_manifest, artifact["artifact_id"]),
+                BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+                BundleItem(
+                    "verification-report.json",
+                    "verification_report",
+                    documents["VerificationReport"],
+                    "$document",
+                ),
+            ),
+            run_manifest=run_manifest,
+            verification_report=documents["VerificationReport"],
+            content_classification="public_fixture",
+            generated_at=GENERATED_AT,
+        ),
+    )
+
+
+@pytest.mark.parametrize("field", ["path", "size_bytes", "sha256"])
+def test_bundle_rejects_artifact_ref_metadata_mismatch(tmp_path: Path, field: str) -> None:
+    documents = _documents()
+    source, _allowlist = _source_and_items(tmp_path, documents)
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    artifact = cast("dict[str, Any]", run_manifest["payload"]["artifacts"][0])
+    if field == "path":
+        artifact["path"] = "different.json"
+    elif field == "size_bytes":
+        artifact["size_bytes"] += 1
+    else:
+        artifact["sha256"] = digest_bytes(b"different bytes").sha256
+        artifact["artifact_id"] = derive_artifact_id(artifact["sha256"])
+    run_manifest = seal_envelope(run_manifest)
+    documents["RunManifest"] = run_manifest
+    (source / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
+    allowlist = (
+        BundleItem(
+            "evidence.json",
+            "evidence",
+            run_manifest,
+            cast("str", artifact["artifact_id"]),
+        ),
+        BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+        BundleItem(
+            "verification-report.json",
+            "verification_report",
+            documents["VerificationReport"],
+            "$document",
+        ),
+    )
+    _assert_error(
+        ErrorCode.BUNDLE_HASH_MISMATCH,
+        lambda: create_audit_bundle(
+            source,
+            tmp_path / f"wrong-{field}.zip",
+            allowlist=allowlist,
+            run_manifest=run_manifest,
+            verification_report=documents["VerificationReport"],
+            content_classification="public_fixture",
+            generated_at=GENERATED_AT,
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -101,25 +342,28 @@ def test_object_binding_and_mapping_allowlist_are_validated(tmp_path: Path) -> N
     documents = _documents()
     binding = object_binding(documents["ChangeSet"])
     assert binding["schema_name"] == "ChangeSet"
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "evidence.json").write_bytes(b"safe\n")
+    source, allowlist = _bound_source(
+        tmp_path, documents, [("evidence.json", "evidence", b"safe\n")]
+    )
+    mapping_allowlist = [
+        {
+            "path": item.path,
+            "role": item.role,
+            "source_object": item.source_object,
+            "artifact_selector": item.artifact_selector,
+        }
+        for item in allowlist
+    ]
     result = create_audit_bundle(
         source,
         tmp_path / "mapping.zip",
-        allowlist=[
-            {
-                "path": "evidence.json",
-                "role": "evidence",
-                "source_object": documents["ChangeSet"],
-            }
-        ],
+        allowlist=mapping_allowlist,
         run_manifest=documents["RunManifest"],
         verification_report=documents["VerificationReport"],
         content_classification="local_private",
         generated_at=GENERATED_AT,
     )
-    assert result.entry_count == 1
+    assert result.entry_count == 3
 
 
 @pytest.mark.parametrize(
@@ -127,22 +371,22 @@ def test_object_binding_and_mapping_allowlist_are_validated(tmp_path: Path) -> N
     [
         (lambda docs: [{"path": "evidence.json"}], ErrorCode.SCHEMA_INVALID),
         (
-            lambda docs: [BundleItem("manifest/audit-bundle.json", "x", docs["ChangeSet"])],
+            lambda docs: [BundleItem("manifest/audit-bundle.json", "x", docs["RunManifest"])],
             ErrorCode.PATH_TRAVERSAL,
         ),
         (
             lambda docs: [
-                BundleItem("evidence.json", "x", docs["ChangeSet"]),
-                BundleItem("evidence.json", "y", docs["ChangeSet"]),
+                BundleItem("evidence.json", "x", docs["RunManifest"]),
+                BundleItem("evidence.json", "y", docs["RunManifest"]),
             ],
             ErrorCode.SCHEMA_INVALID,
         ),
         (
-            lambda docs: [BundleItem("evidence.json", "", docs["ChangeSet"])],
+            lambda docs: [BundleItem("evidence.json", "", docs["RunManifest"])],
             ErrorCode.SCHEMA_INVALID,
         ),
         (
-            lambda docs: [BundleItem("directory", "x", docs["ChangeSet"])],
+            lambda docs: [BundleItem("directory", "x", docs["RunManifest"])],
             ErrorCode.SCHEMA_INVALID,
         ),
     ],
@@ -155,8 +399,12 @@ def test_allowlist_rejects_malformed_reserved_duplicate_and_nonfiles(
     documents = _documents()
     source = tmp_path / "source"
     source.mkdir()
-    (source / "evidence.json").write_bytes(b"safe")
+    evidence = b"safe"
+    (source / "evidence.json").write_bytes(evidence)
     (source / "directory").mkdir()
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["artifacts"] = [_bundle_artifact("evidence.json", "x", evidence)]
+    documents["RunManifest"] = seal_envelope(run_manifest)
     allowlist = cast("list[BundleItem | dict[str, Any]]", allowlist_factory(documents))
     _assert_error(
         code,
@@ -179,6 +427,12 @@ def test_allowlist_rejects_wrong_run_and_resource_limits(tmp_path: Path) -> None
     source.mkdir()
     (source / "a.txt").write_bytes(b"aa")
     (source / "b.txt").write_bytes(b"bb")
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["artifacts"] = [
+        _bundle_artifact("a.txt", "x", b"aa"),
+        _bundle_artifact("b.txt", "x", b"bb"),
+    ]
+    documents["RunManifest"] = seal_envelope(run_manifest)
     foreign = copy.deepcopy(documents["ChangeSet"])
     foreign["run_id"] = "run_019bc0ab-2400-7000-8000-000000000099"
     foreign = seal_envelope(foreign)
@@ -201,8 +455,8 @@ def test_allowlist_rejects_wrong_run_and_resource_limits(tmp_path: Path) -> None
             source,
             tmp_path / "entries.zip",
             allowlist=[
-                BundleItem("a.txt", "x", documents["ChangeSet"]),
-                BundleItem("b.txt", "x", documents["ChangeSet"]),
+                BundleItem("a.txt", "x", documents["RunManifest"]),
+                BundleItem("b.txt", "x", documents["RunManifest"]),
             ],
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
@@ -217,8 +471,8 @@ def test_allowlist_rejects_wrong_run_and_resource_limits(tmp_path: Path) -> None
             source,
             tmp_path / "bytes.zip",
             allowlist=[
-                BundleItem("a.txt", "x", documents["ChangeSet"]),
-                BundleItem("b.txt", "x", documents["ChangeSet"]),
+                BundleItem("a.txt", "x", documents["RunManifest"]),
+                BundleItem("b.txt", "x", documents["RunManifest"]),
             ],
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
@@ -283,15 +537,13 @@ def test_allowlist_root_and_link_state_fail_closed(
 )
 def test_privacy_rules_cover_public_release_secrets(tmp_path: Path, payload: bytes) -> None:
     documents = _documents()
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "evidence.txt").write_bytes(payload)
+    source, allowlist = _bound_source(tmp_path, documents, [("evidence.txt", "evidence", payload)])
     _assert_error(
         ErrorCode.BUNDLE_PRIVATE_RELEASE,
         lambda: create_audit_bundle(
             source,
             tmp_path / "private.zip",
-            allowlist=[BundleItem("evidence.txt", "evidence", documents["ChangeSet"])],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="public_fixture",
@@ -495,13 +747,13 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     documents = _documents()
-    source, item = _source_and_item(tmp_path)
+    source, allowlist = _source_and_items(tmp_path, documents)
     _assert_error(
         ErrorCode.SCHEMA_INVALID,
         lambda: create_audit_bundle(
             source,
             tmp_path / "schema.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["ChangeSet"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",
@@ -517,7 +769,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             tmp_path / "runs.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=different,
             content_classification="local_private",
@@ -529,7 +781,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             tmp_path / "class.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="secret",
@@ -541,7 +793,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             tmp_path / "wrong.txt",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",
@@ -553,7 +805,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             tmp_path / "missing/out.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",
@@ -565,7 +817,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             source / "inside.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",
@@ -585,7 +837,7 @@ def test_bundle_creation_rejects_input_destination_and_source_drift(
         lambda: create_audit_bundle(
             source,
             tmp_path / "drift.zip",
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",
@@ -600,7 +852,7 @@ def test_bundle_publish_race_preserves_competing_destination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     documents = _documents()
-    source, item = _source_and_item(tmp_path)
+    source, allowlist = _source_and_items(tmp_path, documents)
     destination = tmp_path / "race.zip"
     original_link = os.link
 
@@ -615,7 +867,7 @@ def test_bundle_publish_race_preserves_competing_destination(
         lambda: create_audit_bundle(
             source,
             destination,
-            allowlist=[item],
+            allowlist=allowlist,
             run_manifest=documents["RunManifest"],
             verification_report=documents["VerificationReport"],
             content_classification="local_private",

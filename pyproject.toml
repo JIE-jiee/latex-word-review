@@ -34,6 +34,7 @@ dependencies = [
   "jsonschema>=4.26,<5",
   "lxml>=6.1,<7",
   "referencing>=0.37,<1",
+  "regex>=2026.7.10,<2027",
   "rfc8785>=0.1.4,<0.2",
   "tex2word==1.0.5",
 ]
@@ -89,6 +90,7 @@ path = "src/latex_word_review/__about__.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
+  "/.agents",
   "/CHANGELOG.md",
   "/CODE_OF_CONDUCT.md",
   "/CONTRIBUTING.md",
@@ -97,6 +99,7 @@ include = [
   "/README.md",
   "/SECURITY.md",
   "/skills",
+  "/plugins",
   "/SUPPORT.md",
   "/third_party",
   "/THIRD_PARTY_NOTICES.md",

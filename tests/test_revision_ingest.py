@@ -8,9 +8,11 @@ from typing import Any, cast
 
 import pytest
 
+import latex_word_review.revisions as revisions_module
 from latex_word_review.canonical import sha256_bytes
 from latex_word_review.contracts import validate_contract
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.hashing import digest_file
 from latex_word_review.ids import new_run_id
 from latex_word_review.revisions import (
     BookmarkBinding,
@@ -18,11 +20,14 @@ from latex_word_review.revisions import (
     extract_revision_events,
     normalize_revision_changes,
 )
+from latex_word_review.source_units import build_text_provenance
+from latex_word_review.word_semantics import compare_export_baseline, project_word_semantics
 from tests._docx_factory import write_docx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "e0-minimal-paper"
 RETURNED_DOCX = FIXTURE_ROOT / "returned" / "returned-reviewed.docx"
+BASE_DOCX = FIXTURE_ROOT / "base" / "review-base.docx"
 EXPECTED_CHANGESET = FIXTURE_ROOT / "expected-changeset.json"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 HASH_A = "sha256:" + "a" * 64
@@ -149,11 +154,22 @@ def test_ids_fragment_hashes_and_changes_are_repeatable() -> None:
 
 
 def test_builds_a_valid_changeset_and_only_promotes_source_map_bound_text() -> None:
+    projection = project_word_semantics(BASE_DOCX)
+    bookmark = next(
+        bookmark
+        for story in projection.stories
+        for bookmark in story.bookmarks
+        if bookmark.name == "txr_insert_001"
+    )
+    assert bookmark.original is not None
+    raw = bookmark.original.text.encode("utf-8")
+    review_text, provenance = build_text_provenance(raw)
+    assert review_text == bookmark.original.text
     location = {
         "path": "source/main.tex",
         "start_byte": 0,
-        "end_byte": 0,
-        "slice_sha256": sha256_bytes(b""),
+        "end_byte": len(raw),
+        "slice_sha256": sha256_bytes(raw),
         "encoding": "utf-8",
         "newline": "lf",
         "start_line": 1,
@@ -164,9 +180,14 @@ def test_builds_a_valid_changeset_and_only_promotes_source_map_bound_text() -> N
     binding = BookmarkBinding(
         unit_id="unit_" + "1" * 32,
         source_location=location,
+        normalized_text_sha256=sha256_bytes(review_text.encode("utf-8")),
+        review_length=len(review_text),
+        text_provenance=provenance,
     )
     document = build_changeset(
         RETURNED_DOCX,
+        export_baseline_path=BASE_DOCX,
+        export_baseline_sha256=digest_file(BASE_DOCX, max_bytes=128 * 1024 * 1024).sha256,
         run_id=FIXED_RUN_ID,
         source_manifest_sha256=HASH_A,
         source_map_sha256=HASH_A,
@@ -189,8 +210,73 @@ def test_builds_a_valid_changeset_and_only_promotes_source_map_bound_text() -> N
         "candidates": [],
     }
     assert insertion["safety_class"] == "plain_text_candidate"
+    assert insertion["source_location"]["start_byte"] == insertion["source_location"]["end_byte"]
+    assert insertion["source_location"]["slice_sha256"] == sha256_bytes(b"")
+    assert insertion["source_location"]["start_line"] is None
     unbound = [item for item in document["payload"]["changes"] if item is not insertion]
     assert all(item["safety_class"] != "plain_text_candidate" for item in unbound)
+
+
+def test_changeset_blocks_accepted_or_untracked_drift(tmp_path: Path) -> None:
+    baseline_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:t>baseline</w:t></w:r></w:p>
+    </w:body></w:document>""".encode()
+    returned_xml = baseline_xml.replace(b"baseline", b"silently changed")
+    baseline = write_docx(tmp_path / "baseline.docx", document_xml=baseline_xml)
+    returned = write_docx(tmp_path / "returned.docx", document_xml=returned_xml)
+
+    with pytest.raises(ContractError) as raised:
+        build_changeset(
+            returned,
+            export_baseline_path=baseline,
+            export_baseline_sha256=digest_file(baseline, max_bytes=128 * 1024 * 1024).sha256,
+            run_id=FIXED_RUN_ID,
+            source_manifest_sha256=HASH_A,
+            source_map_sha256=HASH_A,
+            revision_reader_capabilities_sha256=HASH_A,
+            generated_at="2026-07-16T12:00:00+09:00",
+        )
+
+    assert raised.value.code is ErrorCode.REVISION_BASELINE_DRIFT
+    assert raised.value.as_dict()["details"]["drift_status"] == "accepted_or_untracked_drift"
+
+
+def test_changeset_rejects_returned_replacement_between_verification_and_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:t>baseline</w:t></w:r></w:p>
+    </w:body></w:document>""".encode()
+    changed_xml = baseline_xml.replace(b"baseline", b"swapped after verification")
+    baseline = write_docx(tmp_path / "baseline.docx", document_xml=baseline_xml)
+    returned = write_docx(tmp_path / "returned.docx", document_xml=baseline_xml)
+    replacement = write_docx(tmp_path / "replacement.docx", document_xml=changed_xml)
+    original_compare = compare_export_baseline
+
+    def compare_then_replace(*args: Any, **kwargs: Any) -> Any:
+        result = original_compare(*args, **kwargs)
+        returned.write_bytes(replacement.read_bytes())
+        return result
+
+    monkeypatch.setattr(revisions_module, "compare_export_baseline", compare_then_replace)
+
+    with pytest.raises(ContractError) as raised:
+        build_changeset(
+            returned,
+            export_baseline_path=baseline,
+            export_baseline_sha256=digest_file(
+                baseline,
+                max_bytes=128 * 1024 * 1024,
+            ).sha256,
+            run_id=FIXED_RUN_ID,
+            source_manifest_sha256=HASH_A,
+            source_map_sha256=HASH_A,
+            revision_reader_capabilities_sha256=HASH_A,
+            generated_at="2026-07-16T12:00:00+09:00",
+        )
+
+    assert raised.value.code is ErrorCode.HASH_RETURNED_ORIGINAL_MISMATCH
 
 
 def test_missing_author_and_timestamp_are_null_with_diagnostics(tmp_path: Path) -> None:

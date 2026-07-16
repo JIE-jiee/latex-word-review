@@ -41,6 +41,8 @@ bindings = {
 
 changeset = build_changeset(
     "returned-original.docx",
+    export_baseline_path="export/review.docx",
+    export_baseline_sha256="sha256:" + "4" * 64,
     run_id="run_019b0000-0000-7000-8000-000000000001",
     source_manifest_sha256="sha256:" + "0" * 64,
     source_map_sha256="sha256:" + "1" * 64,
@@ -49,7 +51,24 @@ changeset = build_changeset(
 )
 ```
 
-调用方必须传入本次 run 的真实对象哈希；示例值只用于展示字段形状。
+调用方必须传入本次 run 的真实对象哈希和原始导出 DOCX；示例值只用于展示字段形状。
+生产调用应通过 `bookmark_bindings_from_source_map()` 取得包含 review 长度和 text provenance
+的完整绑定，不应手工缩减 SourceMap 字段。
+
+## 不可变导出基线
+
+`build_changeset()` 在提取返回修订前，先把导出 baseline 和返回稿分别投影为 Word 的
+reject-changes 语义视图，并要求其**纯文本回填所需范围**一致。它验证 baseline 文件字节
+哈希、可见文本、段落/表格结构、复杂域结构与指令、insert/delete/move 修订语义、bookmark 集合和 bookmark
+原文。关闭 Track Changes 的编辑、Accept All、锚点删除/重复/漂移，或当前读取器无法安全
+解释的结构修订都会以稳定错误码 fail closed；调用方不得改用模糊文本 diff 绕过。
+
+这不是对整篇 Word 的完整视觉或语义等价证明。段落标记修订、格式、OMML 公式、图片、
+超链接与 relationship 目标、content control/custom XML、嵌入对象与 AlternateContent 仍需
+人工完整性复核，且永远不进入自动补丁范围。验证结果写入
+`ChangeSet.payload.baseline_verification`：`status=verified_for_text_patch`、
+`automatic_patch_scope=plain_text_only`，并分别列出 `verified_scope` 和
+`unverified_scope`；`manual_integrity_review_required` 固定为 `true`。
 
 ## 安全边界
 
@@ -80,7 +99,13 @@ changeset = build_changeset(
 - 只有同 part、同父节点、相邻、作者/时间/bookmark 一致的 `del + ins` 才组合为 replacement。
 - move 依原生 move range name/ID 配对；不完整或元数据冲突的 move 保留为 conflict/manual。
 - 批注是 `ledger_only`，move 和格式变更是 `manual_high_risk`。
-- 原生 bookmark 只是证据，不是 LaTeX 位置。只有调用方用 `BookmarkBinding` 传入已校验 `SourceMap` 的 `unit_id` 和 `source_location` 后，纯文本变更才可标记为 `plain_text_candidate`；否则为 `unmatched/manual`。
+- 原生 bookmark 只是证据，不是 LaTeX 位置。只有调用方用 `BookmarkBinding` 传入已校验
+  `SourceMap` 的 `unit_id`、`source_location`、review 长度和 text provenance 后，纯文本
+  变更才可标记为 `plain_text_candidate`；否则为 `unmatched/manual`。
+- insertion/deletion/replacement 使用 OOXML 节点序号与 bookmark reject-view 相对范围，
+  映射为原始 LaTeX 的精确 UTF-8 half-open byte span。重复词不会靠字符串搜索猜位置。
+- 折叠空白或 CRLF、combining sequence、variation selector、emoji modifier、ZWJ sequence
+  或 regional-indicator 边界不能被证明安全时，变更保留证据但转为 manual。
 
 raw event 的 `rev_...`、change 的 `chg_...`、fragment/change 哈希和 `changes_...` envelope ID 均由规范内容派生。同一 DOCX、限制、绑定和上游哈希会生成相同的证据顺序与 ID；`generated_at` 是 envelope 运行时元数据，需要完全重现 envelope 时应显式传入。
 
@@ -88,4 +113,5 @@ raw event 的 `rev_...`、change 的 `chg_...`、fragment/change 哈希和 `chan
 
 E0 公开合成 returned DOCX 的 oracle 测试达到 raw event 与 normalized change 的 precision/recall 各 100%：9 个 raw event 规范化为 7 个 change。定向测试同时覆盖重复/别名 ZIP member、CRC、加密与压缩方法、zip bomb 限制、深位置 DTD/entity、外部关系、读取中变更、缺元数据/删除文本、unknown kind 与所有支持的 story part。
 
-当前边界不推断 SourceMap，不解析 Word 现代 comments extensions 的额外语义，也不将格式/move/批注自动回填 LaTeX。这些信息会保留为审计证据，由后续审批与补丁规划阶段决定。
+当前边界不推断 SourceMap，不解析 Word 现代 comments extensions 的额外语义，也不将格式/
+move/批注自动回填 LaTeX。这些信息会保留为审计证据，由后续审批与补丁规划阶段决定。

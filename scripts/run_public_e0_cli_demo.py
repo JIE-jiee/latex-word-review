@@ -33,6 +33,22 @@ class DemoError(RuntimeError):
     """A public-demo invariant or CLI step failed."""
 
 
+def _emit_json(value: Mapping[str, Any], *, error: bool = False) -> None:
+    """Write one deterministic UTF-8 JSON line even under a Windows legacy code page."""
+
+    stream = sys.stderr if error else sys.stdout
+    data = (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    binary = getattr(stream, "buffer", None)
+    if binary is not None:
+        binary.write(data)
+        binary.flush()
+        return
+    stream.write(data.decode("utf-8"))
+    stream.flush()
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -83,7 +99,7 @@ def _run_cli(
     if not isinstance(receipt, dict):
         raise DemoError(f"CLI step {step!r} returned a non-object receipt")
     typed = cast("dict[str, Any]", receipt)
-    print(json.dumps({"receipt": typed, "step": step}, ensure_ascii=False, sort_keys=True))
+    _emit_json({"receipt": typed, "step": step})
     return typed
 
 
@@ -338,7 +354,7 @@ def _full_verification(
     delivery = run_root / "delivery"
     _copy_delivery(verification, ledger, delivery)
 
-    run_manifest = objects / "run-manifest.json"
+    run_manifest = delivery / "run-manifest.json"
     manifest_arguments: list[str | Path] = [
         "run-manifest",
         source_manifest,
@@ -349,6 +365,16 @@ def _full_verification(
         "completed",
         "--generated-at",
         generated_at,
+        "--artifact",
+        "ledger.json",
+        "review_ledger_json",
+        "application/json",
+        "public_fixture",
+        "--artifact",
+        "ledger.html",
+        "review_ledger_html",
+        "text/html",
+        "public_fixture",
     ]
     for path in (
         export_objects / "review-ir.json",
@@ -376,6 +402,7 @@ def _full_verification(
         verification / "verification-report.json",
     ]
     for item_path, role, source_object in (
+        ("run-manifest.json", "run_manifest", run_manifest),
         (
             "verification-report.json",
             "verification_report",
@@ -385,8 +412,8 @@ def _full_verification(
         ("latexdiff.tex", "latexdiff_tex", verification / "verification-report.json"),
         ("latexdiff.pdf", "latexdiff_pdf", verification / "verification-report.json"),
         ("revised-clean.pdf", "revised_clean_pdf", verification / "verification-report.json"),
-        ("ledger.json", "review_ledger_json", changeset),
-        ("ledger.html", "review_ledger_html", changeset),
+        ("ledger.json", "review_ledger_json", run_manifest),
+        ("ledger.html", "review_ledger_html", run_manifest),
     ):
         bundle_arguments.extend(("--item", item_path, role, source_object))
     bundle_arguments.extend(("--classification", "public_fixture", "--generated-at", generated_at))
@@ -485,15 +512,12 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
         timestamp=generated_at,
     )
     received_before = "sha256:" + hashlib.sha256(received.read_bytes()).hexdigest()
-    print(
-        json.dumps(
-            {
-                "change_kind": "replacement",
-                "status": "created",
-                "step": "simulate-word-review",
-            },
-            sort_keys=True,
-        )
+    _emit_json(
+        {
+            "change_kind": "replacement",
+            "status": "created",
+            "step": "simulate-word-review",
+        }
     )
 
     reader = objects / "revision-reader.json"
@@ -538,6 +562,8 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
         source_map_path,
         reader,
         changeset_path,
+        "--baseline-docx",
+        exported,
         "--artifact-path",
         "returned/returned-original.docx",
         "--generated-at",
@@ -706,7 +732,7 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
     }
     _write_json(run_root / "demo-summary.json", summary)
     printable = {**summary, "output_root": str(run_root)}
-    print(json.dumps(printable, ensure_ascii=False, sort_keys=True))
+    _emit_json(printable)
     return printable
 
 
@@ -745,14 +771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         run_demo(arguments)
     except (DemoError, OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
-        print(
-            json.dumps(
-                {"demo_status": "failed", "error": str(exc)},
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
+        _emit_json({"demo_status": "failed", "error": str(exc)}, error=True)
         return 1
     return 0
 

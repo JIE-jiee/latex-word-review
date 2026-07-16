@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from latex_word_review.discovery import discover_project
-from latex_word_review.source_units import scan_source_units
+from latex_word_review.source_units import build_text_provenance, scan_source_units
 
 FIXTURE_SOURCE = Path(__file__).parent / "fixtures/e0-minimal-paper/source"
 
@@ -42,6 +42,13 @@ x = 2
     assert raw == b"Safe plain paragraph across\ntwo source lines."
     assert unit.source_location()["slice_sha256"] == unit.slice_sha256
     assert unit.unit_id.startswith("unit_")
+    assert [segment.transformation for segment in unit.text_provenance] == [
+        "identity",
+        "whitespace-collapse",
+        "identity",
+    ]
+    assert unit.text_provenance[1].auto_patchable is False
+    assert unit.text_provenance[-1].source_end_byte == len(raw)
 
 
 def test_e0_scanner_is_intentionally_conservative() -> None:
@@ -53,3 +60,22 @@ def test_e0_scanner_is_intentionally_conservative() -> None:
         "and the balanced response is represented by the two-line system",
     ]
     assert all(unit.path == "sections/methods.tex" for unit in units)
+
+
+def test_text_provenance_keeps_utf8_identity_bytes_and_marks_collapsed_space() -> None:
+    raw = "中文🙂  revised\n\ttext".encode()
+    normalized, segments = build_text_provenance(raw)
+
+    assert normalized == "中文🙂 revised text"
+    assert [segment.transformation for segment in segments] == [
+        "identity",
+        "whitespace-collapse",
+        "identity",
+        "whitespace-collapse",
+        "identity",
+    ]
+    assert segments[0].source_end_byte == len("中文🙂".encode())
+    assert segments[-1].source_end_byte == len(raw)
+    assert all(
+        segment.auto_patchable == (segment.transformation == "identity") for segment in segments
+    )

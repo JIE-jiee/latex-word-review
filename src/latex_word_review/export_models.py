@@ -138,6 +138,7 @@ class ExportReport:
     review_ir_sha256: str | None
     source_map_sha256: str | None
     review_docx: ReviewDocxArtifact | None
+    image_overlay: dict[str, object]
     source_metrics: dict[str, int]
     output_metrics: dict[str, int]
     feature_results: tuple[ExportFeatureResult, ...]
@@ -152,6 +153,7 @@ class ExportReport:
             "review_ir_sha256": self.review_ir_sha256,
             "source_map_sha256": self.source_map_sha256,
             "review_docx": None if self.review_docx is None else self.review_docx.as_contract(),
+            "image_overlay": dict(self.image_overlay),
             "metrics": {
                 "source": dict(sorted(self.source_metrics.items())),
                 "output": dict(sorted(self.output_metrics.items())),

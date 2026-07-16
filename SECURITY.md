@@ -7,7 +7,7 @@ source mutation as security-sensitive issues.
 
 ## Supported versions
 
-There is no stable or tagged prerelease yet. The public `0.1.0b1` source tree is a beta candidate.
+There is no stable or tagged prerelease yet. The public `0.1.0b2` source tree is a beta candidate.
 
 | Version / environment | Supported |
 |---|---|

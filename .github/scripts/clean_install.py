@@ -56,6 +56,7 @@ EXPECTED_PROJECT_VERSION_PATH = "src/latex_word_review/__about__.py"
 EXPECTED_REQUIRES_PYTHON = ">=3.12,<3.14"
 EXPECTED_METADATA_REQUIRES_PYTHON = "<3.14,>=3.12"
 EXPECTED_SDIST_INCLUDES = (
+    "/.agents",
     "/CHANGELOG.md",
     "/CODE_OF_CONDUCT.md",
     "/CONTRIBUTING.md",
@@ -64,6 +65,7 @@ EXPECTED_SDIST_INCLUDES = (
     "/README.md",
     "/SECURITY.md",
     "/skills",
+    "/plugins",
     "/SUPPORT.md",
     "/third_party",
     "/THIRD_PARTY_NOTICES.md",

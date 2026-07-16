@@ -11,6 +11,7 @@ maintainers must regenerate the dependency inventory from `uv.lock` and inspect 
 | [jsonschema](https://github.com/python-jsonschema/jsonschema) | `>=4.26,<5` | JSON Schema Draft 2020-12 validation | MIT | No; installed separately by package manager |
 | [lxml](https://github.com/lxml/lxml) | `>=6.1,<7` | Namespace-aware OOXML processing foundation | BSD-3-Clause | No; installed separately by package manager |
 | [referencing](https://github.com/python-jsonschema/referencing) | `>=0.37,<1` | In-memory JSON Schema resource registry | MIT | No; installed separately by package manager |
+| [regex](https://github.com/mrabarnett/mrab-regex) | `>=2026.7.10,<2027` | Unicode UAX #29 extended-grapheme boundary enforcement | Apache-2.0 AND CNRI-Python | No; installed separately by package manager |
 | [rfc8785](https://github.com/trailofbits/rfc8785.py) | `>=0.1.4,<0.2` | RFC 8785/JCS canonical JSON for audit hashes | Apache-2.0 | No; installed separately by package manager |
 | [tex2word](https://github.com/yfyang86/tex2word) | `==1.0.5` | Preferred LaTeX-to-DOCX backend | MIT | No; installed separately by package manager |
 

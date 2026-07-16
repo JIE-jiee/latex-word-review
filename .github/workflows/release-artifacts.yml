@@ -34,8 +34,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Install all locked release-check groups
-        run: uv sync --frozen --all-groups --python 3.12
+      - name: Install all locked release-check groups and the PDF-figure runtime
+        run: uv sync --frozen --all-groups --extra pdf-figures --python 3.12
       - name: Bind tag to package version
         run: >-
           uv run --frozen python .github/scripts/release_checks.py version
