@@ -24,8 +24,8 @@
 - [ ] Windows 3.12 and 3.13 closed-loop, fixture, and package lanes pass.
 - [ ] Windows 3.12 real XeLaTeX/CTeX/`latexmk`/`latexdiff` lane records one pass, zero skips,
       the expected MiKTeX Setup Utility filename and official SHA-256, all nine required MiKTeX
-      packages, their digests, resolved CTeX/Fandol resources, and actual tool versions in the v2
-      evidence; the release workflow
+      packages, their digests, resolved CTeX/Fandol resources, a prebuilt XeLaTeX format, and actual
+      tool versions in the v2 evidence; the release workflow
       rerun also passes.
 - [ ] No Linux or macOS result is treated as a release prerequisite or support claim.
 - [ ] Public fixture visual review is recorded as `pass`; no deferred release gate remains.

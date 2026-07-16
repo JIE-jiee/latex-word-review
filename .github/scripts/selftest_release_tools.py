@@ -431,6 +431,7 @@ class RealTexJUnitTests(unittest.TestCase):
             {
                 "ctex_sty": "resolved_by_kpsewhich",
                 "fandol_song_regular": "resolved_by_kpsewhich",
+                "xelatex_format": "resolved_by_kpsewhich",
             },
         )
 

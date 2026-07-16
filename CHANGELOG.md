@@ -66,6 +66,11 @@ source version below.
   unsupported report shapes.
 - Prefer the final TeX log over transient `latexmk` console passes when deciding whether references
   and compilation succeeded.
+- Preserve MiKTeX's three isolated user-root variables in the bounded external-tool environment,
+  so a verified runner installation remains discoverable inside real `latexmk`/`latexdiff`
+  subprocesses without admitting unrelated environment values.
+- Prebuild and verify the XeLaTeX format during the bounded Windows toolchain bootstrap, preventing
+  a first-run format build from consuming the 60-second document-compilation timeout.
 - Scan non-ignored untracked release-candidate files, LaTeX/source text types, TeX temporary files,
   and `par-*` runtime caches before a first commit can accidentally publish them.
 - Reject non-canonical, case-colliding, Windows-unsafe, linked, oversized, or unexpected wheel,

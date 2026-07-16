@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -258,7 +259,15 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
         run_root / "verification",
         generated_at=TIME,
     )
-    assert verification.status == "pass"
+    verification_payload = cast("Mapping[str, Any]", verification.report["payload"])
+    failure_summary = {
+        "compile": verification_payload["compile"],
+        "diagnostics": verification_payload["diagnostics"],
+        "latexdiff": verification_payload["latexdiff"],
+        "references": verification_payload["references"],
+        "status": verification_payload["status"],
+    }
+    assert verification.status == "pass", json.dumps(failure_summary, sort_keys=True)
     if not use_real_latex_tools:
         assert any("-xelatex" in arguments for _, arguments in calls)
     assert b"DIFadd" in (verification.output_root / "latexdiff.tex").read_bytes()

@@ -49,18 +49,21 @@ The hosted real-TeX gate downloads MiKTeX's official Setup Utility
 the utility to download and install the basic package set non-interactively into three isolated
 user roots under the runner's temporary directory. Before package operations, `initexmf --report`
 must prove those exact install/config/data roots, a non-shared regular setup, and a valid executable
-path. The gate then explicitly
-installs and verifies `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`,
+path. The bounded TeX subprocess environment carries only those three MiKTeX root variables from
+the tool-specific configuration; it still excludes unrelated environment values. The gate then
+explicitly installs and verifies `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`,
 `latexmk`, and `latexdiff`. The public fixture explicitly selects CTeX's Fandol font set, so it does
 not depend on optional Chinese supplemental fonts in the Windows runner image. The gate then
 uses MiKTeX's `--disable-installer` and verifies its disabled tri-state value before testing, so the
 selected E2E test cannot make
 the package boundary pass by silently downloading another dependency during compilation.
+It explicitly builds the `xelatex` format outside the 60-second business-command boundary, then
+requires `kpsewhich --engine=xetex --format=fmt xelatex.fmt` to resolve it before the test starts.
 
 The evidence uses schema `latex-word-review-real-tex-gate-v2`, records the verified Setup Utility
 filename and SHA-256, MiKTeX package digests, and tool versions; verifies that `kpsewhich` resolves
-`ctex.sty` and `FandolSong-Regular.otf`; and runs the selected pytest parameter
-`installed-latexmk-latexdiff`. A local run against
+`ctex.sty`, `FandolSong-Regular.otf`, and the prebuilt `xelatex.fmt`; and runs the selected pytest
+parameter `installed-latexmk-latexdiff`. A local run against
 an existing installation records `preinstalled_local` instead and cannot be substituted for the
 hosted bootstrap evidence.
 

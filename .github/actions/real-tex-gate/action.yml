@@ -92,6 +92,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX filename database refresh failed" }
         miktex links install
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX executable-link refresh failed" }
+        miktex formats build xelatex
+        if ($LASTEXITCODE -ne 0) { throw "XeLaTeX format build failed" }
         miktex packages verify xetex ctex fandol amsmath booktabs graphics hyperref latexmk latexdiff
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX package verification failed" }
     - name: Verify tools and run exactly one real TeX E2E case

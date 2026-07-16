@@ -88,7 +88,11 @@ duplicate or unapproved change.
 ### External processes
 
 The tex2word Python API runs in a bounded child worker. Pandoc, latexmk and latexdiff use fixed list
-argv, no shell, fixed working directories, a minimal environment, bounded output and hard timeout.
+argv, no shell, fixed working directories, a minimal allowlisted environment, bounded output and
+hard timeout. On Windows the TeX verifier adds only MiKTeX's three documented isolated-root
+variables (`MIKTEX_USERINSTALL`, `MIKTEX_USERCONFIG`, and `MIKTEX_USERDATA`) to that minimal
+environment; unrelated environment values remain excluded, and other backends do not inherit the
+MiKTeX-specific values.
 TeX runs only on private copies with `-no-shell-escape`; known shell-escape constructs are rejected
 before execution and checked again in generated latexdiff source. This reduces risk but is not a
 general sandbox for a hostile TeX engine. Process documents from untrusted authors inside an OS or

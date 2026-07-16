@@ -48,6 +48,11 @@ _SHELL_ESCAPE_PATTERNS: Final = (
 )
 _WINDOWS_ABSOLUTE_RE: Final = re.compile(r"(?<![\w.])[A-Za-z]:[\\/][^\s\"'<>]*")
 _POSIX_ABSOLUTE_RE: Final = re.compile(r"(?<![\w.])/(?:[^\s\"'<>]+)")
+_MIKTEX_ROOT_ENVIRONMENT: Final = (
+    "MIKTEX_USERCONFIG",
+    "MIKTEX_USERDATA",
+    "MIKTEX_USERINSTALL",
+)
 
 VerificationStatus = Literal["pass", "fail", "blocked"]
 CommandStatus = Literal["pass", "fail", "blocked", "not_run"]
@@ -865,10 +870,11 @@ def verify_latex_project(
         diff_build = build_root / "latexdiff"
         revised_build.mkdir()
         diff_build.mkdir()
-        environment = minimal_environment(
-            temp_root=work,
-            additions={"openin_any": "p", "openout_any": "p", "shell_escape": "0"},
+        tex_environment = {"openin_any": "p", "openout_any": "p", "shell_escape": "0"}
+        tex_environment.update(
+            {name: value for name in _MIKTEX_ROOT_ENVIRONMENT if (value := os.environ.get(name))}
         )
+        environment = minimal_environment(temp_root=work, additions=tex_environment)
 
         revised_run = _tool_run(
             "latexmk-revised",

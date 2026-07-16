@@ -41,8 +41,9 @@ not turn the selected branch into a release.
   `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`, `latexmk`, and
   `latexdiff`, records v2 bootstrap-filename/hash, package-digest, CTeX/Fandol resource, and
   tool-version evidence, disables on-the-fly package installation through MiKTeX's dedicated
-  `--disable-installer` control and verifies the disabled value, then requires exactly one real
-  public E2E pass with zero skips;
+  `--disable-installer` control and verifies the disabled value, prebuilds and resolves the
+  `xelatex` format outside the bounded business command, then requires exactly one real public E2E
+  pass with zero skips;
 - scans every non-ignored public candidate path, including untracked files, for private/runtime
   material, secret/private-path patterns, and unapproved document binaries; only exact synthetic
   attack tokens and the provenance-controlled public fixture are allowlisted;

@@ -92,13 +92,14 @@ def verify_tex_resources() -> dict[str, str]:
     if kpsewhich is None:
         raise RealTexGateError("required executable is missing: kpsewhich")
     resources = {
-        "ctex_sty": "ctex.sty",
-        "fandol_song_regular": "FandolSong-Regular.otf",
+        "ctex_sty": ("ctex.sty",),
+        "fandol_song_regular": ("FandolSong-Regular.otf",),
+        "xelatex_format": ("--engine=xetex", "--format=fmt", "xelatex.fmt"),
     }
-    for filename in resources.values():
-        result = run_captured([kpsewhich, filename], timeout=30)
+    for arguments in resources.values():
+        result = run_captured([kpsewhich, *arguments], timeout=30)
         if result.returncode != 0 or not result.stdout.strip():
-            raise RealTexGateError(f"kpsewhich could not resolve {filename}")
+            raise RealTexGateError(f"kpsewhich could not resolve {arguments[-1]}")
     return {label: "resolved_by_kpsewhich" for label in resources}
 
 

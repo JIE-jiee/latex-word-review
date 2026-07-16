@@ -457,11 +457,23 @@ def test_runtime_rejects_bad_cwd_and_bounds_invalid_output(tmp_path: Path) -> No
     assert "\x00" not in result.stdout
 
 
-def test_minimal_environment_only_adds_explicit_values(tmp_path: Path) -> None:
+def test_minimal_environment_only_adds_explicit_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    miktex_roots = {
+        "MIKTEX_USERCONFIG": os.fspath(tmp_path / "miktex-config"),
+        "MIKTEX_USERDATA": os.fspath(tmp_path / "miktex-data"),
+        "MIKTEX_USERINSTALL": os.fspath(tmp_path / "miktex-install"),
+    }
+    for name, value in miktex_roots.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("LWR_UNTRUSTED_ENV", "must-not-pass")
     environment = minimal_environment(temp_root=tmp_path, additions={"LWR_TEST": "yes"})
     assert environment["LWR_TEST"] == "yes"
     assert environment["TEMP"] == os.fspath(tmp_path)
     assert "PYTHONUTF8" in environment
+    assert all(name not in environment for name in miktex_roots)
+    assert "LWR_UNTRUSTED_ENV" not in environment
 
 
 def test_hashing_rejects_nonregular_drift_duplicate_and_mismatch(

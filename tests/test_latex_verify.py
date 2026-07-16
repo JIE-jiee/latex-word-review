@@ -144,6 +144,13 @@ def test_verified_outputs_bind_every_authorization_hash_and_keep_inputs_immutabl
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr("latex_word_review.latex_verify.run_command", _success_runner(calls))
     monkeypatch.setenv("SYNTHETIC_SECRET", "must-not-be-forwarded")
+    miktex_roots = {
+        "MIKTEX_USERCONFIG": os.fspath(tmp_path / "miktex-config"),
+        "MIKTEX_USERDATA": os.fspath(tmp_path / "miktex-data"),
+        "MIKTEX_USERINSTALL": os.fspath(tmp_path / "miktex-install"),
+    }
+    for name, value in miktex_roots.items():
+        monkeypatch.setenv(name, value)
 
     result = _verify(workflow)
 
@@ -189,6 +196,9 @@ def test_verified_outputs_bind_every_authorization_hash_and_keep_inputs_immutabl
     assert returned.read_bytes() == returned_before
     assert len(calls) == 3
     assert all("SYNTHETIC_SECRET" not in call["environment"] for call in calls)
+    assert all(
+        {name: call["environment"][name] for name in miktex_roots} == miktex_roots for call in calls
+    )
     assert all(not Path(cast("Path", call["cwd"])).is_relative_to(original) for call in calls)
     assert all(not Path(cast("Path", call["cwd"])).is_relative_to(revised) for call in calls)
     for call in calls:
