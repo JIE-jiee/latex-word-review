@@ -77,9 +77,12 @@ run-root/
 │   └── source-manifest.json
 ├── export/
 │   ├── review.docx
+│   ├── review.docx.image-overlay/  # 需要时生成的 PDF 页 PNG 派生树
 │   └── objects/                 # capabilities/IR/SourceMap/report
 ├── receive/
-│   ├── original/                # 只读返回原件和 manifest
+│   ├── original/
+│   │   ├── returned-original.docx
+│   │   └── returned-original.manifest.json
 │   ├── revision-reader.json
 │   └── changeset.json
 ├── .lwr-staging/                # 仅工具拥有的临时 stage
@@ -88,6 +91,7 @@ run-root/
 ├── revised-clean/               # apply 唯一允许创建的 LaTeX 副本
 ├── verification/                # clean source/PDF, latexdiff, report, logs
 ├── ledger/                      # ledger.json + ledger.html
+├── delivery/                    # 显式复制、准备进入审计包的 allowlist 根
 └── audit.zip
 ```
 

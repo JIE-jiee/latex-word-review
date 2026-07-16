@@ -1,5 +1,9 @@
 # Release checklist
 
+This file is a reusable template for each formal release. Unchecked boxes do not describe the
+current repository state. Bind a completed copy to the selected release commit and its GitHub
+Actions evidence; current source status is summarized in `docs/compat/platform-support.md`.
+
 ## Source and governance
 
 - [ ] Python version and changelog agree; release tag is exactly `v<python-version>`. The Codex

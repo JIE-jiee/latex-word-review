@@ -6,9 +6,10 @@ workflow that publishes to PyPI, creates a GitHub Release, pushes a tag, or writ
 contents. The release workflow has only `contents: read` permission and uploads a short-lived
 Actions artifact after every gate passes. Promotion remains a separate, explicit maintainer action.
 
-## Candidate preconditions
+## Candidate and promotion preconditions
 
-Before creating a candidate:
+For an untagged rehearsal, complete steps 1 through 8. For formal promotion, complete all steps and
+create the tag only after the rehearsal evidence has been reviewed:
 
 1. choose the version in `src/latex_word_review/__about__.py` and update the changelog;
 2. confirm all Windows 3.12/3.13 CI lanes and the Windows/Python 3.12 real-TeX lane are green for
@@ -28,8 +29,8 @@ Before creating a candidate:
    without placing a private document or secret in the test report;
 9. create a signed or protected tag named exactly `v<package-version>` only after review.
 
-`workflow_dispatch` is useful for an untagged rehearsal. It produces a candidate artifact but does
-not turn the selected branch into a release.
+`workflow_dispatch` produces an untagged rehearsal artifact. It does not satisfy step 9 and does not
+turn the selected branch into a release.
 
 ## Automated fail-closed gates
 
