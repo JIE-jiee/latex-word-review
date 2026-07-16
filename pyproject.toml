@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "latex-word-review"
 dynamic = ["version"]
-description = "Auditable, approval-gated LaTeX and Word review bridge"
+description = "Auditable, approval-gated LaTeX and Word review bridge for Windows"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Science/Research",
-  "Operating System :: OS Independent",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",

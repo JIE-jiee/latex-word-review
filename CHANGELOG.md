@@ -16,6 +16,8 @@ source version below.
 
 - Add canonical Homepage, Repository, Documentation, Issues, Changelog, clone, support, and private
   vulnerability-reporting URLs for the public source repository.
+- Narrow the maintained platform scope to Windows with CPython 3.12/3.13. Linux and macOS are no
+  longer CI, release, or support targets; historical upstream and security evidence remains intact.
 
 ## [0.1.0b1] - 2026-07-16
 
@@ -34,8 +36,11 @@ source version below.
   reviewer-aware ledger generation, and allowlisted deterministic audit ZIPs.
 - Fully synthetic Apache-2.0 bilingual LaTeX/DOCX fixture with deterministic clean-room generator,
   structural oracle, privacy checks, and Microsoft Word visual QA evidence.
-- Windows/Ubuntu Python 3.12/3.13 and macOS Python 3.12 CI definitions, including a required Ubuntu
-  real XeLaTeX/CTeX/`latexdiff` lane and non-publishing reproducible release-candidate workflow.
+- Windows-only Python 3.12/3.13 CI definitions, including a fail-closed Windows real
+  XeLaTeX/CTeX/`latexdiff` gate configured around a digest-pinned official MiKTeX Setup Utility,
+  an explicit verified package set including Fandol fonts, a fixture that does not depend on
+  optional Windows Chinese fonts, and a non-publishing reproducible release-candidate workflow.
+  Support still requires an observed hosted result for the exact commit.
 - Wheel/sdist archive inspection, separate clean-install tests, deterministic double builds,
   SHA-256 sums, a runtime-closure CycloneDX SBOM, an unsigned SLSA v1-compatible custom provenance
   statement, and evidence-manifest verification.
@@ -87,5 +92,7 @@ source version below.
 - A source-only runtime dependency such as `pylatexenc` is hash-bound before its local wheel is
   built and re-hashed afterward, but that generated dependency wheel is not yet compared across
   two independent clean-install runs; reproducibility claims apply to this project's wheel/sdist.
-- Remote GitHub-hosted CI has not yet been observed for this candidate, and no tagged GitHub or
+- Linux and macOS are outside the maintained platform scope even if the pure Python wheel happens
+  to install or some commands happen to run there.
+- Hosted CI status is commit-specific and must be checked in GitHub Actions; no tagged GitHub or
   package-index prerelease has been published.

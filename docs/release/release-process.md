@@ -11,7 +11,8 @@ Actions artifact after every gate passes. Promotion remains a separate, explicit
 Before creating a candidate:
 
 1. choose the version in `src/latex_word_review/__about__.py` and update the changelog;
-2. confirm all Windows/Ubuntu 3.12/3.13 CI lanes and the macOS Tier 2 lane are green;
+2. confirm all Windows 3.12/3.13 CI lanes and the Windows/Python 3.12 real-TeX lane are green for
+   the exact source commit;
 3. confirm the public fixture provenance, license, privacy, determinism, and visual review all pass;
 4. confirm schemas, CLI behavior, known limitations, support matrix, security policy, and third-party
    notices describe the candidate;
@@ -27,15 +28,21 @@ not turn the selected branch into a release.
 
 ## Automated fail-closed gates
 
-`.github/workflows/release-artifacts.yml` performs the following on Ubuntu/Python 3.12:
+`.github/workflows/release-artifacts.yml` performs the following on Windows/Python 3.12:
 
 - binds a `v*` tag exactly to the package version;
 - derives `SOURCE_DATE_EPOCH` from the checked-out commit;
 - re-runs lock, lint, format, typing, tests, and branch coverage;
-- verifies the public extras' bounded lowest-direct dependency sets install on the Tier 1 Python
+- verifies the public extras' bounded lowest-direct dependency sets install on the supported Python
   versions in the package matrix;
-- installs the fixed minimal Ubuntu XeLaTeX/CTeX/`latexmk`/`latexdiff` apt package set, records exact
-  installed/tool versions, and requires exactly one real public E2E pass with zero skips;
+- downloads the official MiKTeX Setup Utility `miktexsetup-5.5.0+1763023-x64.zip`, verifies its
+  pinned SHA-256, performs a non-interactive basic installation in isolated user roots, proves the
+  exact roots and non-shared configuration through `initexmf --report`, explicitly installs/verifies
+  `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`, `latexmk`, and
+  `latexdiff`, records v2 bootstrap-filename/hash, package-digest, CTeX/Fandol resource, and
+  tool-version evidence, disables on-the-fly package installation through MiKTeX's dedicated
+  `--disable-installer` control and verifies the disabled value, then requires exactly one real
+  public E2E pass with zero skips;
 - scans every non-ignored public candidate path, including untracked files, for private/runtime
   material, secret/private-path patterns, and unapproved document binaries; only exact synthetic
   attack tokens and the provenance-controlled public fixture are allowlisted;
@@ -57,7 +64,7 @@ not turn the selected branch into a release.
 - creates `SHA256SUMS`, a CycloneDX 1.6 Python runtime-closure SBOM, an unsigned SLSA v1-compatible
   custom provenance statement, and an evidence manifest;
 - verifies all evidence against the candidate bytes before uploading a 14-day Actions artifact,
-  including the real-TeX JUnit and toolchain records.
+  including the Windows real-TeX JUnit and toolchain records.
 
 No step uses a package index token, GitHub release token, trusted publisher, or write permission.
 
@@ -95,12 +102,13 @@ must match the fixed declarative Hatchling contract. `backend-path`, custom buil
 executable version sources, and any filename/root/PKG-INFO/source/reference-wheel identity mismatch
 fail before a build subprocess is launched. The installed-artifact demo passes
 `--skip-verification` because the separate real-TeX release gate already proves
-XeLaTeX/CTeX/`latexmk`/`latexdiff` behavior.
+Windows XeLaTeX/CTeX/`latexmk`/`latexdiff` behavior for that exact commit.
 
 The SBOM is intentionally scoped to the project and its reachable locked Python runtime closure. It
-does not include the build backend, GitHub Actions, runner image, or apt TeX packages. The unsigned
-custom provenance statement is machine-checkable and uses the SLSA v1 predicate type, but it is not
-a signed SLSA attestation and must not be presented as complete supply-chain coverage.
+does not include the build backend, GitHub Actions, Windows runner image, MiKTeX Setup Utility,
+MiKTeX repository, or MiKTeX packages. The unsigned custom provenance statement is machine-checkable
+and uses the SLSA v1 predicate type, but it is not a signed SLSA attestation and must not be
+presented as complete supply-chain coverage.
 
 If any byte, tag, source SHA, provenance subject, fixture report, or clean-install result differs,
 discard the candidate. Do not rebuild under the same version and replace published bytes.

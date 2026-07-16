@@ -368,6 +368,100 @@ class RealTexJUnitTests(unittest.TestCase):
             with self.assertRaises(REAL_TEX.RealTexGateError):
                 REAL_TEX.require_one_real_test(summary, 0)
 
+    def test_github_bootstrap_evidence_is_bound(self) -> None:
+        environment = {
+            "GITHUB_ACTIONS": "true",
+            "MIKTEX_SETUP_FILENAME": REAL_TEX.EXPECTED_SETUP_FILENAME,
+            "MIKTEX_SETUP_SHA256": REAL_TEX.EXPECTED_SETUP_SHA256,
+        }
+        with mock.patch.dict(REAL_TEX.os.environ, environment, clear=True):
+            evidence = REAL_TEX.bootstrap_evidence()
+        self.assertEqual(evidence["source"], "verified_official_setup_utility")
+        self.assertEqual(evidence["sha256"], REAL_TEX.EXPECTED_SETUP_SHA256)
+
+    def test_github_bootstrap_evidence_cannot_be_omitted(self) -> None:
+        with (
+            mock.patch.dict(REAL_TEX.os.environ, {"GITHUB_ACTIONS": "true"}, clear=True),
+            self.assertRaises(REAL_TEX.RealTexGateError),
+        ):
+            REAL_TEX.bootstrap_evidence()
+
+    def test_installed_miktex_package_evidence_is_bound(self) -> None:
+        def package_info(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(timeout, 60)
+            package_id = command[-1]
+            version = "2.6.0" if package_id == "ctex" else ""
+            stdout = f"{package_id}\t{version}\t{'a' * 32}\ttrue\n"
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with (
+            mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
+            mock.patch.object(REAL_TEX, "run_captured", side_effect=package_info),
+        ):
+            packages = REAL_TEX.installed_miktex_packages()
+        self.assertEqual(
+            [package["id"] for package in packages],
+            [
+                "amsmath",
+                "booktabs",
+                "ctex",
+                "fandol",
+                "graphics",
+                "hyperref",
+                "latexdiff",
+                "latexmk",
+                "xetex",
+            ],
+        )
+        self.assertEqual(packages[2]["version"], "2.6.0")
+        self.assertEqual(packages[6]["version"], "not-reported")
+
+    def test_required_tex_resources_are_resolved(self) -> None:
+        def kpsewhich(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(timeout, 30)
+            return subprocess.CompletedProcess(command, 0, f"C:/tex/{command[-1]}\n", "")
+
+        with (
+            mock.patch.object(REAL_TEX.shutil, "which", return_value="kpsewhich.exe"),
+            mock.patch.object(REAL_TEX, "run_captured", side_effect=kpsewhich),
+        ):
+            resources = REAL_TEX.verify_tex_resources()
+        self.assertEqual(
+            resources,
+            {
+                "ctex_sty": "resolved_by_kpsewhich",
+                "fandol_song_regular": "resolved_by_kpsewhich",
+            },
+        )
+
+    def test_missing_miktex_package_fails_closed(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["miktex.exe"],
+            0,
+            f"ctex\t2.6.0\t{'b' * 32}\tfalse\n",
+            "",
+        )
+        with (
+            mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
+            mock.patch.object(REAL_TEX, "run_captured", return_value=result),
+            self.assertRaises(REAL_TEX.RealTexGateError),
+        ):
+            REAL_TEX.installed_miktex_packages()
+
+    def test_malformed_miktex_package_evidence_fails_closed(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["miktex.exe"],
+            0,
+            "amsmath\t2.17z\tmissing-fields\n",
+            "",
+        )
+        with (
+            mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
+            mock.patch.object(REAL_TEX, "run_captured", return_value=result),
+            self.assertRaises(REAL_TEX.RealTexGateError),
+        ):
+            REAL_TEX.installed_miktex_packages()
+
 
 class CleanInstallArchiveTests(unittest.TestCase):
     def write_sdist(

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,18 +14,34 @@ from typing import Any
 from xml.etree import ElementTree
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-REQUIRED_APT_PACKAGES = (
-    "latexmk",
+EXPECTED_SETUP_FILENAME = "miktexsetup-5.5.0+1763023-x64.zip"
+EXPECTED_SETUP_SHA256 = "0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d"
+REQUIRED_MIKTEX_PACKAGES = (
+    "amsmath",
+    "booktabs",
+    "ctex",
+    "fandol",
+    "graphics",
+    "hyperref",
     "latexdiff",
-    "texlive-lang-chinese",
-    "texlive-latex-recommended",
-    "texlive-xetex",
+    "latexmk",
+    "xetex",
 )
 TOOL_VERSION_COMMANDS = {
     "latexmk": ("-version",),
     "latexdiff": ("--version",),
+    "miktex": ("--version",),
+    "perl": ("--version",),
     "xelatex": ("--version",),
 }
+TOOL_VERSION_MARKERS = {
+    "latexmk": "latexmk,",
+    "latexdiff": "latexdiff",
+    "miktex": "miktex",
+    "perl": "this is perl",
+    "xelatex": "xetex",
+}
+PACKAGE_INFO_TEMPLATE = "{id}\t{version}\t{digest}\t{isInstalled}\n"
 MAX_DIAGNOSTIC_CHARS = 64 * 1024
 
 
@@ -63,46 +80,85 @@ def first_version_line(executable: str, arguments: tuple[str, ...]) -> str:
     if result.returncode != 0:
         raise RealTexGateError(f"version check failed for {executable}: {result.returncode}")
     lines = [line.strip() for line in (result.stdout + "\n" + result.stderr).splitlines()]
-    version = next((line for line in lines if line), "")
+    marker = TOOL_VERSION_MARKERS[executable]
+    version = next((line for line in lines if marker in line.casefold()), "")
     if not version or len(version) > 500 or any(character in version for character in "\r\n\x00"):
         raise RealTexGateError(f"invalid version output for {executable}")
     return version
 
 
-def verify_ctex() -> None:
+def verify_tex_resources() -> dict[str, str]:
     kpsewhich = shutil.which("kpsewhich")
     if kpsewhich is None:
         raise RealTexGateError("required executable is missing: kpsewhich")
-    result = run_captured([kpsewhich, "ctex.sty"], timeout=30)
-    if result.returncode != 0 or not result.stdout.strip():
-        raise RealTexGateError("kpsewhich could not resolve ctex.sty")
+    resources = {
+        "ctex_sty": "ctex.sty",
+        "fandol_song_regular": "FandolSong-Regular.otf",
+    }
+    for filename in resources.values():
+        result = run_captured([kpsewhich, filename], timeout=30)
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RealTexGateError(f"kpsewhich could not resolve {filename}")
+    return {label: "resolved_by_kpsewhich" for label in resources}
 
 
-def installed_apt_packages() -> list[dict[str, str]]:
-    dpkg_query = shutil.which("dpkg-query")
-    if dpkg_query is None:
-        raise RealTexGateError("dpkg-query is required to bind Ubuntu package versions")
-    result = run_captured(
-        [
-            dpkg_query,
-            "--show",
-            "--showformat=${binary:Package}\t${Version}\\n",
-            *REQUIRED_APT_PACKAGES,
-        ],
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RealTexGateError("one or more required Ubuntu TeX packages are not installed")
-    packages: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        name, separator, version = line.partition("\t")
-        canonical = name.partition(":")[0]
-        if not separator or canonical not in REQUIRED_APT_PACKAGES or not version:
-            raise RealTexGateError("dpkg-query returned malformed package evidence")
-        packages[canonical] = version
-    if set(packages) != set(REQUIRED_APT_PACKAGES):
-        raise RealTexGateError("Ubuntu package evidence is incomplete")
-    return [{"name": name, "version": packages[name]} for name in sorted(packages)]
+def installed_miktex_packages() -> list[dict[str, str]]:
+    miktex = shutil.which("miktex")
+    if miktex is None:
+        raise RealTexGateError("miktex is required to bind Windows TeX package evidence")
+    packages: list[dict[str, str]] = []
+    for package_id in REQUIRED_MIKTEX_PACKAGES:
+        result = run_captured(
+            [
+                miktex,
+                "packages",
+                "info",
+                "--template",
+                PACKAGE_INFO_TEMPLATE,
+                package_id,
+            ],
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise RealTexGateError(f"MiKTeX package query failed: {package_id}")
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) != 1:
+            raise RealTexGateError(f"MiKTeX package evidence is malformed: {package_id}")
+        fields = lines[0].split("\t")
+        if len(fields) != 4:
+            raise RealTexGateError(f"MiKTeX package evidence is malformed: {package_id}")
+        observed_id, version, digest, installed = fields
+        if observed_id != package_id or installed.casefold() != "true":
+            raise RealTexGateError(f"required MiKTeX package is not installed: {package_id}")
+        if len(digest) != 32 or any(
+            character not in "0123456789abcdefABCDEF" for character in digest
+        ):
+            raise RealTexGateError(f"MiKTeX package digest is invalid: {package_id}")
+        if len(version) > 100 or any(character in version for character in "\r\n\x00"):
+            raise RealTexGateError(f"MiKTeX package version is invalid: {package_id}")
+        packages.append(
+            {
+                "digest": digest.casefold(),
+                "id": package_id,
+                "version": version or "not-reported",
+            }
+        )
+    return packages
+
+
+def bootstrap_evidence() -> dict[str, str | None]:
+    filename = os.environ.get("MIKTEX_SETUP_FILENAME")
+    sha256 = os.environ.get("MIKTEX_SETUP_SHA256")
+    in_github_actions = os.environ.get("GITHUB_ACTIONS", "").casefold() == "true"
+    if in_github_actions or filename is not None or sha256 is not None:
+        if filename != EXPECTED_SETUP_FILENAME or sha256 != EXPECTED_SETUP_SHA256:
+            raise RealTexGateError("MiKTeX Setup Utility evidence is missing or mismatched")
+        return {
+            "filename": filename,
+            "sha256": sha256,
+            "source": "verified_official_setup_utility",
+        }
+    return {"filename": None, "sha256": None, "source": "preinstalled_local"}
 
 
 def junit_summary(path: Path) -> dict[str, Any]:
@@ -148,6 +204,8 @@ def write_json_exclusive(path: Path, value: Any) -> None:
 
 def main() -> int:
     args = parse_args()
+    if sys.platform != "win32":
+        raise RealTexGateError("real TeX gate is supported only on Windows")
     output_dir = args.output_dir.resolve()
     try:
         relative = output_dir.relative_to(PROJECT_ROOT / "build")
@@ -161,8 +219,8 @@ def main() -> int:
         name: first_version_line(name, arguments)
         for name, arguments in sorted(TOOL_VERSION_COMMANDS.items())
     }
-    verify_ctex()
-    packages = installed_apt_packages()
+    tex_resources = verify_tex_resources()
+    packages = installed_miktex_packages()
     junit_path = output_dir / "junit.xml"
     command = [
         sys.executable,
@@ -183,13 +241,14 @@ def main() -> int:
     summary = junit_summary(junit_path)
     require_one_real_test(summary, result.returncode)
     evidence = {
-        "apt_packages": packages,
-        "ctex_sty": "resolved_by_kpsewhich",
-        "platform": "ubuntu",
+        "bootstrap": bootstrap_evidence(),
+        "miktex_packages": packages,
+        "platform": "windows",
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "pytest": summary,
-        "schema_version": "latex-word-review-real-tex-gate-v1",
+        "schema_version": "latex-word-review-real-tex-gate-v2",
         "status": "pass",
+        "tex_resources": tex_resources,
         "tool_versions": tool_versions,
     }
     write_json_exclusive(output_dir / "toolchain.json", evidence)

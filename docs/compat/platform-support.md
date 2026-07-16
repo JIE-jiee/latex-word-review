@@ -1,102 +1,109 @@
-# Platform and tool support matrix
+# Windows platform and tool support matrix
 
-This matrix defines the release support target and the repeatable evidence required to claim it. A
-GitHub-hosted runner label is deliberately recorded instead of guessing a permanent operating-system
-image version; runner image migrations must be reviewed through the CI result and this document.
+This matrix defines the Windows-only release support target and the repeatable evidence required to
+claim it. A GitHub-hosted runner label is recorded instead of guessing a permanent Windows image
+version; runner image migrations must be reviewed through the CI result and this document.
 
 **Evidence status (2026-07-16):** the canonical public repository is
-[`JIE-jiee/latex-word-review`](https://github.com/JIE-jiee/latex-word-review). The workflows below are
-defined and locally statically audited; the authoritative hosted result is the GitHub Actions state
-attached to the exact source commit. A tagged public prerelease must remain blocked until the
-required remote lanes are observed passing. The table describes configured gates, not a fabricated
-historical CI result.
+[`JIE-jiee/latex-word-review`](https://github.com/JIE-jiee/latex-word-review). The Windows workflows
+publish the required evidence, but configuration alone is not a passing result. The authoritative
+hosted state is the GitHub Actions result attached to the exact source commit. A tagged public
+prerelease requires every required Windows lane to pass for the selected source commit.
 
-## Support tiers
+## Supported platform
 
-| Platform | Python | Target tier | Configured automated gate | Release impact |
-|---|---:|---|---|---|
-| `ubuntu-latest` | 3.12, 3.13 | Tier 1 | complete pytest suite and branch-coverage gate; real `tex2word` public-fixture path; clean-room fixture regeneration, structural/oracle/privacy QA; wheel and sdist build, inspection, separate clean installs, and installed-package E0 core loops; Python 3.12 additionally has a real XeLaTeX/CTeX/`latexmk`/`latexdiff` E2E gate | required |
-| `windows-latest` | 3.12, 3.13 | Tier 1 | same repository-controlled test, fixture, package, clean-install, and installed-package E0 matrix as Ubuntu | required |
-| `macos-latest` | 3.12 | Tier 2 | core/integration pytest suite; wheel/sdist build and inspection; clean wheel installation and installed-package E0 core loop | required for the tested subset, but not a claim of full external-tool coverage |
-| Any platform | 3.14 or another interpreter | Outside current metadata | no blocking matrix; `Requires-Python` is `>=3.12,<3.14` | not installable/supported until a reviewed metadata and CI change |
+| Environment | Python | Support state | Required evidence |
+|---|---:|---|---|
+| `windows-latest` | 3.12, 3.13 | release target | complete tests and branch coverage; real `tex2word` fixture path; clean-room fixture QA; wheel/sdist inspection, separate clean installs, and installed-package E0 loops |
+| Windows real-TeX lane | 3.12 | release target | pinned MiKTeX/tool identity plus exactly one real XeLaTeX/CTeX/`latexmk`/`latexdiff` E2E pass with zero skips |
+| Windows | 3.14 or another interpreter | outside current metadata | no blocking lane; `Requires-Python` is `>=3.12,<3.14` |
+| Linux or macOS | any | unsupported | no CI, installation, compatibility, triage, or release-blocking commitment |
 
-Tier 1 covers the deterministic workflow owned by this repository. Tests may substitute bounded fake
-`latexmk`/`latexdiff` processes where they are verifying command construction and audit binding. The
-dedicated Ubuntu/Python 3.12 `real-tex` lane is the exception: it installs the declared TeX packages
-and must complete the public E2E test with exactly one pass and zero skips. This is evidence for that
-specific Ubuntu toolchain, not a claim that every matrix runner contains TeX, Microsoft Word, or
-LibreOffice.
-
-Tier 2 means that failures in the declared core subset are defects, while native Word behavior,
-LibreOffice rendering, and full TeX toolchain combinations require separate evidence before they can
-be promoted to Tier 1.
+The pure Python wheel may be technically installable on an unsupported operating system. That fact
+does not expand this support matrix. Likewise, security checks that reject POSIX paths, symlinks,
+case aliases, or non-portable archive names remain intentional defenses against untrusted input;
+they are not Linux or macOS support promises.
 
 ## Backend and external-tool boundaries
 
 | Component | Supported/checked combination | Support statement |
 |---|---|---|
-| `tex2word` | Python package `1.0.5` | pinned default conversion backend; executed in the project's bounded worker and covered by public-fixture tests |
-| Pandoc baseline | Pandoc `3.9.0.2` plus `pandoc-crossref 0.3.24a` | documented compatible pair; external executables are not bundled and must be detected by `doctor` |
-| Pandoc without crossref | separately detected Pandoc executable | a baseline/degraded backend only; capability loss must be reported |
-| `latexmk` / XeLaTeX | Ubuntu apt packages below in the real gate; otherwise user-installed and runtime-detected | required for real PDF verification; no shell escape. The Ubuntu gate records package/tool versions separately. `doctor` detects tools, while the current VerificationReport records command status/exit/output hashes but does not yet bind executable version/hash |
-| `latexdiff` | Ubuntu apt package below in the real gate; otherwise user-installed and runtime-detected | required for marked review output; the Ubuntu gate and runtime verifier both fail when absent rather than silently succeeding |
-| Microsoft Word / LibreOffice | not bundled | used only for document review or visual QA; repository CI does not automate proprietary Word UI behavior |
+| `tex2word` | Python package `1.0.5` on supported Windows/Python combinations | pinned default conversion backend; executed in the project's bounded worker and covered by public-fixture tests |
+| Pandoc baseline | Pandoc `3.9.0.2` plus `pandoc-crossref 0.3.24a` on Windows | documented compatible pair; external executables are not bundled and must be detected by `doctor` |
+| Pandoc without crossref | separately detected Windows Pandoc executable | baseline/degraded backend only; capability loss must be reported |
+| MiKTeX / XeLaTeX | official Setup Utility `miktexsetup-5.5.0+1763023-x64.zip`, SHA-256 `0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d` | required Windows distribution bootstrap for the hosted real-TeX gate; the gate must record actual identity and resolve `ctex.sty` plus `FandolSong-Regular.otf` before compiling |
+| `latexmk` / `latexdiff` | MiKTeX `latexmk` and `latexdiff` packages | required for real PDF and marked-review verification; absence or version/identity failure blocks the gate |
+| Microsoft Word for Windows | not bundled | primary review and visual-QA application; proprietary UI behavior is verified separately from repository automation |
+| LibreOffice for Windows | not bundled, optional | optional visual cross-check only; it is not required for the maintained workflow |
 
 The upstream compatibility evidence and replacement decisions are in
 [`upstream-dependency-matrix.md`](upstream-dependency-matrix.md). “Installed successfully” is not a
-capability claim: `doctor`, backend capability objects, fixture checks, and verification reports are
-the authority.
+capability claim: `doctor`, backend capability objects, fixture checks, verification reports, and
+the exact commit's CI result are the authority.
 
-### Ubuntu real-TeX package set
+## Windows real-TeX gate
 
-The local composite action fixes these Ubuntu package **names** and installs them with
-`--no-install-recommends`: `latexmk`, `latexdiff`, `texlive-xetex`, `texlive-lang-chinese`, and
-`texlive-latex-recommended`. Exact versions are intentionally allowed to receive updates from the
-GitHub-hosted Ubuntu repository and are recorded by `dpkg-query` in `build/real-tex/toolchain.json`.
-The gate also records the first version line for `xelatex`, `latexmk`, and `latexdiff`, and requires
-`kpsewhich ctex.sty` to resolve successfully.
+The hosted real-TeX gate downloads MiKTeX's official Setup Utility
+`miktexsetup-5.5.0+1763023-x64.zip` and requires SHA-256
+`0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d` before extraction. It uses
+the utility to download and install the basic package set non-interactively into three isolated
+user roots under the runner's temporary directory. Before package operations, `initexmf --report`
+must prove those exact install/config/data roots, a non-shared regular setup, and a valid executable
+path. The gate then explicitly
+installs and verifies `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`,
+`latexmk`, and `latexdiff`. The public fixture explicitly selects CTeX's Fandol font set, so it does
+not depend on optional Chinese supplemental fonts in the Windows runner image. The gate then
+uses MiKTeX's `--disable-installer` and verifies its disabled tri-state value before testing, so the
+selected E2E test cannot make
+the package boundary pass by silently downloading another dependency during compilation.
 
-The selected pytest parameter is `installed-latexmk-latexdiff`. JUnit evidence must contain exactly
-one test, one pass, zero failures/errors, and zero skips. Missing tools, missing CTeX, malformed
-package evidence, a deselected test, or pytest's otherwise-successful skip result all fail the job.
+The evidence uses schema `latex-word-review-real-tex-gate-v2`, records the verified Setup Utility
+filename and SHA-256, MiKTeX package digests, and tool versions; verifies that `kpsewhich` resolves
+`ctex.sty` and `FandolSong-Regular.otf`; and runs the selected pytest parameter
+`installed-latexmk-latexdiff`. A local run against
+an existing installation records `preinstalled_local` instead and cannot be substituted for the
+hosted bootstrap evidence.
+
+JUnit evidence must contain exactly one test, one pass, zero failures/errors, and zero skips.
+Missing tools, unresolved CTeX, malformed toolchain evidence, a deselected test, or pytest's
+otherwise-successful skip result all fail the job. The package version pin and package names are a
+configuration contract, not evidence that the hosted installation succeeded; only the actual
+GitHub Actions result for the source commit can establish that.
+
 Pandoc remains a baseline/degraded external backend and is intentionally not added to this heavy
 toolchain lane.
 
 ## What each CI lane is configured to prove
 
 1. `quality` proves the lock is current; production/tests pass lint, formatting, and strict typing;
-   release trust-root scripts receive an explicit lint/format check and fixture scripts receive an
-   explicit static lint check despite their global tooling exclusion. Focused standard-library
-   self-tests cover release path/privacy/archive/fixture-gate failures.
-2. `tests` proves the repository-controlled closed loop on all four Tier 1 OS/Python combinations.
-3. `public-fixture` rebuilds the synthetic fixture and proves byte determinism, structural/oracle
-   correctness, provenance, and privacy on the same four combinations.
-4. `real-tex` installs the fixed minimal Ubuntu package set on Python 3.12, verifies tool/package
-   identity and CTeX resolution, and rejects anything other than one real E2E pass with zero skips.
-5. `package` resolves and installs all public extras from their bounded lowest direct dependencies,
-   builds both archives with the locked backend and `--no-isolation`, validates both archives,
-   clean-installs both wheel and sdist on all four combinations, then uses each fresh venv Python to complete
+   release trust-root scripts and fixture scripts receive explicit static checks.
+2. `tests` proves the repository-controlled closed loop on Windows with Python 3.12 and 3.13.
+3. `public-fixture` rebuilds the synthetic fixture and proves byte determinism,
+   structural/oracle correctness, provenance, and privacy on those two combinations.
+4. `real-tex` binds the configured Windows MiKTeX/toolchain identity on Python 3.12 and rejects
+   anything other than one real E2E pass with zero skips.
+5. `package` resolves all public extras from their bounded lowest direct dependencies, builds and
+   validates both archives, clean-installs wheel and sdist on the two supported Python versions,
+   then uses each fresh venv to complete
    snapshot→export→archive→ingest→approve→plan→apply against the public E0 fixture.
-6. `macos-core` records the Tier 2 core/package evidence on macOS 3.12, including the same E0 core
-   loop from the installed wheel.
-7. `release-artifacts` explicitly reruns the same real-TeX action plus all other release-critical
-   checks, requires every fixture release gate, performs a two-build byte comparison, and emits local
-   candidate evidence without publishing.
+6. `release-artifacts` reruns the Windows real-TeX action and the other release-critical checks,
+   requires every fixture release gate, performs a two-build byte comparison, and emits candidate
+   evidence without publishing.
 
 The fixture visual-review gate is intentionally stricter than ordinary CI. Ordinary CI may report
-only `visual_review_complete` as deferred; a release candidate cannot be produced until that check is
-recorded as passing. Any other deferred or failed fixture gate fails ordinary CI as well.
+only `visual_review_complete` as deferred; a release candidate cannot be produced until that check
+is recorded as passing. Any other deferred or failed fixture gate fails ordinary CI as well.
 
 ### Installed-artifact isolation boundary
 
 The package lanes invoke `.github/scripts/clean_install.py` with explicit, distinct, initially
-absent children of `build/`: a venv, a helper-owned transient work directory, and (when requested) a
+absent children of `build/`: a venv, a helper-owned transient work directory, and, when requested, a
 public-demo output directory. Before creating the venv, the helper verifies that the installed
 `build`, Hatchling, pip, setuptools, and wheel versions match `uv.lock` and that Hatchling is exactly
 1.31.0. It exports the base runtime closure and hashes from the frozen lock, builds every selected
 runtime artifact with `pip wheel --require-hashes --no-build-isolation`, and re-hashes the resulting
-local wheels. The fresh venv installs only that local hash-bound wheel set and the selected project
-wheel with `--no-index --no-deps`, then runs `pip check` and rejects missing or unexpected
+local wheels. The fresh Windows venv installs only that local hash-bound wheel set and the selected
+project wheel with `--no-index --no-deps`, then runs `pip check` and rejects missing or unexpected
 distributions.
 
 For an sdist, the helper never asks pip to install the archive. It rejects unsafe tar paths, links,
@@ -105,23 +112,23 @@ an owned directory, and applies a hard limit to the complete decompressed stream
 metadata and padding. Before `python -m build --wheel --no-isolation` can run, the helper byte-binds
 the sdist pyproject to the checkout; permits only the reviewed static Hatchling backend, target, and
 version-source shape; and binds filename/root/PKG-INFO/source/reference-wheel identity. The helper
-removes `PYTHONHOME` and `PYTHONPATH`, disables the user site, enables Python safe-path mode,
-and proves that `latex_word_review` resolves below the fresh venv prefix. It then launches
+removes `PYTHONHOME` and `PYTHONPATH`, disables the user site, enables Python safe-path mode, and
+proves that `latex_word_review` resolves below the fresh venv prefix. It then launches
 `scripts/run_public_e0_cli_demo.py --skip-verification` with that venv's Python. All CLI subprocesses
 inherit the same interpreter and isolated environment; the repository `src/` tree is therefore not
-an import source for this gate. The final machine-readable log receipt records
-`import_origin: fresh_venv_prefix`, `runtime_lock: uv.lock-hashes-to-local-wheel-hashes`, and
-`public_e0_demo: pass`.
+an import source for this gate.
 
 Existing venv/work/demo paths, symlink components, parent traversal, paths outside `build/`, and
 overlapping/nested roots are rejected before installation. On failure, the helper removes only the
 fresh roots it owns; it never deletes an existing path. On success the venv and demo remain as CI
-evidence while the transient work directory is removed. External TeX verification is covered
-separately by `real-tex`, so the installed-artifact gate intentionally stops after `apply`.
+evidence while the transient work root is removed. External TeX verification is covered separately
+by `real-tex`, so the installed-artifact gate intentionally stops after `apply`.
 
 ## Changing support
 
-A platform or version can be promoted only after a blocking CI lane covers tests, public fixture QA,
-archive checks, and clean installation. A combination can be demoted when upstream support ends or a
-reproducible failure remains unresolved; the change must update this matrix and the changelog. Do not
-infer support from a permissive dependency version specifier.
+A Windows/Python or Windows/external-tool combination can be promoted only after a blocking CI lane
+covers its tests, public fixture QA, archive checks, and clean installation as applicable. A
+combination can be demoted when upstream support ends or a reproducible failure remains unresolved;
+the change must update this matrix and the changelog. Adding Linux or macOS support would require a
+new explicit maintainer decision, dedicated blocking CI, release evidence, and documentation; it
+must not be inferred from permissive dependency metadata or incidental user success.

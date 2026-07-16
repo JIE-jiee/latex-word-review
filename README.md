@@ -13,6 +13,9 @@ LaTeX–Microsoft Word 审阅桥接。它让合作者在 Word 里使用“修订
 > 以 GitHub Actions 对当前提交的检查为准；尚未创建 GitHub Release。公共契约为
 > `v1alpha`；适合评估、实验和审计，尚不应把任意复杂 LaTeX 文档的全自动回填视为稳定
 > 承诺。
+>
+> 支持范围仅限 Windows 与 CPython 3.12/3.13。Linux 和 macOS 不属于本项目的开发、CI、
+> 发行或维护承诺；纯 Python 发行物即使能在其他系统安装，也不代表获得支持。
 
 ## 能得到什么
 
@@ -48,8 +51,8 @@ OOXML 证据进入独立账本；`latexdiff` 只用于产生人类可视的 LaTe
 
 ## 安装
 
-需要 Python 3.12 或 3.13。从公开仓库取得源码后进入项目根目录；开发和可复现验证推荐
-[uv](https://docs.astral.sh/uv/)：
+需要受支持的 Windows 环境和 Python 3.12 或 3.13。从公开仓库取得源码后进入项目根目录；
+以下 PowerShell 流程使用 [uv](https://docs.astral.sh/uv/) 进行开发和可复现验证：
 
 ```console
 git clone https://github.com/JIE-jiee/latex-word-review.git
@@ -75,7 +78,12 @@ latex-word-review --help
 ```
 
 `tex2word==1.0.5` 是默认运行时后端。Pandoc 是可选外部基线。生成 PDF 审计产物需要
-`latexmk`、对应 TeX 引擎和 `latexdiff`；缺失时会显式 `blocked`，不会伪报成功。
+Windows 上可用的 `latexmk`、对应 TeX 引擎和 `latexdiff`；缺失时会显式 `blocked`，不会
+伪报成功。远程真实 TeX 门禁在 Windows runner 上使用 MiKTeX 官方 Setup Utility
+`miktexsetup-5.5.0+1763023-x64.zip`，先核对固定 SHA-256，再无交互安装 basic 集合并显式
+安装/验证 `xetex`、`ctex`、`fandol`、`amsmath`、`booktabs`、`graphics`、`hyperref`、
+`latexmk`、`latexdiff`。公共样例固定使用可随 TeX 分发的 Fandol 字体，不依赖 Runner
+的区域或 Windows 中文补充字体；是否受支持以目标提交的实际 CI 结果为准。
 
 ## 从新 clone 运行公开最小闭环
 
@@ -144,7 +152,7 @@ Skill 不会把“处理返回稿”解释成默认接受全部修订。用户�
 
 ## 支持与已知限制
 
-支持矩阵见 [platform-support.md](docs/compat/platform-support.md)，功能边界见
+Windows 支持矩阵见 [platform-support.md](docs/compat/platform-support.md)，功能边界见
 [v0.1-scope.md](docs/compat/v0.1-scope.md)，上游选型和许可证证据见
 [upstream-dependency-matrix.md](docs/compat/upstream-dependency-matrix.md)，冻结依赖的漏洞、
 许可证与供应链审计见
@@ -152,7 +160,8 @@ Skill 不会把“处理返回稿”解释成默认接受全部修订。用户�
 
 当前最重要的限制是：自动应用只覆盖精确定位的纯正文；不承诺任意宏、
 自定义类、复杂表格或特定期刊模板能无损导出；Word 审阅稿是派生副本，不是
-可反向覆盖的第二权威源。
+可反向覆盖的第二权威源。Linux 和 macOS 上的问题不会作为本项目发行阻断项，维护者也
+不承诺为这些系统提供安装、兼容或故障排查支持。
 
 ## 开发与贡献
 

@@ -13,6 +13,7 @@
 | Python import | `latex_word_review`，已实现 | `src/latex_word_review/` |
 | 许可证 | 代码、原创文档和自制 fixture 采用 Apache-2.0，根 `LICENSE` 已存在 | `LICENSE`、fixture provenance |
 | Python | `>=3.12,<3.14`，首批元数据只允许 3.12/3.13 | `pyproject.toml` |
+| 支持平台 | Windows-only；Linux/macOS 不进入开发、CI、发行或维护承诺 | `docs/adr/0002-windows-only-support.md`、支持矩阵 |
 | 运行依赖 | `jsonschema`、`lxml`、`referencing`、`rfc8785`、`tex2word==1.0.5` | `pyproject.toml`、`uv.lock` |
 | 本地仓库 | Git 与 CI 配置已初始化；本快照中“未初始化”结论已失效 | 当前工作树 |
 | 远程发布 | 公开源仓库为 `JIE-jiee/latex-word-review`；远程 CI 以精确提交的 Actions 状态为准，尚无 tag 或 GitHub/PyPI prerelease | 当前发布记录 |
@@ -270,10 +271,10 @@ wheel/sdist 不捆绑这些程序。每个 run 记录版本、实际可执行文
 
 1. 创建正式 `pyproject.toml`，写入统一名称和 Python 下限；**已完成**。
 2. 生成最终 `LICENSE`、第三方通知和 fixture 许可元数据；**已完成**。
-3. 初始化本地 Git 与 CI；**本地配置已完成，尚无远程运行证据**。
+3. 初始化本地 Git 与 CI；**已完成并推送，精确提交的远程结果以 GitHub Actions 为准**。
 4. 在维护者账户下创建 GitHub/PyPI 发布身份；**GitHub 目标身份已确认为
-   `JIE-jiee/latex-word-review` 并准备首次推送，PyPI 身份尚未创建**。
-5. 从 wheel/sdist 做 clean-install 测试；**本地验证已完成，远程支持矩阵仍待闭环**。
+   `JIE-jiee/latex-word-review` 并已完成首次推送，PyPI 身份尚未创建**。
+5. 从 wheel/sdist 做 clean-install 测试；**本地验证已完成，远程支持矩阵按精确提交持续核验**。
 
 本文记录的原始决策任务没有执行这些动作，也没有替维护者保留任何名称；上面的完成
 状态来自后续工程记录。GitHub 的目标 owner/slug 已由维护者确认；PyPI 名称可用性仍须在

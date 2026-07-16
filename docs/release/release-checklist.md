@@ -22,10 +22,12 @@
 - [ ] Quality gate passes with the frozen lockfile; public extras resolve/install from their lowest
       direct bounds on Python 3.12 and 3.13.
 - [ ] Windows 3.12 and 3.13 closed-loop, fixture, and package lanes pass.
-- [ ] Ubuntu 3.12 and 3.13 closed-loop, fixture, and package lanes pass.
-- [ ] Ubuntu 3.12 real XeLaTeX/CTeX/`latexmk`/`latexdiff` lane records one pass, zero skips, and the
-      installed apt/tool versions; the release workflow rerun also passes.
-- [ ] macOS 3.12 Tier 2 core/package lane passes, or support is explicitly revised before release.
+- [ ] Windows 3.12 real XeLaTeX/CTeX/`latexmk`/`latexdiff` lane records one pass, zero skips,
+      the expected MiKTeX Setup Utility filename and official SHA-256, all nine required MiKTeX
+      packages, their digests, resolved CTeX/Fandol resources, and actual tool versions in the v2
+      evidence; the release workflow
+      rerun also passes.
+- [ ] No Linux or macOS result is treated as a release prerequisite or support claim.
 - [ ] Public fixture visual review is recorded as `pass`; no deferred release gate remains.
 
 ## Candidate artifacts
@@ -49,12 +51,12 @@
       identity, and reviewed Hatchling-only build contract are bound to the checkout/reference wheel.
 - [ ] `SHA256SUMS`, runtime-closure CycloneDX SBOM, unsigned SLSA v1-compatible custom provenance
       statement, and evidence manifest verify locally; release notes do not claim a full
-      build/Actions/apt supply-chain inventory.
+      build/Actions/Windows-runner/MiKTeX-bootstrap/package-repository supply-chain inventory.
 - [ ] Candidate source SHA and provenance subject digests match the reviewed commit and files.
 
 ## Promotion
 
-- [ ] Candidate is downloaded and independently verified on another machine.
+- [ ] Candidate is downloaded and independently verified on another Windows machine.
 - [ ] Maintainer explicitly authorizes the target GitHub prerelease/package-index operation.
 - [ ] Release notes state support tiers, security-relevant changes, schema/CLI compatibility, and known
       limitations.

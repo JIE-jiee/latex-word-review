@@ -12,6 +12,7 @@ hash bindings as its source export.
 
 ## Prerequisites
 
+- Windows (the maintained platform);
 - Python 3.12 or 3.13;
 - `uv` for the copyable source-checkout commands below;
 - `latexmk`, XeLaTeX and `latexdiff` only if you want PDFs and the audit bundle.
@@ -26,13 +27,6 @@ uv run --frozen python scripts/run_public_e0_cli_demo.py
 The default output is a fresh
 `build/public-e0-cli-demo/<run-id>/` directory. A specific path is also supported, but
 it must not exist:
-
-```console
-uv run --frozen python scripts/run_public_e0_cli_demo.py \
-  --output build/my-public-e0-run
-```
-
-On PowerShell, the same command can be entered on one line:
 
 ```powershell
 uv run --frozen python scripts/run_public_e0_cli_demo.py --output build/my-public-e0-run
@@ -124,21 +118,14 @@ byte-for-byte unchanged after snapshot/archive/ingest/apply.
 
 For deeper inspection:
 
-```console
-uv run --frozen latex-word-review validate \
-  build/my-public-e0-run/objects/changeset.json --schema ChangeSet
-uv run --frozen latex-word-review validate \
-  build/my-public-e0-run/objects/approval-final.json --schema ApprovalSet
-uv run --frozen latex-word-review validate \
-  build/my-public-e0-run/plan/patch-plan.json --schema PatchPlan
-uv run --frozen latex-word-review verify-bundle \
-  build/my-public-e0-run/audit.zip \
-  --run-manifest build/my-public-e0-run/objects/run-manifest.json \
-  --verification build/my-public-e0-run/verification/verification-report.json
+```powershell
+uv run --frozen latex-word-review validate build/my-public-e0-run/objects/changeset.json --schema ChangeSet
+uv run --frozen latex-word-review validate build/my-public-e0-run/objects/approval-final.json --schema ApprovalSet
+uv run --frozen latex-word-review validate build/my-public-e0-run/plan/patch-plan.json --schema PatchPlan
+uv run --frozen latex-word-review verify-bundle build/my-public-e0-run/audit.zip --run-manifest build/my-public-e0-run/objects/run-manifest.json --verification build/my-public-e0-run/verification/verification-report.json
 ```
 
-The last command applies only to a full verified run. On PowerShell, enter each
-multi-line example on one line or replace the trailing backslashes with backticks.
+The last command applies only to a full verified run.
 
 ## Reading the result correctly
 

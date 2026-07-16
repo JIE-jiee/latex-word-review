@@ -1,30 +1,101 @@
 name: Real TeX closed-loop gate
-description: Install the bounded Ubuntu TeX toolchain and run the non-skippable public E2E branch.
+description: Install the bounded Windows MiKTeX toolchain and run the non-skippable public E2E branch.
 
 runs:
   using: composite
   steps:
-    - name: Refresh Ubuntu package metadata
-      shell: bash
-      run: >-
-        sudo timeout 5m apt-get
-        -o Acquire::Retries=3
-        -o Acquire::http::Timeout=30
-        update
-    - name: Install the fixed minimal TeX package set
-      shell: bash
-      run: >-
-        sudo env DEBIAN_FRONTEND=noninteractive timeout 20m apt-get
-        -o Acquire::Retries=3
-        -o Acquire::http::Timeout=30
-        install --yes --no-install-recommends
-        latexmk
-        latexdiff
-        texlive-xetex
-        texlive-lang-chinese
-        texlive-latex-recommended
+    - name: Download and verify the official MiKTeX Setup Utility
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $archive = Join-Path $env:RUNNER_TEMP "miktexsetup-5.5.0+1763023-x64.zip"
+        $setupRoot = Join-Path $env:RUNNER_TEMP "latex-word-review-miktex-setup"
+        Invoke-WebRequest `
+          -Uri "https://miktex.org/download/ctan/systems/win32/miktex/setup/windows-x64/miktexsetup-5.5.0+1763023-x64.zip" `
+          -OutFile $archive
+        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expected = "0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d"
+        if ($actual -ne $expected) {
+          throw "MiKTeX Setup Utility SHA-256 mismatch"
+        }
+        Expand-Archive -LiteralPath $archive -DestinationPath $setupRoot
+        $setups = @(Get-ChildItem -LiteralPath $setupRoot -Recurse -File -Filter "miktexsetup_standalone.exe")
+        if ($setups.Count -ne 1) {
+          throw "Verified MiKTeX archive did not contain exactly one setup utility"
+        }
+        "MIKTEX_SETUP=$($setups[0].FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "MIKTEX_SETUP_FILENAME=$(Split-Path -Leaf $archive)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "MIKTEX_SETUP_SHA256=$actual" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Install the official basic MiKTeX package set for this runner
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $repository = Join-Path $env:RUNNER_TEMP "latex-word-review-miktex-repository"
+        $install = Join-Path $env:RUNNER_TEMP "latex-word-review-miktex-install"
+        $config = Join-Path $env:RUNNER_TEMP "latex-word-review-miktex-config"
+        $data = Join-Path $env:RUNNER_TEMP "latex-word-review-miktex-data"
+        & $env:MIKTEX_SETUP `
+          "--local-package-repository=$repository" `
+          --package-set=basic `
+          download
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package-set download failed" }
+        & $env:MIKTEX_SETUP `
+          "--local-package-repository=$repository" `
+          --package-set=basic `
+          --shared=no `
+          "--user-install=$install" `
+          "--user-config=$config" `
+          "--user-data=$data" `
+          --use-registry=no `
+          --modify-path=no `
+          install
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX installation failed" }
+        $executables = @(Get-ChildItem -LiteralPath $install -Recurse -File -Filter "miktex.exe")
+        if ($executables.Count -ne 1) {
+          throw "MiKTeX installation did not contain exactly one miktex.exe"
+        }
+        $executables[0].DirectoryName | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+        "MIKTEX_USERINSTALL=$install" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "MIKTEX_USERCONFIG=$config" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "MIKTEX_USERDATA=$data" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Install and verify the fixed MiKTeX package set
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $report = & initexmf --report
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX configuration report failed" }
+        $expected = @{
+          Configuration = "Regular"
+          SharedSetup = "no"
+          PathOkay = "yes"
+          UserInstall = $env:MIKTEX_USERINSTALL
+          UserConfig = $env:MIKTEX_USERCONFIG
+          UserData = $env:MIKTEX_USERDATA
+        }
+        foreach ($name in $expected.Keys) {
+          $pattern = '^{0}:\s+{1}\s*$' -f [regex]::Escape($name), [regex]::Escape($expected[$name])
+          if (@($report | Where-Object { $_ -match $pattern }).Count -ne 1) {
+            throw "MiKTeX configuration mismatch: $name"
+          }
+        }
+        miktex packages update-package-database
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package database update failed" }
+        miktex packages require xetex ctex fandol amsmath booktabs graphics hyperref latexmk latexdiff
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package requirement failed" }
+        initexmf --disable-installer
+        if ($LASTEXITCODE -ne 0) { throw "Disabling MiKTeX automatic package installation failed" }
+        $autoInstall = (& initexmf "--show-config-value=[MPM]AutoInstall").Trim()
+        if ($LASTEXITCODE -ne 0 -or $autoInstall -ne "2") {
+          throw "MiKTeX automatic package installation is not disabled"
+        }
+        miktex fndb refresh
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX filename database refresh failed" }
+        miktex links install
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX executable-link refresh failed" }
+        miktex packages verify xetex ctex fandol amsmath booktabs graphics hyperref latexmk latexdiff
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package verification failed" }
     - name: Verify tools and run exactly one real TeX E2E case
-      shell: bash
+      shell: pwsh
       run: >-
         uv run --frozen --python 3.12 python
         .github/scripts/run_real_tex_gate.py

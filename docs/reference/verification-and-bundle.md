@@ -30,19 +30,12 @@ SourceManifest + ChangeSet + final ApprovalSet + PatchPlan
 
 完整交付层已经连接到安装后的 `latex-word-review` 命令：
 
-```console
-latex-word-review verify ORIGINAL REVISED RETURNED_ORIGINAL SOURCE_MANIFEST \
-  CHANGESET FINAL_APPROVAL PLAN/patch-plan.json VERIFICATION_OUTPUT
-latex-word-review ledger CHANGESET FINAL_APPROVAL PLAN/patch-plan.json \
-  VERIFICATION_OUTPUT/verification-report.json LEDGER_OUTPUT
-latex-word-review run-manifest SOURCE_MANIFEST RUN_MANIFEST \
-  --object VERIFICATION_OUTPUT/verification-report.json --phase verified --status completed
-latex-word-review bundle BUNDLE_SOURCE_ROOT audit.zip RUN_MANIFEST \
-  VERIFICATION_OUTPUT/verification-report.json --classification local_private \
-  --item RELATIVE_PATH ROLE SOURCE_OBJECT.json
-latex-word-review verify-bundle audit.zip \
-  --run-manifest RUN_MANIFEST \
-  --verification VERIFICATION_OUTPUT/verification-report.json
+```powershell
+latex-word-review verify ORIGINAL REVISED RETURNED_ORIGINAL SOURCE_MANIFEST CHANGESET FINAL_APPROVAL PLAN/patch-plan.json VERIFICATION_OUTPUT
+latex-word-review ledger CHANGESET FINAL_APPROVAL PLAN/patch-plan.json VERIFICATION_OUTPUT/verification-report.json LEDGER_OUTPUT
+latex-word-review run-manifest SOURCE_MANIFEST RUN_MANIFEST --object VERIFICATION_OUTPUT/verification-report.json --phase verified --status completed
+latex-word-review bundle BUNDLE_SOURCE_ROOT audit.zip RUN_MANIFEST VERIFICATION_OUTPUT/verification-report.json --classification local_private --item RELATIVE_PATH ROLE SOURCE_OBJECT.json
+latex-word-review verify-bundle audit.zip --run-manifest RUN_MANIFEST --verification VERIFICATION_OUTPUT/verification-report.json
 ```
 
 以上是参数形状示例；每个命令的精确可选项以 `latex-word-review COMMAND --help` 为准。

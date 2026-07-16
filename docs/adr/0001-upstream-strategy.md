@@ -1,9 +1,10 @@
 # ADR-0001：转换与修订解析上游策略
 
-- 状态：已接受
+- 状态：已接受；平台范围部分由 ADR-0002 取代
 - 日期：2026-07-16
 - 决策者：项目维护者
-- 关联：`docs/compat/e0-contract-protocol.md`、`docs/compat/upstream-dependency-matrix.md`
+- 关联：`docs/compat/e0-contract-protocol.md`、`docs/compat/upstream-dependency-matrix.md`、
+  `0002-windows-only-support.md`
 
 ## 背景
 
@@ -13,7 +14,8 @@
 
 1. 正文、OMML、字段、图表和引用无静默丢失；
 2. 能读取删除文本、作者、时间、批注范围和原始证据；
-3. Windows 与 Linux 可安装、可测试；
+3. Windows 与 Linux 可安装、可测试；这是当时的跨平台驱动因素，当前维护范围已由
+   ADR-0002 收敛为 Windows-only；
 4. 许可证允许开源分发，并明确“Python 依赖”与“外部可执行程序”边界；
 5. 公共接口可被适配器隔离，后端可替换；
 6. 上游维护风险与贡献路径清楚；

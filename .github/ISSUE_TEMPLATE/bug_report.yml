@@ -15,15 +15,23 @@ body:
       placeholder: latex-word-review 0.1.0b1
     validations:
       required: true
-  - type: dropdown
-    id: platform
+  - type: input
+    id: windows
     attributes:
-      label: Platform
+      label: Windows version and build
+      description: Linux and macOS are outside the maintained support scope.
+      placeholder: Windows 11, version 24H2, OS build 26100.x
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Windows architecture
+      description: This field is diagnostic; an option does not by itself establish support.
       options:
-        - Windows
-        - Ubuntu or another Linux distribution
-        - macOS
-        - Other
+        - AMD64 (x86-64)
+        - ARM64
+        - Other Windows architecture
     validations:
       required: true
   - type: input

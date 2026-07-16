@@ -9,9 +9,10 @@ source mutation as security-sensitive issues.
 
 There is no stable or tagged prerelease yet. The public `0.1.0b1` source tree is a beta candidate.
 
-| Version | Supported |
+| Version / environment | Supported |
 |---|---|
-| Current `main` development line | Yes, best effort |
+| Current `main` on the documented Windows/Python combinations | Yes, best effort |
+| Linux or macOS runtime behavior | No |
 | Historical pre-alpha snapshots | No |
 
 This table will be replaced by a release support window before the first tagged public prerelease.
@@ -24,8 +25,11 @@ which is enabled for this repository. If the form is temporarily unavailable, do
 public issue; contact the maintainer through an existing trusted private channel and provide a
 minimal synthetic reproducer whenever possible.
 
-Please include the affected version or commit, platform, impact, prerequisites, and reproduction
-steps. Redact local paths, names, document contents, access tokens, and reviewer metadata.
+Please include the affected version or commit, Windows version/build and architecture, impact,
+prerequisites, and reproduction steps. If the issue is platform-independent and was discovered on
+an unsupported operating system, say so explicitly: it will still be assessed as a security report,
+but that assessment does not create a runtime-support commitment. Redact local paths, names,
+document contents, access tokens, and reviewer metadata.
 
 The maintainers aim to acknowledge a complete private report within three business days and provide
 an initial severity assessment within seven business days. Timelines for a fix and coordinated

@@ -12,8 +12,9 @@ Each successful release-candidate run uploads the two Python distributions plus 
 The release job creates the SBOM from the Python interpreter inside the freshly installed wheel
 venv, not from the development environment. It follows package metadata from
 `latex-word-review` and records only the reachable Python runtime closure. It does **not** inventory
-Hatchling or other build tools, GitHub Actions, the runner image, or apt-installed TeX tools; those
-remain separate workflow/toolchain evidence and this is not a complete supply-chain SBOM.
+Hatchling or other build tools, GitHub Actions, the Windows runner image, MiKTeX Setup Utility,
+MiKTeX repository, or installed TeX packages/tools; those remain separate workflow/toolchain
+evidence and this is not a complete supply-chain SBOM.
 
 Before that venv is used for evidence generation, it completes the public E0
 snapshot→export→archive→ingest→approve→plan→apply loop from the installed wheel. A separate fresh
@@ -39,7 +40,8 @@ the separately checked project wheel. It performs no dependency resolution or so
 
 The provenance is **unsigned** and repository-defined. Although it uses the SLSA v1 predicate URI
 and compatible field shapes, it is not a SLSA attestation or a cryptographic proof of runner
-identity, and it does not enumerate the complete build/Actions/apt dependency graph. The Actions
+identity, and it does not enumerate the complete
+build/Actions/Windows-runner/MiKTeX-bootstrap/package-repository dependency graph. The Actions
 artifact also is not a public release and expires after 14 days. Consumers must bind the downloaded
 files to a reviewed source commit, verify all digests, and apply their own trust policy.
 

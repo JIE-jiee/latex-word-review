@@ -15,8 +15,7 @@
 
 ```console
 latex-word-review doctor [--cwd PROJECT_COPY]
-latex-word-review snapshot SOURCE DESTINATION --run-id RUN_ID \
-  --manifest-out SOURCE_MANIFEST.json [--main main.tex]
+latex-word-review snapshot SOURCE DESTINATION --run-id RUN_ID --manifest-out SOURCE_MANIFEST.json [--main main.tex]
 ```
 
 `doctor` 默认把 canonical JSON 报告写到 stdout，不需要 `--json` 开关；必需工具

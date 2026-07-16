@@ -113,13 +113,15 @@ vendor 依赖，必须按实际再分发内容重新生成 notices 并做逐文�
   原生组件清单和漏洞数据源才能获得完整覆盖。
 - 本轮没有证明包维护者身份、注册表账户安全、上游源码无恶意逻辑或构建机无入侵；冻结
   哈希可检测下载字节漂移，但不能把恶意且已锁定的字节变成可信字节。
-- Ubuntu 真 TeX CI 固定的是 `latexmk`、`latexdiff`、`texlive-xetex`、
-  `texlive-lang-chinese`、`texlive-latex-recommended` 包名，并在每次运行中用
-  `dpkg-query` 把实际版本写入 `toolchain.json`；`apt-get update` 后的精确版本仍会随
-  runner/Ubuntu 仓库漂移，当前 `uv.lock` 不覆盖这部分。
+- Windows 真 TeX CI 配置固定 MiKTeX 官方 Setup Utility
+  `miktexsetup-5.5.0+1763023-x64.zip` 及官方 SHA-256，先无交互安装 basic 集合，再显式
+  安装/验证 `xetex`、`ctex`、`fandol`、`amsmath`、`booktabs`、`graphics`、`hyperref`、
+  `latexmk`、`latexdiff`，并解析 CTeX/Fandol 资源。v2 `toolchain.json` 记录包 digest、资源
+  与工具版本并以精确提交的 CI 结果为准；
+  当前 `uv.lock` 不覆盖 MiKTeX 包仓库和工具链。
 - 发布证据中的 CycloneDX SBOM 只枚举从已安装项目 wheel 可达的、锁定的 Python 运行时
-  闭包。它不包含 Hatchling 等 build/dev 工具、GitHub Actions、runner 镜像、apt TeX 或
-  外部 Word/Pandoc 工具，不能表述为“完整供应链 SBOM”。
+  闭包。它不包含 Hatchling 等 build/dev 工具、GitHub Actions、Windows runner 镜像、
+  MiKTeX Setup Utility、MiKTeX 包或外部 Word/Pandoc 工具，不能表述为“完整供应链 SBOM”。
 - 对仅提供源码归档的运行时依赖（当前某些平台上的 `pylatexenc`），clean-install 会先校验
   锁文件中的下载哈希，再用已锁定 builder 禁用隔离构建并对本地 wheel 重新哈希；但当前
   不会把两次独立 clean-install 生成的该依赖 wheel 做逐字节比较。因此，本项目自身的

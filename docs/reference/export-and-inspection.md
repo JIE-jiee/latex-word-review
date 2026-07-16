@@ -30,8 +30,7 @@ process.
 argument vector equivalent to:
 
 ```text
-pandoc main.tex --from=latex --to=docx --standalone \
-  --output=<owned-stage.docx> --resource-path=.
+pandoc main.tex --from=latex --to=docx --standalone --output=<owned-stage.docx> --resource-path=.
 ```
 
 The process always runs with `cwd` equal to the validated source root. The S3

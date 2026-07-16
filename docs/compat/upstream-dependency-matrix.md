@@ -1,6 +1,9 @@
 # E0 上游依赖、许可证与接口证据矩阵
 
 > 核验快照：2026-07-16T05:03:24Z。本文只记录官方 GitHub 仓库、GitHub Release、版本标签源码、PyPI 元数据或项目官方文档中的证据。README 中的功能声明仅作为接口线索；尚未通过本项目 fixture 实测的能力均标为“待契约测试”。
+>
+> 当前项目支持范围由 ADR-0002 收敛为 Windows-only。本文关于上游提供 Linux/macOS
+> 二进制的描述仅是上游事实，不构成本项目的平台支持、CI 或维护承诺。
 
 ## 1. 结论先行
 
@@ -258,7 +261,7 @@ RevisionReader
 
 ## 6. 尚待最小契约实验回答的问题
 
-1. `tex2word 1.0.5` 在 Python 3.12/3.13、Windows/Ubuntu 上的确定性 DOCX、manifest 和报告表现。
+1. `tex2word 1.0.5` 在 Python 3.12/3.13、受支持 Windows 环境上的确定性 DOCX、manifest 和报告表现。
 2. `tex2word` 公共 API 与 CLI 在同一 fixture 上是否生成等价报告；API 失败时 CLI 是否足以作为稳定 fallback。
 3. Pandoc 3.9.0.2 + crossref 0.3.24a 的结构计数，以及 Pandoc 3.10 不带 crossref 的差异。
 4. Pandoc `--track-changes=all` 对 move、段落级删除、范围评论、多审阅者和嵌套表格的实际 AST。

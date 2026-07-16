@@ -11,13 +11,12 @@ permissions:
 
 env:
   UV_VERSION: "0.11.16"
-  UV_FROZEN: "1"
   UV_NO_PROGRESS: "1"
 
 jobs:
   candidate:
-    name: Fail-closed release candidate
-    runs-on: ubuntu-latest
+    name: Fail-closed Windows release candidate
+    runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - name: Check out complete source history without credentials
@@ -44,7 +43,7 @@ jobs:
       - name: Derive reproducible build timestamp from the source commit
         run: >-
           uv run --frozen python .github/scripts/release_checks.py source-date-epoch
-          --github-env "$GITHUB_ENV"
+          --github-env "$env:GITHUB_ENV"
       - name: Re-run quality gates
         run: |
           uv lock --check
@@ -107,7 +106,7 @@ jobs:
           --public-e0-output build/release-installed-e0-sdist
       - name: Generate checksums, runtime SBOM, and unsigned SLSA-compatible statement
         run: >-
-          build/release-wheel-install/bin/python .github/scripts/release_evidence.py
+          build/release-wheel-install/Scripts/python.exe .github/scripts/release_evidence.py
           --dist-dir dist --output-dir release-evidence
           --repository "${{ github.repository }}" --source-ref "${{ github.ref }}"
           --source-sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
