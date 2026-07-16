@@ -1,0 +1,15 @@
+[
+  {
+    "name": "utf16-key-order-and-utf8",
+    "value": {
+      "z": 0,
+      "a": "é",
+      "nested": {
+        "β": true,
+        "a": null
+      }
+    },
+    "canonical": "{\"a\":\"é\",\"nested\":{\"a\":null,\"β\":true},\"z\":0}",
+    "sha256": "sha256:4f626c1fac0924a89a16c87a5671723d2b3471addda2728f379a70d29af95a18"
+  }
+]

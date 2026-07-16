@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:latex-word-review:schema:v1alpha:run-manifest",
+  "title": "RunManifest 1.0.0-alpha.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "object_id", "run_id", "generated_at", "producer", "payload", "integrity", "extensions"],
+  "properties": {
+    "schema_name": {"const": "RunManifest"},
+    "schema_version": {"const": "1.0.0-alpha.1"},
+    "object_id": {"type": "string", "pattern": "^runm_[a-z0-9]{26,64}$"},
+    "run_id": {"$ref": "urn:latex-word-review:schema:v1alpha:common#/$defs/RunId"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "producer": {"$ref": "urn:latex-word-review:schema:v1alpha:common#/$defs/ToolIdentity"},
+    "payload": {"$ref": "urn:latex-word-review:schema:v1alpha:common#/$defs/RunManifestPayload"},
+    "integrity": {"$ref": "urn:latex-word-review:schema:v1alpha:common#/$defs/Integrity"},
+    "extensions": {"$ref": "urn:latex-word-review:schema:v1alpha:common#/$defs/Extensions"}
+  }
+}

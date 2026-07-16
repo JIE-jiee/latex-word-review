@@ -1,0 +1,128 @@
+name: Release candidate evidence (no publish)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.16"
+  UV_FROZEN: "1"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  candidate:
+    name: Fail-closed release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out complete source history without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install all locked release-check groups
+        run: uv sync --frozen --all-groups --python 3.12
+      - name: Bind tag to package version
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py version
+          --ref "${{ github.ref }}"
+      - name: Derive reproducible build timestamp from the source commit
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py source-date-epoch
+          --github-env "$GITHUB_ENV"
+      - name: Re-run quality gates
+        run: |
+          uv lock --check
+          uv run --frozen python .github/scripts/release_checks.py repo --root . --include-untracked
+          uv run --frozen python .github/scripts/selftest_release_tools.py
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+          uv run --frozen mypy
+      - name: Re-run explicit release trust-root static checks
+        run: |
+          uv run --frozen ruff check .github/scripts
+          uv run --frozen ruff format --check .github/scripts
+          uv run --frozen ruff check scripts --ignore E501,I001
+      - name: Prove all public extras install from their lowest direct bounds
+        run: |
+          python -c "from pathlib import Path; import shutil; p=Path('build/release-lowest-direct'); q=p/'src/latex_word_review'; q.mkdir(parents=True); shutil.copy2('pyproject.toml',p/'pyproject.toml'); shutil.copy2('README.md',p/'README.md'); shutil.copy2('LICENSE',p/'LICENSE'); shutil.copy2('src/latex_word_review/__about__.py',q/'__about__.py')"
+          uv lock --project build/release-lowest-direct --resolution lowest-direct --python 3.12
+          uv sync --project build/release-lowest-direct --frozen --all-extras --no-dev --no-install-project --python 3.12
+      - name: Re-run tests and branch coverage gate
+        run: >-
+          uv run --frozen pytest --cov=latex_word_review
+          --cov-report=term-missing --cov-report=xml
+      - name: Install and exercise the real TeX toolchain
+        uses: ./.github/actions/real-tex-gate
+      - name: Rebuild the public fixture
+        run: uv run --frozen python scripts/build_e0_public_fixture.py
+      - name: Prove fixture regeneration is byte-for-byte deterministic
+        run: git diff --exit-code -- tests/fixtures/e0-minimal-paper
+      - name: Generate public fixture release reports
+        id: fixture-qa
+        continue-on-error: true
+        run: >-
+          uv run --frozen python scripts/qa_e0_public_fixture.py
+          --output-dir build/release-fixture-qa
+      - name: Enforce every fixture release gate, including visual review
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py fixture
+          --summary build/release-fixture-qa/qa-summary.json --mode release
+      - name: Build distributions in first isolated output directory
+        run: uv run --frozen python -m build --no-isolation --outdir build/dist-a
+      - name: Build distributions again for reproducibility proof
+        run: uv run --frozen python -m build --no-isolation --outdir build/dist-b
+      - name: Compare builds and publish candidate directory locally
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py compare
+          --left build/dist-a --right build/dist-b --output dist
+      - name: Check metadata, archive boundaries, privacy, and twine rendering
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py
+          dist --dir dist --twine
+      - name: Clean-install wheel and run installed-package public E0 loop
+        run: >-
+          uv run --frozen python .github/scripts/clean_install.py --artifact wheel
+          --dist-dir dist --venv build/release-wheel-install
+          --public-e0-output build/release-installed-e0-wheel
+      - name: Clean-install sdist and run installed-package public E0 loop
+        run: >-
+          uv run --frozen python .github/scripts/clean_install.py --artifact sdist
+          --dist-dir dist --venv build/release-sdist-install
+          --public-e0-output build/release-installed-e0-sdist
+      - name: Generate checksums, runtime SBOM, and unsigned SLSA-compatible statement
+        run: >-
+          build/release-wheel-install/bin/python .github/scripts/release_evidence.py
+          --dist-dir dist --output-dir release-evidence
+          --repository "${{ github.repository }}" --source-ref "${{ github.ref }}"
+          --source-sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
+      - name: Verify all release evidence against candidate bytes
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py evidence
+          --dist-dir dist --evidence-dir release-evidence
+      - name: Upload candidate and evidence only; do not publish a release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: latex-word-review-release-candidate-${{ github.sha }}
+          path: |
+            dist/*
+            release-evidence/*
+            build/release-fixture-qa/*.json
+            build/real-tex/*
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,255 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.16"
+  UV_FROZEN: "1"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  quality:
+    name: Quality and locked-environment checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install the complete locked development environment
+        run: uv sync --frozen --all-groups --python 3.12
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Reject private paths, secrets, runtime material, and unapproved document binaries
+        run: >-
+          uv run --frozen python .github/scripts/release_checks.py repo --root .
+          --include-untracked
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Check formatting
+        run: uv run --frozen ruff format --check .
+      - name: Lint and format-check release trust-root scripts
+        run: |
+          uv run --frozen ruff check .github/scripts
+          uv run --frozen ruff format --check .github/scripts
+          uv run --frozen ruff check scripts --ignore E501,I001
+      - name: Self-test release privacy, archive, and fixture gates
+        run: uv run --frozen python .github/scripts/selftest_release_tools.py
+      - name: Type check
+        run: uv run --frozen mypy
+
+  tests:
+    name: Closed-loop tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install all locked test groups
+        run: uv sync --frozen --all-groups --python ${{ matrix.python-version }}
+      - name: Run the complete suite with branch coverage
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }} pytest
+          --cov=latex_word_review --cov-report=term-missing --cov-report=xml
+
+  public-fixture:
+    name: Fixture determinism/privacy (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked fixture environment
+        run: uv sync --frozen --all-groups --python ${{ matrix.python-version }}
+      - name: Rebuild the synthetic fixture from the clean-room generator
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python scripts/build_e0_public_fixture.py
+      - name: Prove regeneration did not change tracked fixture bytes
+        run: git diff --exit-code -- tests/fixtures/e0-minimal-paper
+      - name: Generate structural, oracle, provenance, and privacy reports
+        id: fixture-qa
+        continue-on-error: true
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python scripts/qa_e0_public_fixture.py --output-dir build/ci-fixture-qa
+      - name: Enforce all CI fixture gates
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python .github/scripts/release_checks.py fixture
+          --summary build/ci-fixture-qa/qa-summary.json --mode ci
+
+  real-tex:
+    name: Ubuntu real XeLaTeX/latexdiff closed loop (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install all locked test groups
+        run: uv sync --frozen --all-groups --python 3.12
+      - name: Install and exercise the real TeX toolchain
+        uses: ./.github/actions/real-tex-gate
+      - name: Upload real TeX toolchain and JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-tex-evidence-${{ github.sha }}
+          path: build/real-tex/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  package:
+    name: Package/clean-install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked build tools
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+      - name: Prove all public extras install from their lowest direct bounds
+        run: |
+          python -c "from pathlib import Path; import shutil; p=Path('build/lowest-direct'); q=p/'src/latex_word_review'; q.mkdir(parents=True); shutil.copy2('pyproject.toml',p/'pyproject.toml'); shutil.copy2('README.md',p/'README.md'); shutil.copy2('LICENSE',p/'LICENSE'); shutil.copy2('src/latex_word_review/__about__.py',q/'__about__.py')"
+          uv lock --project build/lowest-direct --resolution lowest-direct --python ${{ matrix.python-version }}
+          uv sync --project build/lowest-direct --frozen --all-extras --no-dev --no-install-project --python ${{ matrix.python-version }}
+      - name: Build wheel and source distribution
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python -m build --no-isolation --outdir dist
+      - name: Check metadata, archive boundaries, privacy, and twine rendering
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python .github/scripts/release_checks.py dist --dir dist --twine
+      - name: Clean-install wheel and run installed-package public E0 loop
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python .github/scripts/clean_install.py --artifact wheel
+          --dist-dir dist --venv build/clean-wheel
+          --public-e0-output build/installed-e0-wheel
+      - name: Clean-install sdist and run installed-package public E0 loop
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }}
+          python .github/scripts/clean_install.py --artifact sdist
+          --dist-dir dist --venv build/clean-sdist
+          --public-e0-output build/installed-e0-sdist
+
+  macos-core:
+    name: macOS Tier 2 core smoke (Python 3.12)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install all locked groups
+        run: uv sync --frozen --all-groups --python 3.12
+      - name: Run core and integration tests
+        run: uv run --frozen --python 3.12 pytest -q
+      - name: Build and inspect distributions
+        run: uv run --frozen --python 3.12 python -m build --no-isolation --outdir dist
+      - name: Validate distribution boundaries
+        run: >-
+          uv run --frozen --python 3.12
+          python .github/scripts/release_checks.py dist --dir dist --twine
+      - name: Clean-install wheel and run installed-package public E0 loop
+        run: >-
+          uv run --frozen --python 3.12
+          python .github/scripts/clean_install.py --artifact wheel
+          --dist-dir dist --venv build/clean-wheel
+          --public-e0-output build/installed-e0-wheel

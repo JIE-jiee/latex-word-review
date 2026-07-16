@@ -1,0 +1,28 @@
+% !TeX program = xelatex
+\documentclass[11pt]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+
+\title{A Reproducible LaTeX--Word Review Fixture\\可复现的 LaTeX--Word 审阅样例}
+\author{Open Fixture Authors}
+\date{2026-01-15}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This entirely synthetic article supports deterministic conversion and review
+tests. 本文是完全合成的公开测试材料，用于验证转换、修订和批注流程。
+\end{abstract}
+
+\input{sections/introduction}
+\input{sections/methods}
+\input{sections/results}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible defect using synthetic or redistributable material.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not upload private papers, returned reviewer documents, credentials, or identifiable
+        reviewer metadata. Security issues belong in the private process described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Paste `latex-word-review --version` output or the commit SHA.
+      placeholder: latex-word-review 0.1.0b1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Ubuntu or another Linux distribution
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: Python 3.12.x
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include exact commands and a synthetic fixture or link with redistribution terms.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and diagnostics
+      description: Redact absolute paths, names, document text, tokens, and reviewer metadata.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and safety confirmation
+      options:
+        - label: I confirm this report and its attachments contain no private or unlicensed material.
+          required: true
+        - label: I have not disabled approval, hash, archive, or path-safety gates to reproduce this.
+          required: true

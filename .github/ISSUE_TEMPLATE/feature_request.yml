@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a reusable capability or safety improvement.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the reusable workflow problem without including private document content.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include CLI/API shape, failure behavior, and expected audit evidence if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility impact
+      description: Explain immutable-input, approval, source-map, and backend capability implications.
+    validations:
+      required: true
+  - type: textarea
+    id: upstream
+    attributes:
+      label: Upstream alternatives checked
+      description: Link maintained projects or explain why existing adapters cannot cover the need.
+    validations:
+      required: true

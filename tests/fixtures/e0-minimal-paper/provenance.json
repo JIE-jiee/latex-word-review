@@ -1,0 +1,66 @@
+{
+  "schema_version": "fixture-provenance-v1",
+  "fixture_id": "e0-minimal-paper",
+  "title": "E0 minimal bilingual LaTeX-Word review fixture",
+  "origin": "synthetic paper and review content created inside this repository; DOCX package seeded from the python-docx 1.2.0 default template",
+  "authors": ["Open Fixture Authors"],
+  "contains_personal_data": false,
+  "contains_private_paper_content": false,
+  "synthetic_reviewer_metadata_intentionally_present": true,
+  "redistribution_allowed_by_creator": true,
+  "license": "Apache-2.0",
+  "license_source": "repository root LICENSE for original fixture content",
+  "third_party_components": [
+    {
+      "name": "python-docx default DOCX template",
+      "version": "1.2.0",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2013 Steve Canny, https://github.com/scanny",
+      "notice": "third_party/python-docx-LICENSE.txt",
+      "scope": "base/review-base.docx and returned/returned-reviewed.docx package style, theme, font-table, web-settings and application-property members"
+    }
+  ],
+  "public_release_status": "ready_for_public_redistribution_under_apache_2_0_and_python_docx_mit_notice",
+  "generator": {
+    "script": "scripts/build_e0_public_fixture.py",
+    "implementation": "repository_cleanroom_standard_ooxml",
+    "revision_text_policy": "Word-compatible OOXML: w:del contains w:delText; w:moveFrom contains ordinary w:t because the move container carries the revision semantics",
+    "external_helpers": [],
+    "python": "3.12.13",
+    "python_docx": "1.2.0",
+    "lxml": "6.1.1",
+    "pillow": "12.3.0",
+    "design_preset": "repository_academic_fixture_v1",
+    "named_overrides": {
+      "academic_title": "Calibri 16 pt bold centered, ink blue",
+      "cjk_fallback": "East Asian font hint for synthetic bilingual text"
+    }
+  },
+  "files": {
+    "source/main.tex": "2e18578b79357ab580be7622f70e9dd214ada1ba15aa2e7c9828264d29b5c49e",
+    "source/sections/introduction.tex": "029bce66459d9dcdd30c4623691cb6e4da81ff9d95ac6e67cb2765b6a65a1c07",
+    "source/sections/methods.tex": "ea23f7b71d80999733fb964abb5850a8e12518cb9bf0c53f789042115043221e",
+    "source/sections/results.tex": "7b641911939226b88e058ac02d315c645814a35417eb5b1a6c552fec5b7edab4",
+    "source/references.bib": "bd51d66f78bf0114b6f3d6e7dc6397c75c85d895cbfab32127fb08a5c9e00613",
+    "source/assets/response-curve.png": "4876c1459df27682e521577574a3151aae2961bfbce342153c2af26ca25fab15",
+    "base/review-base.docx": "0c9ded207528a84ef82bc63eccc7ca4a6c90870ac804fea333cdb523632fca97",
+    "returned/returned-reviewed.docx": "1bfbfca694921d5caa7d1bc4f71a7a6f4d3d5b91aeb855f14080e3d20859be2b",
+    "expected-structure.json": "8d76a8cc5d51cc9df4617e7a5f537ce05b544ce02257fcfb0840b56ddcd6dd68",
+    "expected-changeset.json": "25471447a45cc8f93095a11e29113e7cf1792899a47b0b0055ec307f8b8a4667"
+  },
+  "privacy_review": {
+    "status": "pass",
+    "evidence": "generated_on_demand",
+    "command": "uv run --group fixture python scripts/qa_e0_public_fixture.py"
+  },
+  "visual_review": {
+    "status": "pass",
+    "application": "Microsoft Word for Windows 16.0.20131.20126",
+    "report": "docs/reviews/e0-word-visual-qa.md"
+  },
+  "determinism_review": {
+    "status": "pass",
+    "evidence": "regenerate_and_compare_hashes",
+    "command": "uv run --group fixture python scripts/build_e0_public_fixture.py"
+  }
+}

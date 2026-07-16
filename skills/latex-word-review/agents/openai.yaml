@@ -1,0 +1,4 @@
+interface:
+  display_name: "LaTeX Word Review"
+  short_description: "Safely orchestrate auditable LaTeX-Word review"
+  default_prompt: "Use $latex-word-review to run an immutable, approval-gated LaTeX-Word review workflow."

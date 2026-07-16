@@ -1,0 +1,102 @@
+{
+  "schema_version": "e0-expected-changeset-v1",
+  "fixture_id": "e0-minimal-paper",
+  "source_of_truth": "manually-authored-independent-oracle",
+  "synthetic_reviewers": ["Reviewer Alpha", "Reviewer Beta"],
+  "raw_revision_element_counts": {
+    "w:ins": 2,
+    "w:del": 2,
+    "w:moveFrom": 1,
+    "w:moveTo": 1,
+    "w:rPrChange": 1,
+    "w:comment": 2
+  },
+  "changes": [
+    {
+      "change_id": "CHG-INS-001",
+      "kind": "insertion",
+      "unit_id": "txr_insert_001",
+      "author": "Reviewer Alpha",
+      "timestamp": "2026-01-15T09:30:00+08:00",
+      "before": "",
+      "after": "consistently ",
+      "raw_events": [{"element": "w:ins", "w_id": "101"}],
+      "v0_1_apply_class": "plain_text_candidate"
+    },
+    {
+      "change_id": "CHG-DEL-001",
+      "kind": "deletion",
+      "unit_id": "txr_delete_001",
+      "author": "Reviewer Beta",
+      "timestamp": "2026-01-15T10:05:00-05:00",
+      "before": "redundant ",
+      "after": "",
+      "raw_events": [{"element": "w:del", "w_id": "102"}],
+      "v0_1_apply_class": "plain_text_candidate"
+    },
+    {
+      "change_id": "CHG-REP-001",
+      "kind": "replacement",
+      "unit_id": "txr_replace_001",
+      "author": "Reviewer Alpha",
+      "timestamp": "2026-01-15T09:30:00+08:00",
+      "before": "good",
+      "after": "consistent",
+      "raw_events": [
+        {"element": "w:del", "w_id": "103"},
+        {"element": "w:ins", "w_id": "104"}
+      ],
+      "v0_1_apply_class": "plain_text_candidate"
+    },
+    {
+      "change_id": "CHG-MOVE-001",
+      "kind": "move",
+      "unit_id": "txr_move_001",
+      "author": "Reviewer Beta",
+      "timestamp": "2026-01-15T10:05:00-05:00",
+      "before": "The specimen was then loaded. ",
+      "after": "The specimen was then loaded. ",
+      "raw_events": [
+        {"element": "w:moveFrom", "w_id": "105", "range_id": "301"},
+        {"element": "w:moveTo", "w_id": "106", "range_id": "302"}
+      ],
+      "v0_1_apply_class": "manual"
+    },
+    {
+      "change_id": "CHG-FMT-001",
+      "kind": "run_format",
+      "unit_id": "txr_format_001",
+      "author": "Reviewer Alpha",
+      "timestamp": "2026-01-15T09:30:00+08:00",
+      "before": {"bold": false},
+      "after": {"bold": true},
+      "text": "critical observation",
+      "raw_events": [{"element": "w:rPrChange", "w_id": "107"}],
+      "v0_1_apply_class": "manual"
+    },
+    {
+      "change_id": "CHG-COM-001",
+      "kind": "comment",
+      "unit_id": "txr_comment_range_001",
+      "author": "Reviewer Alpha",
+      "timestamp": "2026-01-15T09:30:00+08:00",
+      "comment": "Range comment: verify the normalized residual wording.",
+      "anchor_kind": "range",
+      "anchored_text": "Range comment anchor: verify the phrase normalized residual before approval.",
+      "raw_events": [{"element": "w:comment", "w_id": "201"}],
+      "v0_1_apply_class": "ledger_only"
+    },
+    {
+      "change_id": "CHG-COM-002",
+      "kind": "comment",
+      "unit_id": "txr_comment_point_001",
+      "author": "Reviewer Beta",
+      "timestamp": "2026-01-15T10:05:00-05:00",
+      "comment": "Point comment: check the sentence boundary.",
+      "anchor_kind": "point",
+      "anchored_text": "",
+      "raw_events": [{"element": "w:comment", "w_id": "202"}],
+      "v0_1_apply_class": "ledger_only"
+    }
+  ]
+}

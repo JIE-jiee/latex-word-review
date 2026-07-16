@@ -1,0 +1,76 @@
+{
+  "schema_version": "e0-fixture-structure-v1",
+  "fixture_id": "e0-minimal-paper",
+  "source": {
+    "tex_files": 4,
+    "input_commands": 3,
+    "sections": 4,
+    "inline_math_segments": 2,
+    "display_math_environments": 2,
+    "equation_rows": 3,
+    "labels": 8,
+    "references": 6,
+    "figure_environments": 1,
+    "includegraphics_commands": 1,
+    "table_environments": 1,
+    "citations": 1,
+    "bibliography_commands": 1,
+    "bib_files": 1
+  },
+  "base_docx": {
+    "track_revisions": 0,
+    "revision_counts": {},
+    "comments": 0,
+    "comment_anchor_ids": [],
+    "comments_part": 0,
+    "comments_relationships": 0,
+    "comments_content_type_overrides": 0,
+    "tables": 1,
+    "images": 1,
+    "math_objects": 1,
+    "math_paragraphs": 1,
+    "bookmark_names": [
+      "txr_comment_point_001",
+      "txr_comment_range_001",
+      "txr_delete_001",
+      "txr_format_001",
+      "txr_insert_001",
+      "txr_move_001",
+      "txr_replace_001"
+    ]
+  },
+  "returned_docx": {
+    "track_revisions": 1,
+    "revision_counts": {
+      "delete": 2,
+      "insert": 2,
+      "move_from": 1,
+      "move_to": 1,
+      "run_format": 1
+    },
+    "comments": 2,
+    "comment_anchor_ids": ["201", "202"],
+    "comments_part": 1,
+    "comments_relationships": 1,
+    "comments_content_type_overrides": 1,
+    "tables": 1,
+    "images": 1,
+    "math_objects": 1,
+    "math_paragraphs": 1,
+    "bookmark_names": [
+      "txr_comment_point_001",
+      "txr_comment_range_001",
+      "txr_delete_001",
+      "txr_format_001",
+      "txr_insert_001",
+      "txr_move_001",
+      "txr_replace_001"
+    ],
+    "move_range_markers": {
+      "moveFromRangeStart": 1,
+      "moveFromRangeEnd": 1,
+      "moveToRangeStart": 1,
+      "moveToRangeEnd": 1
+    }
+  }
+}

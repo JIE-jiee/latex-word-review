@@ -1,0 +1,31 @@
+name: Real TeX closed-loop gate
+description: Install the bounded Ubuntu TeX toolchain and run the non-skippable public E2E branch.
+
+runs:
+  using: composite
+  steps:
+    - name: Refresh Ubuntu package metadata
+      shell: bash
+      run: >-
+        sudo timeout 5m apt-get
+        -o Acquire::Retries=3
+        -o Acquire::http::Timeout=30
+        update
+    - name: Install the fixed minimal TeX package set
+      shell: bash
+      run: >-
+        sudo env DEBIAN_FRONTEND=noninteractive timeout 20m apt-get
+        -o Acquire::Retries=3
+        -o Acquire::http::Timeout=30
+        install --yes --no-install-recommends
+        latexmk
+        latexdiff
+        texlive-xetex
+        texlive-lang-chinese
+        texlive-latex-recommended
+    - name: Verify tools and run exactly one real TeX E2E case
+      shell: bash
+      run: >-
+        uv run --frozen --python 3.12 python
+        .github/scripts/run_real_tex_gate.py
+        --output-dir build/real-tex
