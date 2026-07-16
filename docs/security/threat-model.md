@@ -92,7 +92,12 @@ argv, no shell, fixed working directories, a minimal allowlisted environment, bo
 hard timeout. On Windows the TeX verifier adds only MiKTeX's three documented isolated-root
 variables (`MIKTEX_USERINSTALL`, `MIKTEX_USERCONFIG`, and `MIKTEX_USERDATA`) to that minimal
 environment; unrelated environment values remain excluded, and other backends do not inherit the
-MiKTeX-specific values.
+MiKTeX-specific values. When all three isolated roots are present, `latexmk` also receives MiKTeX's
+fixed `-disable-installer` option and forwards it to the TeX engine, so an engine-level missing
+package fails instead of opening an unattended installation prompt. The hosted public gate also
+compares MiKTeX's complete installed-package inventory before and after the test, so an unexpected
+package installed by a helper process fails the gate. This comparison is detection, not a network
+sandbox; the fixed public fixture and explicit package closure remain part of the trust boundary.
 TeX runs only on private copies with `-no-shell-escape`; known shell-escape constructs are rejected
 before execution and checked again in generated latexdiff source. This reduces risk but is not a
 general sandbox for a hostile TeX engine. Process documents from untrusted authors inside an OS or

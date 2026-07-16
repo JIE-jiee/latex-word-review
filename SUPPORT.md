@@ -13,9 +13,11 @@ The detailed operating-system, Python, backend, and external-tool tiers are main
 - the Windows/Python 3.12 release path additionally requires the configured real
   XeLaTeX/CTeX/`latexmk`/`latexdiff` public E2E lane with one pass and zero skips; that lane uses
   MiKTeX's official `miktexsetup-5.5.0+1763023-x64.zip`, verifies its pinned SHA-256, performs a
-  non-interactive basic installation, and explicitly installs/verifies `xetex`, `ctex`, `fandol`,
-  `amsmath`, `booktabs`, `graphics`, `hyperref`, `latexmk`, and `latexdiff`; the public fixture uses
-  CTeX's Fandol font set instead of assuming optional Windows Chinese fonts are present;
+  non-interactive basic installation, and explicitly installs/verifies the sorted 29-package E0
+  closure in `.github/actions/real-tex-gate/miktex-packages.txt`; every isolated MiKTeX TeX-engine
+  invocation disables on-the-fly installation, while the gate also requires the complete installed
+  package inventory to remain unchanged across the test. The public fixture uses CTeX's Fandol font
+  set instead of assuming optional Windows Chinese fonts are present;
 - Python 3.14 is outside the current `Requires-Python` range; unlisted external-tool combinations
   remain experimental until CI evidence and an explicit support decision are added;
 - Linux and macOS are outside the maintained scope and receive no installation, compatibility, CI,

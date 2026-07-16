@@ -38,11 +38,12 @@ not turn the selected branch into a release.
 - downloads the official MiKTeX Setup Utility `miktexsetup-5.5.0+1763023-x64.zip`, verifies its
   pinned SHA-256, performs a non-interactive basic installation in isolated user roots, proves the
   exact roots and non-shared configuration through `initexmf --report`, explicitly installs/verifies
-  `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`, `latexmk`, and
-  `latexdiff`, records v2 bootstrap-filename/hash, package-digest, CTeX/Fandol resource, and
-  tool-version evidence, disables on-the-fly package installation through MiKTeX's dedicated
-  `--disable-installer` control and verifies the disabled value, prebuilds and resolves the
-  `xelatex` format outside the bounded business command, then requires exactly one real public E2E
+  the sorted 29-package E0 closure in `.github/actions/real-tex-gate/miktex-packages.txt`, records v3
+  bootstrap-filename/hash, manifest/package-digest, complete installed-package inventory,
+  CTeX/Fandol resource, and tool-version evidence, passes the disable-installer option to every
+  post-require MiKTeX maintenance and isolated TeX-engine call, proves the full installed inventory
+  is unchanged across the test, prebuilds and resolves the `xelatex` format, warms a fixed public
+  Fandol document outside the bounded business command, then requires exactly one real public E2E
   pass with zero skips;
 - scans every non-ignored public candidate path, including untracked files, for private/runtime
   material, secret/private-path patterns, and unapproved document binaries; only exact synthetic

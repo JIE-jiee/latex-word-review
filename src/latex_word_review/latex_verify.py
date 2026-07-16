@@ -600,6 +600,14 @@ def _latexmk_mode(source_manifest: Mapping[str, Any]) -> str:
     return {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}[engine]
 
 
+def _miktex_latexmk_arguments(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Disable MiKTeX package prompts for explicitly isolated MiKTeX roots."""
+
+    if all(environment.get(name) for name in _MIKTEX_ROOT_ENVIRONMENT):
+        return ("-disable-installer",)
+    return ()
+
+
 def _write_output_file(path: Path, data: bytes) -> None:
     """Write one staged file exclusively; kept small for fault-injection tests."""
 
@@ -875,12 +883,14 @@ def verify_latex_project(
             {name: value for name in _MIKTEX_ROOT_ENVIRONMENT if (value := os.environ.get(name))}
         )
         environment = minimal_environment(temp_root=work, additions=tex_environment)
+        miktex_latexmk_arguments = _miktex_latexmk_arguments(environment)
 
         revised_run = _tool_run(
             "latexmk-revised",
             latexmk_executable,
             (
                 latexmk_mode,
+                *miktex_latexmk_arguments,
                 "-interaction=nonstopmode",
                 "-halt-on-error",
                 "-file-line-error",
@@ -922,6 +932,7 @@ def verify_latex_project(
                     latexmk_executable,
                     (
                         latexmk_mode,
+                        *miktex_latexmk_arguments,
                         "-interaction=nonstopmode",
                         "-halt-on-error",
                         "-file-line-error",

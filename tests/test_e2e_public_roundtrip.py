@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -41,6 +42,70 @@ FIXTURE = Path(__file__).parent / "fixtures/e0-minimal-paper"
 RUN_ID = "run_019b0000-0000-7000-8000-000000000001"
 TIME = "2026-07-16T15:00:00+09:00"
 REAL_LATEX_TOOLS = shutil.which("latexmk") is not None and shutil.which("latexdiff") is not None
+_PUBLIC_REAL_TEX_LOGS = (
+    ("logs/revised-compile.json", True),
+    ("logs/latexdiff-generate.json", False),
+    ("logs/latexdiff-compile.json", True),
+)
+_MAX_PUBLIC_DIAGNOSTIC_FILE_BYTES = 128 * 1024
+_MAX_PUBLIC_DIAGNOSTIC_STREAM_CHARS = 2048
+_WINDOWS_OR_UNC_ABSOLUTE = re.compile(r"(?i)(?<![\w.])(?:[a-z]:[\\/]|\\\\)[^\s\"'<>]*")
+_POSIX_ABSOLUTE = re.compile(r"(?<![\w.])/(?:[^\s\"'<>]+)")
+
+
+def _redact_public_diagnostic(value: str) -> str:
+    sanitized = value.replace("\x00", "�")
+    sanitized = _WINDOWS_OR_UNC_ABSOLUTE.sub("<absolute-path>", sanitized)
+    return _POSIX_ABSOLUTE.sub("<absolute-path>", sanitized)
+
+
+def _public_real_tex_log_tails(output_root: Path) -> dict[str, dict[str, Any]]:
+    """Return bounded, defense-in-depth diagnostics for this public fixture only."""
+
+    diagnostics: dict[str, dict[str, Any]] = {}
+    safe_fields = (
+        "name",
+        "status",
+        "exit_code",
+        "timed_out",
+        "output_truncated",
+        "output_sha256",
+        "error_code",
+    )
+    for relative, include_stdout in _PUBLIC_REAL_TEX_LOGS:
+        path = output_root.joinpath(*relative.split("/"))
+        try:
+            if path.is_symlink() or path.stat().st_size > _MAX_PUBLIC_DIAGNOSTIC_FILE_BYTES:
+                raise ValueError
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError
+        except (OSError, UnicodeError, ValueError):
+            diagnostics[relative] = {"diagnostic_status": "unavailable"}
+            continue
+        record: dict[str, Any] = {"diagnostic_status": "available"}
+        for key in safe_fields:
+            value = payload.get(key)
+            if value is None or isinstance(value, (bool, int)):
+                record[key] = value
+            elif isinstance(value, str) and len(value) <= 200:
+                record[key] = _redact_public_diagnostic(value)
+        for stream in ("stderr", "stdout"):
+            if stream == "stdout" and not include_stdout:
+                continue
+            value = payload.get(stream)
+            if isinstance(value, str):
+                record[f"{stream}_tail"] = _redact_public_diagnostic(value)[
+                    -_MAX_PUBLIC_DIAGNOSTIC_STREAM_CHARS:
+                ]
+        diagnostics[relative] = record
+    return diagnostics
+
+
+def _format_public_verification_failure(summary: Mapping[str, Any], output_root: Path) -> str:
+    failure = dict(summary)
+    failure["public_real_tex_log_tails"] = _public_real_tex_log_tails(output_root)
+    return json.dumps(failure, sort_keys=True)
 
 
 def _fake_tools(calls: list[tuple[str, tuple[str, ...]]]) -> Any:
@@ -81,6 +146,68 @@ def _fake_tools(calls: list[tuple[str, tuple[str, ...]]]) -> Any:
         )
 
     return run
+
+
+def test_public_real_tex_diagnostics_are_bounded_redacted_and_exclude_diff_source(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    common = {
+        "error_code": None,
+        "exit_code": 1,
+        "name": "latexmk-revised",
+        "output_sha256": "sha256:" + "a" * 64,
+        "output_truncated": False,
+        "status": "fail",
+        "timed_out": True,
+    }
+    absolute_paths = " D:/public-workspace/main.tex /opt/public-workspace/main.tex"
+    (logs / "revised-compile.json").write_text(
+        json.dumps({**common, "stdout": "x" * 5000 + absolute_paths, "stderr": absolute_paths}),
+        encoding="utf-8",
+    )
+    (logs / "latexdiff-generate.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "name": "latexdiff-generate",
+                "stdout": "DO NOT EMIT GENERATED LATEX SOURCE",
+                "stderr": absolute_paths,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (logs / "latexdiff-compile.json").write_text(
+        json.dumps({**common, "name": "latexmk-latexdiff", "stdout": "bounded", "stderr": ""}),
+        encoding="utf-8",
+    )
+
+    diagnostic = _public_real_tex_log_tails(tmp_path)
+    serialized = json.dumps(diagnostic, sort_keys=True)
+
+    assert len(serialized) < 10_000
+    assert "D:/public-workspace" not in serialized
+    assert "/opt/public-workspace" not in serialized
+    assert "DO NOT EMIT GENERATED LATEX SOURCE" not in serialized
+    assert (
+        len(diagnostic["logs/revised-compile.json"]["stdout_tail"])
+        <= _MAX_PUBLIC_DIAGNOSTIC_STREAM_CHARS
+    )
+
+
+def test_public_real_tex_diagnostics_fail_closed_when_logs_are_unavailable(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "latexdiff-generate.json").write_text("{", encoding="utf-8")
+    (logs / "latexdiff-compile.json").write_text(
+        "x" * (_MAX_PUBLIC_DIAGNOSTIC_FILE_BYTES + 1), encoding="utf-8"
+    )
+
+    diagnostic = _public_real_tex_log_tails(tmp_path)
+
+    assert set(diagnostic) == {relative for relative, _ in _PUBLIC_REAL_TEX_LOGS}
+    assert all(value == {"diagnostic_status": "unavailable"} for value in diagnostic.values())
 
 
 @pytest.mark.parametrize(
@@ -267,7 +394,9 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
         "references": verification_payload["references"],
         "status": verification_payload["status"],
     }
-    assert verification.status == "pass", json.dumps(failure_summary, sort_keys=True)
+    assert verification.status == "pass", _format_public_verification_failure(
+        failure_summary, verification.output_root
+    )
     if not use_real_latex_tools:
         assert any("-xelatex" in arguments for _, arguments in calls)
     assert b"DIFadd" in (verification.output_root / "latexdiff.tex").read_bytes()

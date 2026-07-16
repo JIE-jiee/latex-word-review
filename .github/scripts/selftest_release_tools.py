@@ -386,35 +386,79 @@ class RealTexJUnitTests(unittest.TestCase):
         ):
             REAL_TEX.bootstrap_evidence()
 
-    def test_installed_miktex_package_evidence_is_bound(self) -> None:
-        def package_info(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-            self.assertEqual(timeout, 60)
-            package_id = command[-1]
+    def test_installed_miktex_inventory_and_required_package_evidence_are_bound(self) -> None:
+        rows = [f"unused-package\t1.0\t{'f' * 32}\tfalse"]
+        for package_id in reversed(REAL_TEX.REQUIRED_MIKTEX_PACKAGES):
             version = "2.6.0" if package_id == "ctex" else ""
-            stdout = f"{package_id}\t{version}\t{'a' * 32}\ttrue\n"
-            return subprocess.CompletedProcess(command, 0, stdout, "")
+            rows.append(f"{package_id}\t{version}\t{'a' * 32}\ttrue")
+        rows.append(f"basepackage\t1.0\t{'b' * 32}\ttrue")
+
+        def package_list(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(timeout, 60)
+            self.assertEqual(command[1:4], ["--disable-installer", "packages", "list"])
+            self.assertEqual(command[4:], ["--template", REAL_TEX.PACKAGE_LIST_TEMPLATE])
+            return subprocess.CompletedProcess(command, 0, "\n".join(rows) + "\n", "")
 
         with (
             mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
-            mock.patch.object(REAL_TEX, "run_captured", side_effect=package_info),
+            mock.patch.object(REAL_TEX, "run_captured", side_effect=package_list),
         ):
-            packages = REAL_TEX.installed_miktex_packages()
+            inventory = REAL_TEX.installed_miktex_package_inventory()
+        packages = REAL_TEX.required_miktex_package_evidence(inventory)
+        inventory_evidence = REAL_TEX.miktex_package_inventory_evidence(inventory)
+
+        self.assertEqual(len(inventory), 30)
+        self.assertEqual(
+            [package["id"] for package in inventory],
+            sorted(package["id"] for package in inventory),
+        )
         self.assertEqual(
             [package["id"] for package in packages],
             [
                 "amsmath",
+                "bigintcalc",
+                "bitset",
                 "booktabs",
+                "cjk",
                 "ctex",
                 "fandol",
+                "gettitlestring",
                 "graphics",
+                "hycolor",
                 "hyperref",
+                "infwarerr",
+                "intcalc",
+                "kvdefinekeys",
+                "kvoptions",
+                "kvsetkeys",
                 "latexdiff",
                 "latexmk",
+                "letltxmacro",
+                "ltxcmds",
+                "pdfescape",
+                "refcount",
+                "rerunfilecheck",
+                "stringenc",
+                "ulem",
+                "uniquecounter",
+                "xecjk",
                 "xetex",
+                "zhnumber",
             ],
         )
-        self.assertEqual(packages[2]["version"], "2.6.0")
-        self.assertEqual(packages[6]["version"], "not-reported")
+        self.assertEqual(packages[5]["version"], "2.6.0")
+        self.assertEqual(packages[16]["version"], "not-reported")
+        self.assertEqual(inventory_evidence["count"], 30)
+        self.assertEqual(inventory_evidence["format"], REAL_TEX.PACKAGE_INVENTORY_FORMAT)
+        self.assertRegex(str(inventory_evidence["sha256"]), r"^sha256:[0-9a-f]{64}$")
+
+    def test_miktex_package_manifest_is_bound(self) -> None:
+        evidence = REAL_TEX.package_manifest_evidence()
+        self.assertEqual(evidence["count"], 29)
+        self.assertEqual(evidence["path"], ".github/actions/real-tex-gate/miktex-packages.txt")
+        self.assertRegex(str(evidence["sha256"]), r"^sha256:[0-9a-f]{64}$")
+        self.assertIn("xecjk", REAL_TEX.REQUIRED_MIKTEX_PACKAGES)
+        self.assertIn("rerunfilecheck", REAL_TEX.REQUIRED_MIKTEX_PACKAGES)
 
     def test_required_tex_resources_are_resolved(self) -> None:
         def kpsewhich(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -436,32 +480,53 @@ class RealTexJUnitTests(unittest.TestCase):
         )
 
     def test_missing_miktex_package_fails_closed(self) -> None:
+        rows = []
+        for package_id in REAL_TEX.REQUIRED_MIKTEX_PACKAGES:
+            installed = "false" if package_id == "ctex" else "true"
+            rows.append(f"{package_id}\t1.0\t{'b' * 32}\t{installed}")
         result = subprocess.CompletedProcess(
             ["miktex.exe"],
             0,
-            f"ctex\t2.6.0\t{'b' * 32}\tfalse\n",
+            "\n".join(rows) + "\n",
             "",
         )
         with (
             mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
             mock.patch.object(REAL_TEX, "run_captured", return_value=result),
-            self.assertRaises(REAL_TEX.RealTexGateError),
         ):
-            REAL_TEX.installed_miktex_packages()
+            inventory = REAL_TEX.installed_miktex_package_inventory()
+        with self.assertRaisesRegex(REAL_TEX.RealTexGateError, "ctex"):
+            REAL_TEX.required_miktex_package_evidence(inventory)
 
-    def test_malformed_miktex_package_evidence_fails_closed(self) -> None:
-        result = subprocess.CompletedProcess(
-            ["miktex.exe"],
-            0,
-            "amsmath\t2.17z\tmissing-fields\n",
-            "",
+    def test_malformed_or_duplicate_miktex_inventory_fails_closed(self) -> None:
+        malformed_outputs = {
+            "missing fields": "amsmath\t2.17z\tmissing-fields\n",
+            "invalid id": f"INVALID\t1.0\t{'a' * 32}\ttrue\n",
+            "invalid digest": "amsmath\t2.17z\tnot-a-digest\ttrue\n",
+            "invalid state": f"amsmath\t2.17z\t{'a' * 32}\tunknown\n",
+            "duplicate id": (
+                f"amsmath\t2.17z\t{'a' * 32}\ttrue\namsmath\t2.17z\t{'a' * 32}\tfalse\n"
+            ),
+        }
+        for label, stdout in malformed_outputs.items():
+            with self.subTest(label=label):
+                result = subprocess.CompletedProcess(["miktex.exe"], 0, stdout, "")
+                with (
+                    mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
+                    mock.patch.object(REAL_TEX, "run_captured", return_value=result),
+                    self.assertRaises(REAL_TEX.RealTexGateError),
+                ):
+                    REAL_TEX.installed_miktex_package_inventory()
+
+    def test_miktex_inventory_change_is_rejected(self) -> None:
+        before = ({"digest": "a" * 32, "id": "amsmath", "version": "2.17z"},)
+        REAL_TEX.require_unchanged_miktex_package_inventory(before, tuple(dict(x) for x in before))
+        after = (
+            *before,
+            {"digest": "b" * 32, "id": "new-package", "version": "1.0"},
         )
-        with (
-            mock.patch.object(REAL_TEX.shutil, "which", return_value="miktex.exe"),
-            mock.patch.object(REAL_TEX, "run_captured", return_value=result),
-            self.assertRaises(REAL_TEX.RealTexGateError),
-        ):
-            REAL_TEX.installed_miktex_packages()
+        with self.assertRaisesRegex(REAL_TEX.RealTexGateError, "inventory changed"):
+            REAL_TEX.require_unchanged_miktex_package_inventory(before, after)
 
 
 class CleanInstallArchiveTests(unittest.TestCase):

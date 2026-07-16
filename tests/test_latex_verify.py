@@ -203,6 +203,7 @@ def test_verified_outputs_bind_every_authorization_hash_and_keep_inputs_immutabl
     assert all(not Path(cast("Path", call["cwd"])).is_relative_to(revised) for call in calls)
     for call in calls:
         if str(call["executable"]).startswith("latexmk"):
+            assert "-disable-installer" in call["arguments"]
             assert "-no-shell-escape" in call["arguments"]
             assert "-shell-escape" not in call["arguments"]
     logs = b"".join(path.read_bytes() for path in sorted((output / "logs").iterdir()))
@@ -324,7 +325,12 @@ def test_timeout_is_recorded_and_private_work_tree_is_removed(
     output = workflow[-1]
     assert output.is_dir()
     assert not (output / "_work").exists()
-    assert b"C:/Users" not in (output / "logs/revised-compile.json").read_bytes()
+    for name in (
+        "revised-compile.json",
+        "latexdiff-generate.json",
+        "latexdiff-compile.json",
+    ):
+        assert b"C:/Users" not in (output / "logs" / name).read_bytes()
 
 
 def test_missing_latexdiff_is_explicitly_blocked(
@@ -379,6 +385,16 @@ def test_engine_hint_selects_xelatex_and_conflicts_fail_closed() -> None:
     with pytest.raises(ContractError) as raised:
         latex_verify._latexmk_mode(source)
     assert raised.value.code is ErrorCode.SCHEMA_INVALID
+
+
+def test_miktex_installer_prompt_is_disabled_only_for_complete_isolated_roots() -> None:
+    from latex_word_review import latex_verify
+
+    complete = {name: f"C:/isolated/{name}" for name in latex_verify._MIKTEX_ROOT_ENVIRONMENT}
+    assert latex_verify._miktex_latexmk_arguments(complete) == ("-disable-installer",)
+    incomplete = dict(complete)
+    incomplete.pop("MIKTEX_USERDATA")
+    assert latex_verify._miktex_latexmk_arguments(incomplete) == ()
 
 
 def test_reference_check_uses_final_tex_log_not_transient_latexmk_warnings(

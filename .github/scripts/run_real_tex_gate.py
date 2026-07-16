@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -16,17 +19,8 @@ from xml.etree import ElementTree
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_SETUP_FILENAME = "miktexsetup-5.5.0+1763023-x64.zip"
 EXPECTED_SETUP_SHA256 = "0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d"
-REQUIRED_MIKTEX_PACKAGES = (
-    "amsmath",
-    "booktabs",
-    "ctex",
-    "fandol",
-    "graphics",
-    "hyperref",
-    "latexdiff",
-    "latexmk",
-    "xetex",
-)
+PACKAGE_MANIFEST = PROJECT_ROOT / ".github/actions/real-tex-gate/miktex-packages.txt"
+EXPECTED_PACKAGE_COUNT = 29
 TOOL_VERSION_COMMANDS = {
     "latexmk": ("-version",),
     "latexdiff": ("--version",),
@@ -41,12 +35,30 @@ TOOL_VERSION_MARKERS = {
     "perl": "this is perl",
     "xelatex": "xetex",
 }
-PACKAGE_INFO_TEMPLATE = "{id}\t{version}\t{digest}\t{isInstalled}\n"
+PACKAGE_LIST_TEMPLATE = "{id}\t{version}\t{digest}\t{isInstalled}"
+PACKAGE_INVENTORY_FORMAT = "miktex-installed-package-inventory-v1"
 MAX_DIAGNOSTIC_CHARS = 64 * 1024
 
 
 class RealTexGateError(RuntimeError):
     """Raised when the real TeX release gate cannot prove one passing test."""
+
+
+def required_miktex_packages() -> tuple[str, ...]:
+    try:
+        packages = tuple(PACKAGE_MANIFEST.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeError) as exc:
+        raise RealTexGateError("MiKTeX package manifest is unreadable") from exc
+    if (
+        len(packages) != EXPECTED_PACKAGE_COUNT
+        or list(packages) != sorted(set(packages))
+        or any(re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", package) is None for package in packages)
+    ):
+        raise RealTexGateError("MiKTeX package manifest is malformed")
+    return packages
+
+
+REQUIRED_MIKTEX_PACKAGES = required_miktex_packages()
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,48 +115,105 @@ def verify_tex_resources() -> dict[str, str]:
     return {label: "resolved_by_kpsewhich" for label in resources}
 
 
-def installed_miktex_packages() -> list[dict[str, str]]:
+def installed_miktex_package_inventory() -> tuple[dict[str, str], ...]:
     miktex = shutil.which("miktex")
     if miktex is None:
         raise RealTexGateError("miktex is required to bind Windows TeX package evidence")
-    packages: list[dict[str, str]] = []
-    for package_id in REQUIRED_MIKTEX_PACKAGES:
-        result = run_captured(
-            [
-                miktex,
-                "packages",
-                "info",
-                "--template",
-                PACKAGE_INFO_TEMPLATE,
-                package_id,
-            ],
-            timeout=60,
-        )
-        if result.returncode != 0:
-            raise RealTexGateError(f"MiKTeX package query failed: {package_id}")
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
-        if len(lines) != 1:
-            raise RealTexGateError(f"MiKTeX package evidence is malformed: {package_id}")
-        fields = lines[0].split("\t")
+    result = run_captured(
+        [
+            miktex,
+            "--disable-installer",
+            "packages",
+            "list",
+            "--template",
+            PACKAGE_LIST_TEMPLATE,
+        ],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RealTexGateError("MiKTeX installed-package inventory query failed")
+    lines = result.stdout.splitlines()
+    if not lines:
+        raise RealTexGateError("MiKTeX installed-package inventory is empty")
+
+    seen_ids: set[str] = set()
+    installed_packages: list[dict[str, str]] = []
+    for line in lines:
+        fields = line.split("\t")
         if len(fields) != 4:
-            raise RealTexGateError(f"MiKTeX package evidence is malformed: {package_id}")
-        observed_id, version, digest, installed = fields
-        if observed_id != package_id or installed.casefold() != "true":
-            raise RealTexGateError(f"required MiKTeX package is not installed: {package_id}")
-        if len(digest) != 32 or any(
-            character not in "0123456789abcdefABCDEF" for character in digest
-        ):
-            raise RealTexGateError(f"MiKTeX package digest is invalid: {package_id}")
+            raise RealTexGateError("MiKTeX installed-package inventory is malformed")
+        package_id, version, digest, installed = fields
+        if re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", package_id) is None or package_id in seen_ids:
+            raise RealTexGateError("MiKTeX installed-package inventory has an invalid package ID")
+        seen_ids.add(package_id)
         if len(version) > 100 or any(character in version for character in "\r\n\x00"):
-            raise RealTexGateError(f"MiKTeX package version is invalid: {package_id}")
-        packages.append(
-            {
-                "digest": digest.casefold(),
-                "id": package_id,
-                "version": version or "not-reported",
-            }
+            raise RealTexGateError("MiKTeX installed-package inventory has an invalid version")
+        if re.fullmatch(r"[0-9a-fA-F]{32}", digest) is None:
+            raise RealTexGateError("MiKTeX installed-package inventory has an invalid digest")
+        state = installed.casefold()
+        if state not in {"false", "true"}:
+            raise RealTexGateError("MiKTeX installed-package inventory has an invalid state")
+        if state == "true":
+            installed_packages.append(
+                {
+                    "digest": digest.casefold(),
+                    "id": package_id,
+                    "version": version or "not-reported",
+                }
+            )
+    if not installed_packages:
+        raise RealTexGateError("MiKTeX installed-package inventory has no installed packages")
+    return tuple(sorted(installed_packages, key=lambda package: package["id"]))
+
+
+def required_miktex_package_evidence(
+    inventory: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    by_id = {package["id"]: package for package in inventory}
+    missing = [package_id for package_id in REQUIRED_MIKTEX_PACKAGES if package_id not in by_id]
+    if missing:
+        raise RealTexGateError(f"required MiKTeX package is not installed: {missing[0]}")
+    return [dict(by_id[package_id]) for package_id in REQUIRED_MIKTEX_PACKAGES]
+
+
+def miktex_package_inventory_evidence(
+    inventory: Sequence[Mapping[str, str]],
+) -> dict[str, str | int]:
+    canonical = json.dumps(
+        list(inventory),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return {
+        "count": len(inventory),
+        "format": PACKAGE_INVENTORY_FORMAT,
+        "sha256": "sha256:" + hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def require_unchanged_miktex_package_inventory(
+    before: Sequence[Mapping[str, str]],
+    after: Sequence[Mapping[str, str]],
+) -> None:
+    if before != after:
+        raise RealTexGateError(
+            "MiKTeX installed-package inventory changed during the real TeX test"
         )
-    return packages
+
+
+def package_manifest_evidence() -> dict[str, str | int]:
+    try:
+        data = PACKAGE_MANIFEST.read_bytes()
+    except OSError as exc:
+        raise RealTexGateError("MiKTeX package manifest is unreadable") from exc
+    if required_miktex_packages() != REQUIRED_MIKTEX_PACKAGES:
+        raise RealTexGateError("MiKTeX package manifest changed during the gate")
+    return {
+        "count": len(REQUIRED_MIKTEX_PACKAGES),
+        "path": ".github/actions/real-tex-gate/miktex-packages.txt",
+        "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+    }
 
 
 def bootstrap_evidence() -> dict[str, str | None]:
@@ -221,7 +290,9 @@ def main() -> int:
         for name, arguments in sorted(TOOL_VERSION_COMMANDS.items())
     }
     tex_resources = verify_tex_resources()
-    packages = installed_miktex_packages()
+    package_inventory = installed_miktex_package_inventory()
+    packages = required_miktex_package_evidence(package_inventory)
+    package_inventory_evidence = miktex_package_inventory_evidence(package_inventory)
     junit_path = output_dir / "junit.xml"
     command = [
         sys.executable,
@@ -241,13 +312,18 @@ def main() -> int:
         print(result.stderr[-MAX_DIAGNOSTIC_CHARS:], file=sys.stderr)
     summary = junit_summary(junit_path)
     require_one_real_test(summary, result.returncode)
+    package_inventory_after = installed_miktex_package_inventory()
+    require_unchanged_miktex_package_inventory(package_inventory, package_inventory_after)
     evidence = {
+        "automatic_package_installation": "tex_engine_disabled_per_invocation",
         "bootstrap": bootstrap_evidence(),
+        "miktex_installed_package_inventory": package_inventory_evidence,
         "miktex_packages": packages,
+        "package_manifest": package_manifest_evidence(),
         "platform": "windows",
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "pytest": summary,
-        "schema_version": "latex-word-review-real-tex-gate-v2",
+        "schema_version": "latex-word-review-real-tex-gate-v3",
         "status": "pass",
         "tex_resources": tex_resources,
         "tool_versions": tool_versions,

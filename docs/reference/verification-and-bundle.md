@@ -110,7 +110,10 @@ commands[]
 到该私有工作区，但不会传给 TeX 工具或进入最终输出。调用约束为：
 
 - Python list argv；复用项目的 `run_command`，从不经 shell；
-- 固定 `latexmk` 参数包含 `-no-shell-escape`、nonstop、halt-on-error 和独立 outdir；
+- 固定 `latexmk` 参数包含 `-no-shell-escape`、nonstop、halt-on-error 和独立 outdir；当
+  三个隔离 MiKTeX 根均已显式提供时，额外传入 `-disable-installer` 并由 `latexmk` 转交
+  TeX 引擎，使引擎级缺包直接失败；真实公共门禁还会比较测试前后的完整 MiKTeX 已安装
+  包清单，以检测辅助进程意外补包；
 - 源中的 `write18`、pipe input 和 minted shell-escape 依赖在启动前拒绝；
 - latexdiff 生成结果为空或重新引入上述危险构造时，不会交给编译器；
 - `cwd` 固定为工作副本，main document 使用 `./relative-path`，避免选项注入；

@@ -80,22 +80,68 @@ runs:
         }
         miktex packages update-package-database
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX package database update failed" }
-        miktex packages require xetex ctex fandol amsmath booktabs graphics hyperref latexmk latexdiff
-        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package requirement failed" }
-        initexmf --disable-installer
-        if ($LASTEXITCODE -ne 0) { throw "Disabling MiKTeX automatic package installation failed" }
-        $autoInstall = (& initexmf "--show-config-value=[MPM]AutoInstall").Trim()
-        if ($LASTEXITCODE -ne 0 -or $autoInstall -ne "2") {
-          throw "MiKTeX automatic package installation is not disabled"
+        $packageManifest = Join-Path `
+          $env:GITHUB_WORKSPACE `
+          ".github/actions/real-tex-gate/miktex-packages.txt"
+        $packages = @(
+          Get-Content -LiteralPath $packageManifest -Encoding utf8 |
+            Where-Object { $_ -ne "" }
+        )
+        $normalizedPackages = @($packages | Sort-Object -Unique)
+        if (
+          $packages.Count -ne 29 -or
+          ($packages -join "`n") -ne ($normalizedPackages -join "`n") -or
+          @($packages | Where-Object { $_ -notmatch '^[a-z0-9][a-z0-9+._-]*$' }).Count -ne 0
+        ) {
+          throw "MiKTeX package manifest is malformed"
         }
-        miktex fndb refresh
+        miktex packages require @packages
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX package requirement failed" }
+        miktex --disable-installer fndb refresh
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX filename database refresh failed" }
-        miktex links install
+        miktex --disable-installer links install
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX executable-link refresh failed" }
-        miktex formats build xelatex
+        miktex --disable-installer fontmaps configure
+        if ($LASTEXITCODE -ne 0) { throw "MiKTeX font-map configuration failed" }
+        miktex --disable-installer formats build xelatex
         if ($LASTEXITCODE -ne 0) { throw "XeLaTeX format build failed" }
-        miktex packages verify xetex ctex fandol amsmath booktabs graphics hyperref latexmk latexdiff
+        miktex --disable-installer packages verify @packages
         if ($LASTEXITCODE -ne 0) { throw "MiKTeX package verification failed" }
+    - name: Warm the fixed XeLaTeX and Fandol caches without package installation
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $warmupRoot = Join-Path $env:RUNNER_TEMP "latex-word-review-xelatex-warmup"
+        New-Item -ItemType Directory -Path $warmupRoot | Out-Null
+        $warmupSource = @'
+        \documentclass{article}
+        \usepackage[UTF8,fontset=fandol]{ctex}
+        \begin{document}
+        Bounded public cache warm-up. 固定公开缓存预热。
+        \end{document}
+        '@
+        Set-Content `
+          -LiteralPath (Join-Path $warmupRoot "main.tex") `
+          -Value $warmupSource `
+          -Encoding utf8 `
+          -NoNewline
+        Push-Location $warmupRoot
+        try {
+          xelatex `
+            --disable-installer `
+            -interaction=nonstopmode `
+            -halt-on-error `
+            -file-line-error `
+            -no-shell-escape `
+            ./main.tex
+          if ($LASTEXITCODE -ne 0) { throw "Fixed XeLaTeX cache warm-up failed" }
+        }
+        finally {
+          Pop-Location
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $warmupRoot "main.pdf") -PathType Leaf)) {
+          throw "Fixed XeLaTeX cache warm-up did not produce a PDF"
+        }
     - name: Verify tools and run exactly one real TeX E2E case
       shell: pwsh
       run: >-

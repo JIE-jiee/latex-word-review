@@ -51,19 +51,26 @@ user roots under the runner's temporary directory. Before package operations, `i
 must prove those exact install/config/data roots, a non-shared regular setup, and a valid executable
 path. The bounded TeX subprocess environment carries only those three MiKTeX root variables from
 the tool-specific configuration; it still excludes unrelated environment values. The gate then
-explicitly installs and verifies `xetex`, `ctex`, `fandol`, `amsmath`, `booktabs`, `graphics`, `hyperref`,
-`latexmk`, and `latexdiff`. The public fixture explicitly selects CTeX's Fandol font set, so it does
-not depend on optional Chinese supplemental fonts in the Windows runner image. The gate then
-uses MiKTeX's `--disable-installer` and verifies its disabled tri-state value before testing, so the
-selected E2E test cannot make
-the package boundary pass by silently downloading another dependency during compilation.
-It explicitly builds the `xelatex` format outside the 60-second business-command boundary, then
-requires `kpsewhich --engine=xetex --format=fmt xelatex.fmt` to resolve it before the test starts.
+explicitly installs and verifies the sorted 29-package E0 closure in
+`.github/actions/real-tex-gate/miktex-packages.txt`. This includes the direct tools and the CTeX/
+Hyperref packages observed in the fixed public fixture; it does not rely on MiKTeX's interactive
+missing-package resolver. The public fixture explicitly selects CTeX's Fandol font set, so it does
+not depend on optional Chinese supplemental fonts in the Windows runner image. Every MiKTeX
+maintenance command after the explicit package-require step carries the dedicated disable-installer
+option, and every isolated `latexmk` invocation forwards that option to its TeX engine, so an engine-level missing
+package fails without a prompt. Because helper programs launched by `latexmk` do not necessarily
+receive the engine option, the gate also snapshots the complete installed-package inventory before
+and after the test and rejects any addition or metadata change. The gate explicitly builds the
+`xelatex` format and warms a fixed public Fandol document outside the 60-second business-command
+boundary, then requires
+`kpsewhich --engine=xetex --format=fmt xelatex.fmt` to resolve it before the test starts.
 
-The evidence uses schema `latex-word-review-real-tex-gate-v2`, records the verified Setup Utility
-filename and SHA-256, MiKTeX package digests, and tool versions; verifies that `kpsewhich` resolves
-`ctex.sty`, `FandolSong-Regular.otf`, and the prebuilt `xelatex.fmt`; and runs the selected pytest
-parameter `installed-latexmk-latexdiff`. A local run against
+The evidence uses schema `latex-word-review-real-tex-gate-v3`, records the verified Setup Utility
+filename and SHA-256, package-manifest digest, required-package digests, complete installed-package
+inventory count/digest, and tool versions; verifies that `kpsewhich` resolves `ctex.sty`,
+`FandolSong-Regular.otf`, and the prebuilt `xelatex.fmt`; proves the full inventory is unchanged
+across the test; and runs the selected pytest parameter
+`installed-latexmk-latexdiff`. A local run against
 an existing installation records `preinstalled_local` instead and cannot be substituted for the
 hosted bootstrap evidence.
 

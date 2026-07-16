@@ -81,9 +81,12 @@ latex-word-review --help
 Windows 上可用的 `latexmk`、对应 TeX 引擎和 `latexdiff`；缺失时会显式 `blocked`，不会
 伪报成功。远程真实 TeX 门禁在 Windows runner 上使用 MiKTeX 官方 Setup Utility
 `miktexsetup-5.5.0+1763023-x64.zip`，先核对固定 SHA-256，再无交互安装 basic 集合并显式
-安装/验证 `xetex`、`ctex`、`fandol`、`amsmath`、`booktabs`、`graphics`、`hyperref`、
-`latexmk`、`latexdiff`。公共样例固定使用可随 TeX 分发的 Fandol 字体，不依赖 Runner
-的区域或 Windows 中文补充字体；是否受支持以目标提交的实际 CI 结果为准。
+安装/验证由 `.github/actions/real-tex-gate/miktex-packages.txt` 固化的 29 包 E0 闭包，
+其中包含 `xetex`、`ctex`、`fandol`、`latexmk`、`latexdiff` 及 CTeX/Hyperref 实际使用的
+传递包。每次隔离 MiKTeX 的 TeX 引擎调用都显式禁用按需安装，并在真实测试前后比较
+完整已安装包清单的数量与摘要；任何辅助工具额外安装包也会使门禁失败。公共样例固定
+使用可随 TeX 分发的 Fandol 字体，不依赖 Runner 的区域或 Windows 中文补充字体；是否
+受支持以目标提交的实际 CI 结果为准。
 
 ## 从新 clone 运行公开最小闭环
 

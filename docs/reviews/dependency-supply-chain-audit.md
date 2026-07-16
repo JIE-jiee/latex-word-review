@@ -115,10 +115,10 @@ vendor 依赖，必须按实际再分发内容重新生成 notices 并做逐文�
   哈希可检测下载字节漂移，但不能把恶意且已锁定的字节变成可信字节。
 - Windows 真 TeX CI 配置固定 MiKTeX 官方 Setup Utility
   `miktexsetup-5.5.0+1763023-x64.zip` 及官方 SHA-256，先无交互安装 basic 集合，再显式
-  安装/验证 `xetex`、`ctex`、`fandol`、`amsmath`、`booktabs`、`graphics`、`hyperref`、
-  `latexmk`、`latexdiff`，并解析 CTeX/Fandol 资源。v2 `toolchain.json` 记录包 digest、资源
-  与工具版本并以精确提交的 CI 结果为准；
-  当前 `uv.lock` 不覆盖 MiKTeX 包仓库和工具链。
+  安装/验证版本库清单中的 29 包 E0 闭包，并解析 CTeX/Fandol 资源。v3
+  `toolchain.json` 绑定清单摘要、必需包 digest、完整已安装包清单的计数/摘要、资源与工具
+  版本；测试前后完整清单必须逐项一致。该证据仍以精确提交的 CI 结果为准；当前
+  `uv.lock` 不覆盖 MiKTeX 包仓库和工具链。
 - 发布证据中的 CycloneDX SBOM 只枚举从已安装项目 wheel 可达的、锁定的 Python 运行时
   闭包。它不包含 Hatchling 等 build/dev 工具、GitHub Actions、Windows runner 镜像、
   MiKTeX Setup Utility、MiKTeX 包或外部 Word/Pandoc 工具，不能表述为“完整供应链 SBOM”。

@@ -23,11 +23,11 @@ Windows。继续把 Ubuntu 和 macOS 列为发布阻断平台，会要求维护�
 3. GitHub Actions 的阻塞测试、fixture、打包和 clean-install 证据只来自 Windows runner。
 4. 真实 TeX 门禁使用 Windows runner，下载 MiKTeX 官方 Setup Utility
    `miktexsetup-5.5.0+1763023-x64.zip` 并核对固定官方 SHA-256；随后无交互安装 basic
-   集合，并显式安装/验证 `xetex`、`ctex`、`fandol`、`amsmath`、`booktabs`、`graphics`、
-   `hyperref`、`latexmk`、`latexdiff`；公开样例固定使用 `fontset=fandol`，不依赖 Runner
-   的可选中文系统字体。测试前关闭运行时自动补包。v2 证据必须记录安装器文件名和
-   SHA-256、包 digest、CTeX/Fandol 资源解析结果与工具版本，并完成恰好一项真实 E2E
-   测试且零跳过。
+   集合，并按版本库清单显式安装/验证包含传递依赖的 29 包 E0 闭包；每次隔离 MiKTeX
+   的 TeX 引擎调用显式禁用按需安装，真实测试前后还必须证明完整已安装包清单未变化。
+   公开样例固定使用 `fontset=fandol`，不依赖 Runner 的可选中文系统字体。v3 证据必须
+   记录安装器文件名和 SHA-256、包清单摘要、包 digest、完整清单计数/摘要、CTeX/Fandol
+   资源解析结果与工具版本，并完成恰好一项真实 E2E 测试且零跳过。
 5. 固定版本和工作流定义不是成功证据。只有 GitHub Actions 对精确源提交的实际通过结果
    才能满足远程门禁；在此之前不得宣称 Windows CI 已绿或创建正式 prerelease。
 6. Microsoft Word for Windows 是主要审阅与人工视觉验收环境。LibreOffice for Windows
