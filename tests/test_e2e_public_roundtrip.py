@@ -15,6 +15,7 @@ from latex_word_review.applier import apply_patch_plan
 from latex_word_review.approval import create_approval_set, finalize_approval_set, record_decision
 from latex_word_review.backends import BackendRequest, Tex2WordBackend
 from latex_word_review.bundle import BundleItem, create_audit_bundle, verify_audit_bundle
+from latex_word_review.canonical import canonical_json
 from latex_word_review.contracts import compute_payload_sha256, validate_contract
 from latex_word_review.discovery import discover_project
 from latex_word_review.export import ExportBindings, export_review_docx
@@ -37,6 +38,7 @@ from latex_word_review.workflow_objects import (
     build_source_map_document,
 )
 from tests.e2e_helpers import create_whole_bookmark_replacement
+from tests.test_ledger_bundle import _bundle_artifact
 
 FIXTURE = Path(__file__).parent / "fixtures/e0-minimal-paper"
 RUN_ID = "run_019b0000-0000-7000-8000-000000000001"
@@ -314,6 +316,8 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
     )
     changeset = build_changeset(
         archive.docx_path,
+        export_baseline_path=exported,
+        export_baseline_sha256=exported_hash,
         run_id=RUN_ID,
         source_manifest_sha256=source_sha,
         source_map_sha256=compute_payload_sha256(source_map),
@@ -416,6 +420,15 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
         shutil.copyfile(source, delivery / name)
     (delivery / "ledger.json").write_bytes(ledger.json_bytes)
     (delivery / "ledger.html").write_bytes(ledger.html_bytes)
+    ledger_artifacts = (
+        _bundle_artifact("ledger.html", "review_ledger_html", ledger.html_bytes, "text/html"),
+        _bundle_artifact(
+            "ledger.json",
+            "review_ledger_json",
+            ledger.json_bytes,
+            "application/json",
+        ),
+    )
     run_manifest = build_run_manifest_document(
         source_manifest,
         objects=[
@@ -428,16 +441,24 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
             verification.report,
         ],
         backend_capabilities=[export_capabilities, reader_capabilities],
+        artifacts=ledger_artifacts,
         generated_at=TIME,
     )
+    (delivery / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
     items = [
-        BundleItem("verification-report.json", "verification_report", verification.report),
+        BundleItem(
+            "verification-report.json",
+            "verification_report",
+            verification.report,
+            "$document",
+        ),
         BundleItem("actual.diff", "actual_diff", verification.report),
         BundleItem("latexdiff.tex", "latexdiff_tex", verification.report),
         BundleItem("latexdiff.pdf", "latexdiff_pdf", verification.report),
         BundleItem("revised-clean.pdf", "revised_clean_pdf", verification.report),
-        BundleItem("ledger.json", "review_ledger_json", changeset),
-        BundleItem("ledger.html", "review_ledger_html", changeset),
+        BundleItem("ledger.json", "review_ledger_json", run_manifest),
+        BundleItem("ledger.html", "review_ledger_html", run_manifest),
+        BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
     ]
     bundle = create_audit_bundle(
         delivery,

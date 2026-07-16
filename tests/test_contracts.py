@@ -199,6 +199,23 @@ def _golden_contracts() -> dict[str, dict[str, Any]]:
     )
 
     review_docx_sha = _hash("review.docx")
+    overlay_manifest = {
+        **_artifact(
+            "image-overlay-manifest",
+            role="image_overlay_manifest",
+            media_type="application/json",
+        ),
+        "path": "artifacts/review.docx.image-overlay/image-overlay-manifest.json",
+    }
+    image_overlay = {
+        "status": "ready",
+        "manifest": overlay_manifest,
+        "original_source_tree_sha256": source_tree,
+        "derived_source_tree_sha256": _hash("derived-source-tree"),
+        "source_image_instances": 0,
+        "materialized_pdf_instances": 0,
+        "passthrough_raster_instances": 0,
+    }
     source_map = _envelope(
         "SourceMap",
         stable_id("map_", [source_tree, review_docx_sha]),
@@ -207,6 +224,7 @@ def _golden_contracts() -> dict[str, dict[str, Any]]:
             "review_ir_sha256": compute_payload_sha256(review_ir),
             "review_docx_sha256": review_docx_sha,
             "anchor_profile": _profile("bookmark"),
+            "image_overlay": image_overlay,
             "mappings": [
                 {
                     "unit_id": unit_id,
@@ -222,6 +240,20 @@ def _golden_contracts() -> dict[str, dict[str, Any]]:
                         "slice_sha256": _hash("Hello"),
                         "normalized_text_sha256": _hash("Hello"),
                         "neighbor_sha256": _hash("neighbors"),
+                    },
+                    "text_provenance": {
+                        "profile": _profile("normalized-text-to-utf8"),
+                        "review_length": 5,
+                        "segments": [
+                            {
+                                "review_start": 0,
+                                "review_end": 5,
+                                "source_start_byte": 0,
+                                "source_end_byte": 5,
+                                "transformation": "identity",
+                                "auto_patchable": True,
+                            }
+                        ],
                     },
                     "mapping_method": "exact_source_span",
                     "confidence": 1.0,
@@ -253,6 +285,7 @@ def _golden_contracts() -> dict[str, dict[str, Any]]:
                 "sha256": review_docx_sha,
                 "artifact_id": derive_artifact_id(review_docx_sha),
             },
+            "image_overlay": image_overlay,
             "metrics": {"source": {"paragraphs": 1}, "output": {"paragraphs": 1}},
             "feature_results": [
                 {

@@ -11,7 +11,7 @@ import copy
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -30,6 +30,18 @@ from latex_word_review.ids import (
     derive_diagnostic_id,
     derive_raw_event_id,
     stable_id,
+)
+from latex_word_review.offset_mapping import (
+    OffsetMappingDiagnostic,
+    OffsetMappingDiagnosticCode,
+    map_review_span_to_source_bytes,
+)
+from latex_word_review.source_units import TextProvenanceSegment
+from latex_word_review.word_semantics import (
+    CAPABILITIES,
+    DocumentSemanticProjection,
+    compare_export_baseline,
+    project_word_semantics,
 )
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -67,6 +79,40 @@ _MOVE_END = {
 }
 _COMBINE_PROFILE_VERSION = "revision-combine-v1"
 _READER_INTERFACE_VERSION = "revision-reader-v1alpha1"
+_XML_NS = "http://www.w3.org/XML/1998/namespace"
+_PLAIN_TEXT_ANCESTORS = frozenset(
+    {
+        "body",
+        "document",
+        "endnote",
+        "endnotes",
+        "footnote",
+        "footnotes",
+        "ftr",
+        "hdr",
+        "p",
+        "tbl",
+        "tc",
+        "tr",
+    }
+)
+_VERIFIED_BASELINE_SCOPE = (
+    "visible_text",
+    "paragraph_table_structure",
+    "field_structure",
+    "bookmarks",
+    "insert_delete_revisions",
+    "move_revisions",
+)
+_UNVERIFIED_BASELINE_SCOPE = (
+    "paragraph_mark_revisions",
+    "formatting",
+    "omml",
+    "images",
+    "hyperlink_and_relationship_targets",
+    "content_controls_and_custom_xml",
+    "embedded_objects_and_alternate_content",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +121,9 @@ class BookmarkBinding:
 
     unit_id: str
     source_location: Mapping[str, Any]
+    normalized_text_sha256: str | None = None
+    review_length: int | None = None
+    text_provenance: tuple[TextProvenanceSegment, ...] = ()
 
     def __post_init__(self) -> None:
         if _UNIT_ID.fullmatch(self.unit_id) is None:
@@ -84,6 +133,15 @@ class BookmarkBinding:
             "source_location",
             MappingProxyType(copy.deepcopy(dict(self.source_location))),
         )
+        if self.normalized_text_sha256 is not None and not self.normalized_text_sha256.startswith(
+            "sha256:"
+        ):
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "bookmark binding has an invalid normalized text hash",
+            )
+        if self.review_length is not None and self.review_length < 0:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "bookmark review length is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +154,11 @@ class ExtractedRevision:
     sibling_index: int | None
     move_name: str | None
     anchor_text: str | None
+    evidence_class: str = "not_applicable"
+    structural_context: tuple[str, ...] = ()
+    bookmark_original_text: str | None = None
+    bookmark_relative_start: int | None = None
+    bookmark_relative_end: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw_event", MappingProxyType(copy.deepcopy(dict(self.raw_event))))
@@ -117,9 +180,15 @@ class NormalizedChange:
 
     change: Mapping[str, Any]
     bookmark_name: str | None
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "change", MappingProxyType(copy.deepcopy(dict(self.change))))
+        object.__setattr__(
+            self,
+            "diagnostics",
+            tuple(MappingProxyType(copy.deepcopy(dict(item))) for item in self.diagnostics),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +564,100 @@ def _format_content(
     return text, _run_properties(prior_properties), _run_properties(current_properties)
 
 
+def _complex_field_context(
+    paragraph: etree._Element,
+    target: etree._Element,
+) -> tuple[bool, bool]:
+    """Return whether ``target`` is inside a well-formed complex Word field.
+
+    Complex fields are delimited by sibling ``w:fldChar`` runs rather than by
+    an ancestor element.  Ancestor-only checks therefore cannot prove that a
+    revision is ordinary prose.  Scan the complete paragraph in document
+    order, support nested fields, and mark any unknown/unbalanced transition
+    malformed so every revision in that paragraph remains manual.
+    """
+
+    field_stack: list[bool] = []
+    target_seen = False
+    target_inside_field = False
+    malformed = False
+    for current in paragraph.iter():
+        if current is target:
+            target_seen = True
+            target_inside_field = bool(field_stack)
+        if current.tag != f"{W}fldChar":
+            continue
+        marker = _attr(current, "fldCharType")
+        if marker == "begin":
+            field_stack.append(False)
+        elif marker == "separate":
+            if not field_stack or field_stack[-1]:
+                malformed = True
+            else:
+                field_stack[-1] = True
+        elif marker == "end":
+            if not field_stack:
+                malformed = True
+            else:
+                field_stack.pop()
+        else:
+            malformed = True
+    if field_stack or not target_seen:
+        malformed = True
+    return target_inside_field, malformed
+
+
+def _text_revision_evidence_class(
+    node: etree._Element,
+    parents: Mapping[etree._Element, etree._Element],
+    kind: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Classify whether a text revision is provably structure-free OOXML."""
+
+    context: list[str] = []
+    ancestor = parents.get(node)
+    while ancestor is not None:
+        context.append(_local_name(ancestor))
+        ancestor = parents.get(ancestor)
+    if kind not in {"insert", "delete"}:
+        return "not_applicable", tuple(context)
+    parent = parents.get(node)
+    if parent is None or parent.tag != f"{W}p":
+        return "structured", tuple(context)
+    inside_complex_field, malformed_complex_field = _complex_field_context(parent, node)
+    if inside_complex_field:
+        context.append("complexField")
+    if malformed_complex_field:
+        context.append("complexFieldMalformed")
+    structural_context = tuple(context)
+    if inside_complex_field or malformed_complex_field:
+        return "structured", structural_context
+    if any(local not in _PLAIN_TEXT_ANCESTORS for local in structural_context):
+        return "structured", structural_context
+
+    expected_text_tag = f"{W}{'t' if kind == 'insert' else 'delText'}"
+    text_nodes = 0
+    for run in node:
+        if run.tag != f"{W}r":
+            return "structured", structural_context
+        if any(
+            etree.QName(name).namespace != W_NS
+            or not etree.QName(name).localname.startswith("rsid")
+            for name in run.attrib
+        ):
+            return "structured", structural_context
+        children = tuple(run)
+        if not children:
+            return "structured", structural_context
+        for child in children:
+            if child.tag != expected_text_tag or len(child):
+                return "structured", structural_context
+            if any(name != f"{{{_XML_NS}}}space" for name in child.attrib):
+                return "structured", structural_context
+            text_nodes += 1
+    return ("plain_text" if text_nodes else "structured"), structural_context
+
+
 def _finalize_draft(package: DocxPackage, draft: _EventDraft) -> ExtractedRevision:
     root = package.xml_root(draft.part_uri)
     node = list(root.iter())[draft.node_ordinal]
@@ -520,6 +683,11 @@ def _finalize_draft(package: DocxPackage, draft: _EventDraft) -> ExtractedRevisi
     format_after: dict[str, Any] | None = None
     range_data: dict[str, str | None] | None = None
     anchor_text: str | None = None
+    evidence_class, structural_context = _text_revision_evidence_class(
+        node,
+        parents,
+        draft.kind,
+    )
 
     if draft.kind in {"insert", "move_to"}:
         text = _element_text(node)
@@ -684,6 +852,8 @@ def _finalize_draft(package: DocxPackage, draft: _EventDraft) -> ExtractedRevisi
             "node_ordinal": draft.node_ordinal,
             "fragment_sha256": fragment_sha256,
             "artifact": None,
+            "content_class": evidence_class,
+            "structural_context": list(structural_context),
         },
         "diagnostics": diagnostics,
     }
@@ -699,7 +869,55 @@ def _finalize_draft(package: DocxPackage, draft: _EventDraft) -> ExtractedRevisi
         sibling_index=draft.sibling_index,
         move_name=move_name,
         anchor_text=anchor_text,
+        evidence_class=evidence_class,
+        structural_context=structural_context,
     )
+
+
+def _enrich_semantic_spans(
+    package: DocxPackage,
+    events: tuple[ExtractedRevision, ...],
+) -> tuple[ExtractedRevision, ...]:
+    """Attach authoritative bookmark-relative reject-view coordinates when supported.
+
+    Standalone evidence extraction still preserves unknown/structural revisions in
+    the ledger.  Such markup may be outside the semantic projector's capability;
+    in that case no event is promoted to an exact local source span.  The
+    ChangeSet builder separately requires the semantic baseline gate to pass.
+    """
+
+    try:
+        projection = project_word_semantics(package)
+    except ContractError:
+        return events
+
+    enriched: list[ExtractedRevision] = []
+    for event in events:
+        part_uri = str(event.raw_event["part_uri"])
+        node_ordinal = int(event.raw_event["evidence"]["node_ordinal"])
+        story = projection.story(part_uri)
+        if story is None or event.bookmark_name is None:
+            enriched.append(event)
+            continue
+        bookmarks = tuple(
+            bookmark for bookmark in story.bookmarks if bookmark.name == event.bookmark_name
+        )
+        if len(bookmarks) != 1 or bookmarks[0].original is None:
+            enriched.append(event)
+            continue
+        span = bookmarks[0].revision_span(node_ordinal)
+        if span is None or span.kind != event.raw_event["kind"]:
+            enriched.append(event)
+            continue
+        enriched.append(
+            replace(
+                event,
+                bookmark_original_text=bookmarks[0].original.text,
+                bookmark_relative_start=span.relative_start,
+                bookmark_relative_end=span.relative_end,
+            )
+        )
+    return tuple(enriched)
 
 
 def extract_revision_events(
@@ -753,7 +971,10 @@ def extract_revision_events(
                 )
             )
 
-    events = tuple(_finalize_draft(package, draft) for draft in drafts)
+    events = _enrich_semantic_spans(
+        package,
+        tuple(_finalize_draft(package, draft) for draft in drafts),
+    )
     diagnostics_by_id: dict[str, Mapping[str, Any]] = {}
     for event in events:
         for diagnostic in event.raw_event["diagnostics"]:
@@ -869,6 +1090,166 @@ def _binding_for(
     return None if bookmark_name is None else bindings.get(bookmark_name)
 
 
+def _group_review_span(
+    group: Sequence[ExtractedRevision],
+    kind: str,
+    before: object,
+) -> tuple[str, int, int] | None:
+    originals = {event.bookmark_original_text for event in group}
+    if len(originals) != 1 or None in originals:
+        return None
+    original = cast("str", next(iter(originals)))
+    if any(
+        event.bookmark_relative_start is None or event.bookmark_relative_end is None
+        for event in group
+    ):
+        return None
+
+    if kind in {"insertion", "deletion"} and len(group) == 1:
+        start = cast("int", group[0].bookmark_relative_start)
+        end = cast("int", group[0].bookmark_relative_end)
+    elif kind == "replacement" and len(group) == 2:
+        deletion = next(
+            (event for event in group if event.raw_event["kind"] == "delete"),
+            None,
+        )
+        insertion = next(
+            (event for event in group if event.raw_event["kind"] == "insert"),
+            None,
+        )
+        if deletion is None or insertion is None:
+            return None
+        start = cast("int", deletion.bookmark_relative_start)
+        end = cast("int", deletion.bookmark_relative_end)
+        insertion_start = cast("int", insertion.bookmark_relative_start)
+        insertion_end = cast("int", insertion.bookmark_relative_end)
+        if insertion_start != insertion_end or insertion_start not in {start, end}:
+            return None
+    else:
+        return None
+
+    if start < 0 or end < start or end > len(original):
+        return None
+    expected_before = "" if kind == "insertion" else before
+    if not isinstance(expected_before, str) or original[start:end] != expected_before:
+        return None
+    return original, start, end
+
+
+def _exact_text_source_location(
+    group: Sequence[ExtractedRevision],
+    kind: str,
+    before: object,
+    binding: BookmarkBinding,
+) -> tuple[dict[str, Any] | None, OffsetMappingDiagnostic | None]:
+    span = _group_review_span(group, kind, before)
+    if span is None:
+        return (
+            None,
+            OffsetMappingDiagnostic(
+                code=OffsetMappingDiagnosticCode.INVALID_REVIEW_RANGE,
+                message=("tracked revision has no reconciled bookmark-relative reject-view span"),
+            ),
+        )
+    original, start, end = span
+    mapping = map_review_span_to_source_bytes(binding, original, start, end)
+    if not mapping.is_exact:
+        return None, mapping.diagnostic
+    source_start = cast("int", mapping.source_start_byte)
+    source_end = cast("int", mapping.source_end_byte)
+    expected_before = cast("str", "" if kind == "insertion" else before)
+    location = copy.deepcopy(dict(binding.source_location))
+    location.update(
+        {
+            "start_byte": source_start,
+            "end_byte": source_end,
+            "slice_sha256": sha256_bytes(expected_before.encode("utf-8")),
+            "start_line": None,
+            "end_line": None,
+            "start_column": None,
+            "end_column": None,
+        }
+    )
+    return location, None
+
+
+def _mapping_failure_diagnostic(
+    *,
+    change_id: str,
+    raw_event_ids: Sequence[str],
+    binding: BookmarkBinding,
+    failure: OffsetMappingDiagnostic,
+) -> dict[str, Any]:
+    fingerprint = sha256_canonical(
+        [
+            change_id,
+            list(raw_event_ids),
+            failure.code.value,
+            failure.review_start,
+            failure.review_end,
+            failure.segment_index,
+        ]
+    )
+    return {
+        "diagnostic_id": derive_diagnostic_id(
+            code=ErrorCode.MAP_CONFIDENCE_LOW.value,
+            phase="ingest",
+            location_or_evidence_fingerprint=fingerprint,
+        ),
+        "code": ErrorCode.MAP_CONFIDENCE_LOW.value,
+        "severity": "warning",
+        "phase": "ingest",
+        "message": f"automatic local source mapping blocked: {failure.message}",
+        "recoverable": True,
+        "unit_id": binding.unit_id,
+        "change_id": change_id,
+        "source_location": copy.deepcopy(dict(binding.source_location)),
+        "evidence": None,
+        "remediation": "review this change manually; do not widen it to the whole LaTeX unit",
+    }
+
+
+def _structured_text_diagnostic(
+    *,
+    change_id: str,
+    raw_event_ids: Sequence[str],
+    group: Sequence[ExtractedRevision],
+    binding: BookmarkBinding,
+) -> dict[str, Any]:
+    contexts = sorted({local for event in group for local in event.structural_context})
+    fingerprint = sha256_canonical(
+        [
+            change_id,
+            list(raw_event_ids),
+            [event.evidence_class for event in group],
+            contexts,
+        ]
+    )
+    return {
+        "diagnostic_id": derive_diagnostic_id(
+            code=ErrorCode.REVISION_STRUCTURED_TEXT.value,
+            phase="ingest",
+            location_or_evidence_fingerprint=fingerprint,
+        ),
+        "code": ErrorCode.REVISION_STRUCTURED_TEXT.value,
+        "severity": "warning",
+        "phase": "ingest",
+        "message": (
+            "tracked text is nested in, or contains, Word structure that cannot be reduced "
+            "to a plain LaTeX text patch"
+        ),
+        "recoverable": True,
+        "unit_id": binding.unit_id,
+        "change_id": change_id,
+        "source_location": copy.deepcopy(dict(binding.source_location)),
+        "evidence": None,
+        "remediation": (
+            "review the field, link, content control, drawing, formatting, or other structure "
+            "manually"
+        ),
+    }
+
+
 def _normalize_group(
     group: Sequence[ExtractedRevision],
     bindings: Mapping[str, BookmarkBinding],
@@ -885,15 +1266,51 @@ def _normalize_group(
     timestamps = _ordered_unique([item["timestamp"] for item in raw])
     metadata_conflict = len(authors) > 1 or len(timestamps) > 1 or len(bookmark_names) > 1
     conflict = forced_conflict or metadata_conflict
+    mapping_failure: OffsetMappingDiagnostic | None = None
+    exact_plain_text = False
+    structured_text = kind in {"insertion", "deletion", "replacement"} and any(
+        event.evidence_class != "plain_text" for event in group
+    )
 
     if conflict:
         resolution = {"status": "conflict", "method": "manual", "confidence": 0.0, "candidates": []}
         unit_id = None
         source_location = None
     elif binding is not None:
-        resolution = {"status": "exact", "method": "bookmark", "confidence": 1.0, "candidates": []}
         unit_id = binding.unit_id
-        source_location = copy.deepcopy(dict(binding.source_location))
+        if kind in {"insertion", "deletion", "replacement"}:
+            source_location, mapping_failure = _exact_text_source_location(
+                group,
+                kind,
+                before,
+                binding,
+            )
+            exact_plain_text = source_location is not None and not structured_text
+            resolution = (
+                {
+                    "status": "exact",
+                    "method": "bookmark",
+                    "confidence": 1.0,
+                    "candidates": [],
+                }
+                if exact_plain_text
+                else {
+                    "status": "unsupported",
+                    "method": "manual",
+                    "confidence": 0.0,
+                    "candidates": [],
+                }
+            )
+            if source_location is None:
+                source_location = copy.deepcopy(dict(binding.source_location))
+        else:
+            resolution = {
+                "status": "exact",
+                "method": "bookmark",
+                "confidence": 1.0,
+                "candidates": [],
+            }
+            source_location = copy.deepcopy(dict(binding.source_location))
     else:
         resolution = {"status": "unmatched", "method": "none", "confidence": 0.0, "candidates": []}
         unit_id = None
@@ -908,7 +1325,7 @@ def _normalize_group(
     elif kind in {"move", "format"}:
         safety_class = "manual_high_risk"
         initial_decision = "manual" if not conflict else "conflict"
-    elif binding is not None and not conflict:
+    elif exact_plain_text and not conflict:
         safety_class = "plain_text_candidate"
         initial_decision = "pending"
     else:
@@ -931,6 +1348,10 @@ def _normalize_group(
         "source_location": source_location,
         "resolution": resolution,
         "safety_class": safety_class,
+        "evidence_classes": [event.evidence_class for event in group],
+        "structural_context": sorted(
+            {local for event in group for local in event.structural_context}
+        ),
     }
     change = {
         "change_id": change_id,
@@ -951,7 +1372,30 @@ def _normalize_group(
         "initial_decision": initial_decision,
         "change_fingerprint": sha256_canonical(fingerprint_input),
     }
-    return NormalizedChange(change=change, bookmark_name=bookmark_name)
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
+    if mapping_failure is not None and binding is not None:
+        diagnostics += (
+            _mapping_failure_diagnostic(
+                change_id=change_id,
+                raw_event_ids=raw_event_ids,
+                binding=binding,
+                failure=mapping_failure,
+            ),
+        )
+    if structured_text and binding is not None:
+        diagnostics += (
+            _structured_text_diagnostic(
+                change_id=change_id,
+                raw_event_ids=raw_event_ids,
+                group=group,
+                binding=binding,
+            ),
+        )
+    return NormalizedChange(
+        change=change,
+        bookmark_name=bookmark_name,
+        diagnostics=diagnostics,
+    )
 
 
 def normalize_revision_changes(
@@ -992,7 +1436,50 @@ def normalize_revision_changes(
             if event.raw_event["raw_event_id"] in item.change["raw_event_ids"]
         )
     )
-    return ChangeNormalization(changes=tuple(normalized), diagnostics=extraction.diagnostics)
+    diagnostics_by_id = {
+        str(item["diagnostic_id"]): item
+        for item in (
+            *extraction.diagnostics,
+            *(diagnostic for change in normalized for diagnostic in change.diagnostics),
+        )
+    }
+    return ChangeNormalization(
+        changes=tuple(normalized),
+        diagnostics=tuple(diagnostics_by_id.values()),
+    )
+
+
+def _reconcile_semantic_revision_evidence(
+    extraction: RevisionExtraction,
+    projection: DocumentSemanticProjection,
+) -> None:
+    story_parts = {story.part_uri for story in projection.stories}
+    projected = {
+        (story.part_uri, span.node_ordinal, span.kind)
+        for story in projection.stories
+        for span in story.revision_spans
+    }
+    extracted = {
+        (
+            str(event.raw_event["part_uri"]),
+            int(event.raw_event["evidence"]["node_ordinal"]),
+            str(event.raw_event["kind"]),
+        )
+        for event in extraction.events
+        if event.raw_event["part_uri"] in story_parts
+        and event.raw_event["kind"] in {"insert", "delete", "move_from", "move_to"}
+    }
+    if projected != extracted:
+        raise ContractError(
+            ErrorCode.REVISION_RECONCILIATION,
+            "semantic revision view and canonical raw evidence do not reconcile",
+            details={
+                "projected_revision_count": len(projected),
+                "extracted_revision_count": len(extracted),
+                "missing_evidence_count": len(projected - extracted),
+                "unexpected_evidence_count": len(extracted - projected),
+            },
+        )
 
 
 def _utc_now() -> str:
@@ -1002,6 +1489,8 @@ def _utc_now() -> str:
 def build_changeset(
     path: str | Path,
     *,
+    export_baseline_path: str | Path,
+    export_baseline_sha256: str,
     run_id: str,
     source_manifest_sha256: str,
     source_map_sha256: str,
@@ -1014,17 +1503,57 @@ def build_changeset(
 ) -> dict[str, Any]:
     """Build and validate a v1alpha ChangeSet envelope from read-only evidence."""
 
+    bindings = bookmark_bindings or {}
+    comparison = compare_export_baseline(
+        export_baseline_path,
+        path,
+        sorted(bindings),
+    )
+    if comparison.baseline.file_sha256 != export_baseline_sha256:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "export baseline bytes do not match the SourceMap binding",
+            details={
+                "expected_sha256": export_baseline_sha256,
+                "actual_sha256": comparison.baseline.file_sha256,
+            },
+        )
+    if not comparison.safe_for_automatic_patch:
+        raise ContractError(
+            ErrorCode.REVISION_BASELINE_DRIFT,
+            "returned Word document cannot be reduced to the immutable export baseline",
+            details={
+                "drift_status": comparison.drift_status,
+                "changed_story_parts": [
+                    difference.part_uri for difference in comparison.story_differences
+                ],
+                "missing_bookmarks": list(comparison.missing_bookmarks),
+                "duplicate_bookmarks": list(comparison.duplicate_bookmarks),
+                "changed_bookmarks": list(comparison.changed_bookmarks),
+            },
+        )
+
     extraction = extract_revision_events(path, limits=limits)
+    if extraction.package.file_sha256 != comparison.returned.file_sha256:
+        raise ContractError(
+            ErrorCode.HASH_RETURNED_ORIGINAL_MISMATCH,
+            "returned Word original changed between baseline verification and revision extraction",
+            details={
+                "baseline_verification_sha256": comparison.returned.file_sha256,
+                "revision_extraction_sha256": extraction.package.file_sha256,
+            },
+        )
+    _reconcile_semantic_revision_evidence(extraction, comparison.returned)
     normalization = normalize_revision_changes(
         extraction,
-        bookmark_bindings=bookmark_bindings,
+        bookmark_bindings=bindings,
     )
     package = extraction.package
     ingest_configuration_sha256 = sha256_canonical(
         {
             "reader_configuration_sha256": extraction.configuration_sha256,
             "combine_profile": _COMBINE_PROFILE_VERSION,
-            "source_mapping": "caller-supplied-bookmark-bindings-v1",
+            "source_mapping": "semantic-bookmark-provenance-v2",
         }
     )
     changes = [dict(item.change) for item in normalization.changes]
@@ -1055,6 +1584,23 @@ def build_changeset(
         "source_manifest_sha256": source_manifest_sha256,
         "source_map_sha256": source_map_sha256,
         "revision_reader_capabilities_sha256": revision_reader_capabilities_sha256,
+        "baseline_verification": {
+            "status": "verified_for_text_patch",
+            "exported_docx_sha256": comparison.baseline.file_sha256,
+            "returned_original_docx_sha256": comparison.returned.file_sha256,
+            "drift_status": comparison.drift_status,
+            "expected_bookmarks": len(bindings),
+            "verified_bookmarks": len(bindings),
+            "verified_scope": list(_VERIFIED_BASELINE_SCOPE),
+            "unverified_scope": list(_UNVERIFIED_BASELINE_SCOPE),
+            "automatic_patch_scope": "plain_text_only",
+            "manual_integrity_review_required": True,
+            "semantic_profile": {
+                "name": "word-reject-view-baseline",
+                "version": "word-semantic-projection-v1",
+                "configuration_sha256": sha256_canonical(asdict(CAPABILITIES)),
+            },
+        },
         "ingest_profile": {
             "name": "canonical-word-revision-ingest",
             "version": _COMBINE_PROFILE_VERSION,

@@ -10,6 +10,7 @@ import json
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -167,7 +168,13 @@ class DistributionMetadataTests(unittest.TestCase):
         )
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("latex_word_review/__about__.py", '__version__ = "0.1.0b1"\n')
+            archive.writestr("latex_word_review/_image_worker.py", "# image worker\n")
+            archive.writestr("latex_word_review/image_materializer.py", "# materializer\n")
+            archive.writestr("latex_word_review/image_overlay.py", "# overlay\n")
+            archive.writestr("latex_word_review/offset_mapping.py", "# offsets\n")
             archive.writestr("latex_word_review/py.typed", "")
+            archive.writestr("latex_word_review/word_semantics.py", "# Word semantics\n")
+            archive.writestr("latex_word_review/workflow.py", "# workflow\n")
             archive.writestr("latex_word_review/schemas/v1alpha/test.json", "{}\n")
             archive.writestr(f"{dist_info}/METADATA", metadata)
             archive.writestr(
@@ -230,6 +237,65 @@ class DistributionMetadataTests(unittest.TestCase):
                             archive.writestr("latex_word_review/payload.bin", b"binary")
                 with self.assertRaises(CHECKS.ReleaseCheckError):
                     CHECKS.check_wheel(wheel)
+
+
+class PluginDistributionTests(unittest.TestCase):
+    def valid_payloads(self) -> dict[str, bytes]:
+        skill = b"---\nname: latex-word-review\ndescription: synthetic\n---\n"
+        openai_yaml = b'interface:\n  display_name: "LaTeX Word Review"\n'
+        manifest = {
+            "name": "latex-word-review",
+            "version": "0.1.0",
+            "description": "Synthetic plugin manifest",
+            "author": {"name": "LaTeX Word Review contributors"},
+            "skills": "./skills/",
+            "interface": {"displayName": "LaTeX Word Review"},
+        }
+        marketplace = {
+            "name": "personal",
+            "plugins": [
+                {
+                    "name": "latex-word-review",
+                    "source": {"source": "local", "path": "./plugins/latex-word-review"},
+                    "policy": {
+                        "installation": "AVAILABLE",
+                        "authentication": "ON_INSTALL",
+                    },
+                    "category": "Productivity",
+                }
+            ],
+        }
+        return {
+            CHECKS.CANONICAL_SKILL_RELATIVE: skill,
+            CHECKS.CANONICAL_OPENAI_YAML_RELATIVE: openai_yaml,
+            CHECKS.EMBEDDED_SKILL_RELATIVE: skill,
+            CHECKS.EMBEDDED_OPENAI_YAML_RELATIVE: openai_yaml,
+            CHECKS.PLUGIN_MANIFEST_RELATIVE: json.dumps(manifest).encode("utf-8"),
+            CHECKS.MARKETPLACE_RELATIVE: json.dumps(marketplace).encode("utf-8"),
+        }
+
+    def test_packaged_plugin_payloads_are_bound_and_synchronized(self) -> None:
+        CHECKS.validate_plugin_distribution_payloads(self.valid_payloads())
+
+    def test_packaged_plugin_skill_drift_is_rejected(self) -> None:
+        payloads = self.valid_payloads()
+        payloads[CHECKS.EMBEDDED_SKILL_RELATIVE] += b"stale\n"
+        with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "differs from canonical"):
+            CHECKS.validate_plugin_distribution_payloads(payloads)
+
+    def test_packaged_marketplace_must_bind_the_plugin(self) -> None:
+        payloads = self.valid_payloads()
+        marketplace = json.loads(payloads[CHECKS.MARKETPLACE_RELATIVE])
+        marketplace["plugins"][0]["source"]["path"] = "./plugins/another-plugin"
+        payloads[CHECKS.MARKETPLACE_RELATIVE] = json.dumps(marketplace).encode("utf-8")
+        with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "marketplace entry"):
+            CHECKS.validate_plugin_distribution_payloads(payloads)
+
+    def test_packaged_plugin_payload_set_must_be_complete(self) -> None:
+        payloads = self.valid_payloads()
+        del payloads[CHECKS.EMBEDDED_OPENAI_YAML_RELATIVE]
+        with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "payload set"):
+            CHECKS.validate_plugin_distribution_payloads(payloads)
 
 
 class FixtureGateTests(unittest.TestCase):
@@ -297,6 +363,18 @@ class RepositoryScanTests(unittest.TestCase):
                 "local source C:/Users/person/private/paper.tex", encoding="utf-8"
             )
             git(root, "add", "README.md")
+            with self.assertRaises(CHECKS.ReleaseCheckError):
+                CHECKS.command_repo(argparse.Namespace(root=root))
+
+    def test_tracked_lockfile_personal_path_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.initialized_repository(root)
+            (root / "uv.lock").write_text(
+                "source = 'C:/Users/person/private/paper.tex'",
+                encoding="utf-8",
+            )
+            git(root, "add", "uv.lock")
             with self.assertRaises(CHECKS.ReleaseCheckError):
                 CHECKS.command_repo(argparse.Namespace(root=root))
 
@@ -530,6 +608,13 @@ class RealTexJUnitTests(unittest.TestCase):
 
 
 class CleanInstallArchiveTests(unittest.TestCase):
+    def test_repository_sdist_include_contract_matches_clean_install_guard(self) -> None:
+        pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        with pyproject_path.open("rb") as handle:
+            pyproject = tomllib.load(handle)
+        includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+        self.assertEqual(tuple(includes), CLEAN_INSTALL.EXPECTED_SDIST_INCLUDES)
+
     def write_sdist(
         self,
         path: Path,

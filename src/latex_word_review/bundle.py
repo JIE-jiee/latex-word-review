@@ -33,6 +33,22 @@ _FIXED_ZIP_TIME: Final = (1980, 1, 1, 0, 0, 0)
 _TIMESTAMP_POLICY: Final = "fixed-1980-01-01T00:00:00"
 _PRIVACY_RULES_VERSION: Final = "privacy-rules-v1"
 _INTERFACE_VERSION: Final = "audit-bundle-v1alpha1"
+_DOCUMENT_SELECTOR: Final = "$document"
+_ARTIFACT_ID_PATTERN: Final = re.compile(r"^art_[a-z0-9]{26,64}$")
+_SHA256_PATTERN: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ARTIFACT_REF_KEYS: Final = frozenset(
+    {
+        "artifact_id",
+        "path",
+        "path_base",
+        "role",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "immutable",
+        "confidentiality",
+    }
+)
 _PRIVACY_RULES: Final = (
     (
         "windows-user-profile",
@@ -72,11 +88,12 @@ _CONFIGURATION_SHA256: Final = sha256_canonical(
 
 @dataclass(frozen=True, slots=True)
 class BundleItem:
-    """One explicit allowlist item and its validated provenance object."""
+    """One explicit allowlist item and its sealed artifact provenance."""
 
     path: str
     role: str
     source_object: Mapping[str, Any]
+    artifact_selector: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +143,7 @@ class _PreparedItem:
     source_path: Path
     data: bytes
     source_object: Mapping[str, str]
+    artifact_selector: str
 
 
 def _producer() -> dict[str, Any]:
@@ -182,12 +200,162 @@ def _normalize_item(value: BundleItem | Mapping[str, Any]) -> BundleItem:
         path = cast("str", value["path"])
         role = cast("str", value["role"])
         source_object = cast("Mapping[str, Any]", value["source_object"])
+        artifact_selector = cast("str | None", value.get("artifact_selector"))
     except (KeyError, TypeError) as exc:
         raise ContractError(
             ErrorCode.SCHEMA_INVALID,
             "bundle allowlist items require path, role and source_object",
         ) from exc
-    return BundleItem(path=path, role=role, source_object=source_object)
+    return BundleItem(
+        path=path,
+        role=role,
+        source_object=source_object,
+        artifact_selector=artifact_selector,
+    )
+
+
+def _validated_artifact_ref(value: Mapping[str, Any]) -> dict[str, Any]:
+    if set(value) != _ARTIFACT_REF_KEYS:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle artifact selector did not resolve to an exact ArtifactRef",
+        )
+    artifact_id = value.get("artifact_id")
+    sha256 = value.get("sha256")
+    size_bytes = value.get("size_bytes")
+    role = value.get("role")
+    media_type = value.get("media_type")
+    path_base = value.get("path_base")
+    confidentiality = value.get("confidentiality")
+    if (
+        not isinstance(artifact_id, str)
+        or _ARTIFACT_ID_PATTERN.fullmatch(artifact_id) is None
+        or not isinstance(sha256, str)
+        or _SHA256_PATTERN.fullmatch(sha256) is None
+        or not isinstance(size_bytes, int)
+        or isinstance(size_bytes, bool)
+        or size_bytes < 0
+        or not isinstance(role, str)
+        or not role
+        or not isinstance(media_type, str)
+        or not media_type
+        or path_base not in {"run_root", "snapshot_root", "bundle_root"}
+        or value.get("immutable") is not True
+        or confidentiality not in {"public_fixture", "local_private", "derived_private"}
+    ):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle artifact selector resolved to an invalid or mutable ArtifactRef",
+        )
+    raw_path = value.get("path")
+    if not isinstance(raw_path, str):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle ArtifactRef path is invalid",
+        )
+    path = validate_relative_path(raw_path)
+    if artifact_id != derive_artifact_id(sha256):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle ArtifactRef ID does not match its SHA-256",
+        )
+    return {
+        "artifact_id": artifact_id,
+        "path": path,
+        "path_base": path_base,
+        "role": role,
+        "media_type": media_type,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "immutable": True,
+        "confidentiality": confidentiality,
+    }
+
+
+def _artifact_index(document: Mapping[str, Any]) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    found: dict[str, list[Mapping[str, Any]]] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            if set(value) == _ARTIFACT_REF_KEYS:
+                artifact = _validated_artifact_ref(cast("Mapping[str, Any]", value))
+                artifact_id = cast("str", artifact["artifact_id"])
+                matches = found.setdefault(artifact_id, [])
+                if artifact not in matches:
+                    matches.append(artifact)
+                return
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for nested in value:
+                visit(nested)
+
+    payload = document.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle source contract payload is unavailable",
+        )
+    visit(payload)
+    return {artifact_id: tuple(artifacts) for artifact_id, artifacts in found.items()}
+
+
+def _select_artifact(
+    item: BundleItem,
+    *,
+    path: str,
+    data: bytes,
+) -> str:
+    selector = item.artifact_selector
+    if selector is not None and not isinstance(selector, str):
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "bundle artifact selector must be a string")
+    document_bytes = canonical_json(item.source_object) + b"\n"
+    if selector == _DOCUMENT_SELECTOR or (selector is None and data == document_bytes):
+        if data != document_bytes:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle contract-document bytes differ from their source object",
+            )
+        return _DOCUMENT_SELECTOR
+    if selector is not None and _ARTIFACT_ID_PATTERN.fullmatch(selector) is None:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "bundle artifact selector is invalid")
+
+    digest = digest_bytes(data)
+    artifacts = _artifact_index(item.source_object)
+    if selector is None:
+        candidates = {
+            artifact_id
+            for artifact_id, references in artifacts.items()
+            for artifact in references
+            if artifact["path"] == path
+            and artifact["role"] == item.role
+            and artifact["size_bytes"] == digest.size_bytes
+            and artifact["sha256"] == digest.sha256
+        }
+        if len(candidates) != 1:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle file does not have one unique matching ArtifactRef",
+            )
+        selector = next(iter(candidates))
+    references = artifacts.get(selector)
+    if references is None:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle artifact selector is absent from its source object",
+        )
+    if not any(
+        artifact["path"] == path
+        and artifact["role"] == item.role
+        and artifact["size_bytes"] == digest.size_bytes
+        and artifact["sha256"] == digest.sha256
+        for artifact in references
+    ):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle entry path, role, size or SHA-256 differs from its ArtifactRef",
+        )
+    return selector
 
 
 def _prepare_items(
@@ -224,13 +392,14 @@ def _prepare_items(
             raise ContractError(ErrorCode.SCHEMA_INVALID, "bundle entry role must be non-empty")
         receipt = validate_contract(item.source_object)
         source_run_id = item.source_object.get("run_id")
-        if source_run_id not in {None, run_id}:
+        if source_run_id != run_id:
             raise ContractError(
                 ErrorCode.HASH_INTEGRITY_MISMATCH,
                 "bundle entry provenance is bound to a different run",
             )
         source_path = _source_path(root, path)
         data = read_stable_bytes(source_path, max_bytes=limits.max_file_bytes)
+        artifact_selector = _select_artifact(item, path=path, data=data)
         total += len(data)
         if total > limits.max_total_bytes:
             raise ContractError(
@@ -248,6 +417,7 @@ def _prepare_items(
                     "payload_sha256": receipt.payload_sha256,
                     "document_sha256": receipt.document_sha256,
                 },
+                artifact_selector=artifact_selector,
             )
         )
     prepared.sort(key=lambda value: value.path)
@@ -404,6 +574,157 @@ def _read_verified_members(
     return members, names
 
 
+def _binding_key(binding: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    try:
+        values = (
+            binding["schema_name"],
+            binding["object_id"],
+            binding["payload_sha256"],
+            binding["document_sha256"],
+        )
+    except KeyError as exc:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle source-object binding is incomplete",
+        ) from exc
+    if not all(isinstance(value, str) and value for value in values):
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle source-object binding is invalid",
+        )
+    return cast("tuple[str, str, str, str]", values)
+
+
+def _verify_entry_provenance(
+    *,
+    payload: Mapping[str, Any],
+    run_id: str,
+    entries: Sequence[Mapping[str, Any]],
+    members: Mapping[str, bytes],
+) -> None:
+    source_documents: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    for entry in entries:
+        if entry["artifact_selector"] != _DOCUMENT_SELECTOR:
+            continue
+        data = members[cast("str", entry["path"])]
+        source_document = load_contract_json(data)
+        receipt = validate_contract(source_document)
+        if source_document.get("run_id") != run_id:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundled source contract belongs to a different run",
+            )
+        if data != canonical_json(source_document) + b"\n":
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundled source contract is not its canonical sealed bytes",
+            )
+        expected_binding = {
+            "schema_name": receipt.schema_name,
+            "object_id": cast("str", source_document["object_id"]),
+            "payload_sha256": receipt.payload_sha256,
+            "document_sha256": receipt.document_sha256,
+        }
+        actual_binding = cast("Mapping[str, Any]", entry["source_object"])
+        if dict(actual_binding) != expected_binding:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundled source contract differs from its ObjectBinding",
+            )
+        key = _binding_key(expected_binding)
+        if key in source_documents:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle contains duplicate source-contract provenance",
+            )
+        source_documents[key] = source_document
+
+    run_candidates = [
+        document
+        for document in source_documents.values()
+        if document["schema_name"] == "RunManifest"
+        and cast("Mapping[str, Any]", document["integrity"])["payload_sha256"]
+        == payload["run_manifest_sha256"]
+    ]
+    verification_candidates = [
+        document
+        for document in source_documents.values()
+        if document["schema_name"] == "VerificationReport"
+        and cast("Mapping[str, Any]", document["integrity"])["payload_sha256"]
+        == payload["verification_report_sha256"]
+    ]
+    if len(run_candidates) != 1 or len(verification_candidates) != 1:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle must include its exact RunManifest and VerificationReport contracts",
+        )
+    run_manifest = run_candidates[0]
+    verification_report = verification_candidates[0]
+    if run_manifest["run_id"] != run_id or verification_report["run_id"] != run_id:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "bundle workflow contracts belong to a different run",
+        )
+
+    run_binding = object_binding(run_manifest)
+    run_payload = cast("Mapping[str, Any]", run_manifest["payload"])
+    authorized_bindings = {
+        _binding_key(binding)
+        for binding in cast("Sequence[Mapping[str, Any]]", run_payload["object_bindings"])
+    }
+    source_manifest_binding = run_payload.get("source_manifest")
+    if isinstance(source_manifest_binding, Mapping):
+        authorized_bindings.add(_binding_key(cast("Mapping[str, Any]", source_manifest_binding)))
+    authorized_bindings.add(_binding_key(run_binding))
+    if _binding_key(object_binding(verification_report)) not in authorized_bindings:
+        raise ContractError(
+            ErrorCode.BUNDLE_HASH_MISMATCH,
+            "RunManifest does not authorize the bundled VerificationReport",
+        )
+
+    artifact_indexes: dict[tuple[str, str, str, str], dict[str, tuple[Mapping[str, Any], ...]]] = {}
+    for entry in entries:
+        binding = cast("Mapping[str, Any]", entry["source_object"])
+        key = _binding_key(binding)
+        selected_document = source_documents.get(key)
+        if selected_document is None:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle entry source contract is not explicitly allowlisted",
+            )
+        if key not in authorized_bindings:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "RunManifest does not authorize a bundle entry source contract",
+            )
+        selector = entry["artifact_selector"]
+        if selector == _DOCUMENT_SELECTOR:
+            continue
+        if not isinstance(selector, str) or _ARTIFACT_ID_PATTERN.fullmatch(selector) is None:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle artifact selector is invalid",
+            )
+        artifacts = artifact_indexes.setdefault(key, _artifact_index(selected_document))
+        references = artifacts.get(selector)
+        if references is None:
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle artifact selector is absent from its source contract",
+            )
+        if not any(
+            artifact["path"] == entry["path"]
+            and artifact["role"] == entry["role"]
+            and artifact["size_bytes"] == entry["size_bytes"]
+            and artifact["sha256"] == entry["sha256"]
+            for artifact in references
+        ):
+            raise ContractError(
+                ErrorCode.BUNDLE_HASH_MISMATCH,
+                "bundle entry metadata differs from its selected ArtifactRef",
+            )
+
+
 def verify_audit_bundle(
     path: str | Path,
     *,
@@ -439,6 +760,12 @@ def verify_audit_bundle(
         digest = digest_bytes(data)
         if digest.size_bytes != entry["size_bytes"] or digest.sha256 != entry["sha256"]:
             raise ContractError(ErrorCode.BUNDLE_HASH_MISMATCH, "bundle entry hash or size differs")
+    _verify_entry_provenance(
+        payload=payload,
+        run_id=cast("str", document["run_id"]),
+        entries=entries,
+        members=members,
+    )
     privacy_bytes = members[_PRIVACY_REPORT_PATH]
     privacy_artifact = cast(
         "Mapping[str, Any]", cast("Mapping[str, Any]", payload["privacy_scan"])["report"]
@@ -572,6 +899,7 @@ def create_audit_bundle(
             "size_bytes": len(item.data),
             "sha256": digest_bytes(item.data).sha256,
             "source_object": dict(item.source_object),
+            "artifact_selector": item.artifact_selector,
         }
         for item in prepared
     ]

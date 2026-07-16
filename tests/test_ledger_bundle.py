@@ -14,6 +14,7 @@ import pytest
 from latex_word_review.bundle import (
     BundleItem,
     create_audit_bundle,
+    object_binding,
     verify_audit_bundle,
 )
 from latex_word_review.canonical import (
@@ -22,6 +23,8 @@ from latex_word_review.canonical import (
     seal_envelope,
 )
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.hashing import digest_bytes
+from latex_word_review.ids import derive_artifact_id
 from latex_word_review.ledger import build_ledger
 from tests.test_contracts import _golden_contracts
 
@@ -92,16 +95,68 @@ def _ledger_files(
         documents["PatchPlan"],
         documents["VerificationReport"],
     )
+    artifacts = (
+        _bundle_artifact("ledger.html", "review_ledger_html", ledger.html_bytes, "text/html"),
+        _bundle_artifact(
+            "ledger.json", "review_ledger_json", ledger.json_bytes, "application/json"
+        ),
+    )
+    verification = documents["VerificationReport"]
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["object_bindings"] = [object_binding(verification)]
+    run_manifest["payload"]["artifacts"] = list(artifacts)
+    run_manifest = seal_envelope(run_manifest)
+    documents["RunManifest"] = run_manifest
+
     source = root / "payload"
     source.mkdir()
     (source / "ledger.json").write_bytes(ledger.json_bytes)
     (source / "ledger.html").write_bytes(ledger.html_bytes)
+    (source / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
+    (source / "verification-report.json").write_bytes(canonical_json(verification) + b"\n")
     (source / "not-allowlisted-private.txt").write_bytes(b"must never enter the bundle")
     allowlist = (
-        BundleItem("ledger.html", "review_ledger_html", documents["VerificationReport"]),
-        BundleItem("ledger.json", "review_ledger_json", documents["ChangeSet"]),
+        BundleItem(
+            "ledger.html",
+            "review_ledger_html",
+            run_manifest,
+            artifacts[0]["artifact_id"],
+        ),
+        BundleItem(
+            "ledger.json",
+            "review_ledger_json",
+            run_manifest,
+            artifacts[1]["artifact_id"],
+        ),
+        BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+        BundleItem(
+            "verification-report.json",
+            "verification_report",
+            verification,
+            "$document",
+        ),
     )
     return source, allowlist
+
+
+def _bundle_artifact(
+    path: str,
+    role: str,
+    data: bytes,
+    media_type: str = "application/octet-stream",
+) -> dict[str, Any]:
+    digest = digest_bytes(data)
+    return {
+        "artifact_id": derive_artifact_id(digest.sha256),
+        "path": path,
+        "path_base": "bundle_root",
+        "role": role,
+        "media_type": media_type,
+        "size_bytes": digest.size_bytes,
+        "sha256": digest.sha256,
+        "immutable": True,
+        "confidentiality": "public_fixture",
+    }
 
 
 def test_ledger_is_deterministic_complete_and_utf8(
@@ -240,7 +295,7 @@ def test_bundle_is_allowlist_only_deterministic_and_self_verifying(
         expected_verification_report=documents["VerificationReport"],
     )
     assert verified.document == first.document
-    assert verified.entry_count == 2
+    assert verified.entry_count == 4
     assert first.document["payload"]["manifest_sha256"].startswith("sha256:")
 
     with zipfile.ZipFile(first_path) as archive:
@@ -253,6 +308,8 @@ def test_bundle_is_allowlist_only_deterministic_and_self_verifying(
             "ledger.json",
             "manifest/audit-bundle.json",
             "manifest/privacy-scan.json",
+            "run-manifest.json",
+            "verification-report.json",
         ]
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos)
         assert all(info.compress_type == zipfile.ZIP_DEFLATED for info in infos)
@@ -333,15 +390,33 @@ def test_public_bundle_privacy_hit_fails_without_output(
 ) -> None:
     source = tmp_path / "payload"
     source.mkdir()
-    (source / "private.txt").write_bytes(b"source=C:\\Users\\Alice\\private-paper.tex\n")
+    private_bytes = b"source=C:\\Users\\Alice\\private-paper.tex\n"
+    (source / "private.txt").write_bytes(private_bytes)
+    artifact = _bundle_artifact("private.txt", "private", private_bytes, "text/plain")
+    verification = documents["VerificationReport"]
+    run_manifest = copy.deepcopy(documents["RunManifest"])
+    run_manifest["payload"]["object_bindings"] = [object_binding(verification)]
+    run_manifest["payload"]["artifacts"] = [artifact]
+    run_manifest = seal_envelope(run_manifest)
+    (source / "run-manifest.json").write_bytes(canonical_json(run_manifest) + b"\n")
+    (source / "verification-report.json").write_bytes(canonical_json(verification) + b"\n")
     destination = tmp_path / "private.zip"
     with pytest.raises(ContractError) as rejected:
         create_audit_bundle(
             source,
             destination,
-            allowlist=[BundleItem("private.txt", "private", documents["ChangeSet"])],
-            run_manifest=documents["RunManifest"],
-            verification_report=documents["VerificationReport"],
+            allowlist=[
+                BundleItem("private.txt", "private", run_manifest, artifact["artifact_id"]),
+                BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+                BundleItem(
+                    "verification-report.json",
+                    "verification_report",
+                    verification,
+                    "$document",
+                ),
+            ],
+            run_manifest=run_manifest,
+            verification_report=verification,
             content_classification="public_fixture",
             generated_at=GENERATED_AT,
         )

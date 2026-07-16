@@ -14,7 +14,8 @@
 | 许可证 | 代码、原创文档和自制 fixture 采用 Apache-2.0，根 `LICENSE` 已存在 | `LICENSE`、fixture provenance |
 | Python | `>=3.12,<3.14`，首批元数据只允许 3.12/3.13 | `pyproject.toml` |
 | 支持平台 | Windows-only；Linux/macOS 不进入开发、CI、发行或维护承诺 | `docs/adr/0002-windows-only-support.md`、支持矩阵 |
-| 运行依赖 | `jsonschema`、`lxml`、`referencing`、`rfc8785`、`tex2word==1.0.5` | `pyproject.toml`、`uv.lock` |
+| 运行依赖 | `jsonschema`、`lxml`、`referencing`、`regex`、`rfc8785`、`tex2word==1.0.5` | `pyproject.toml`、`uv.lock` |
+| Codex 分发 | canonical Skill 与 Plugin 内嵌 Skill 字节一致；仓库 marketplace 指向打包 Plugin，核心业务仍只在 Python 库/CLI。当前 Plugin SemVer `0.1.0` 对应 Python 候选 `0.1.0b2`；两种版本语法独立，兼容关系必须进入发行说明 | `.agents/plugins/marketplace.json`、`plugins/latex-word-review/`、`skills/latex-word-review/` |
 | 本地仓库 | Git 与 CI 配置已初始化；本快照中“未初始化”结论已失效 | 当前工作树 |
 | 远程发布 | 公开源仓库为 `JIE-jiee/latex-word-review`；远程 CI 以精确提交的 Actions 状态为准，尚无 tag 或 GitHub/PyPI prerelease | 当前发布记录 |
 
@@ -78,6 +79,7 @@ PyPI distribution latex-word-review
 Python import     latex_word_review
 CLI               latex-word-review
 Codex Skill       latex-word-review
+Codex Plugin      latex-word-review (repository marketplace: personal)
 ```
 
 同名映射牺牲少量命令长度，但显著降低安装、文档、Skill 和错误排查中的认知成本。短 alias 可以在 beta 后单独评估；不要先发布 `texreview` 再迁移。
@@ -170,12 +172,12 @@ requires-python = ">=3.12,<3.14"
 ## 5. 当时的依赖分组建议
 
 当前运行依赖以 `pyproject.toml` 与 `uv.lock` 为准，已经在早期转换器原型基础上增加
-`jsonschema`、`referencing` 和 `rfc8785`，分别用于 v1alpha Schema 校验、内存资源注册表
-与 RFC 8785 canonical JSON。
+`jsonschema`、`referencing`、`regex` 和 `rfc8785`，分别用于 v1alpha Schema 校验、内存资源
+注册表、Unicode extended grapheme cluster 边界和 RFC 8785 canonical JSON。
 
 ### 5.1 发布时的运行依赖
 
-F1/E0 阶段先使用精确锁定，避免把上游波动误判为本项目问题：
+当前发布声明使用有上界的直接依赖范围，并由 `uv.lock` 固定实际候选环境：
 
 ```toml
 [project]
@@ -183,15 +185,18 @@ dependencies = [
   "jsonschema>=4.26,<5",
   "lxml>=6.1,<7",
   "referencing>=0.37,<1",
+  "regex>=2026.7.10,<2027",
   "rfc8785>=0.1.4,<0.2",
   "tex2word==1.0.5",
 ]
 ```
 
 - 本项目的 raw OOXML reader 会直接使用 `lxml`，因此即使 tex2word 已经传递依赖它，也应声明为本项目的直接依赖。
+- 精确 offset 门禁直接使用 `regex` 的 Unicode `\X` 划分 extended grapheme cluster；它是
+  安全边界中的直接依赖，不依靠 Python 标准库中不完整的手工字符表。
 - `tex2word==1.0.5` 是 E0/F1 的可复现实验锁定，不代表最终 1.0 永久精确钉死。只有多版本契约测试通过后，才考虑放宽为受控范围，例如 `>=1.0.5,<1.1`。
 - 在该快照时 CLI 框架和 Schema/模型库尚未落地；后续实现已经证明并直接声明
-  `jsonschema`、`referencing` 和 `rfc8785`，CLI 继续使用标准库 `argparse`。
+  `jsonschema`、`referencing`、`regex` 和 `rfc8785`，CLI 继续使用标准库 `argparse`。
 
 ### 5.2 可选功能 extras
 

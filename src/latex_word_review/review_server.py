@@ -25,6 +25,7 @@ from latex_word_review.approval import (
 )
 from latex_word_review.contracts import compute_payload_sha256, validate_contract
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.planner import evaluate_patch_eligibility
 
 LOOPBACK_HOST: Final = "127.0.0.1"
 SESSION_COOKIE: Final = "lwr_review_session"
@@ -34,6 +35,18 @@ _GRACEFUL_DRAIN_BYTES: Final = MAX_REQUEST_BYTES + 1
 _GRACEFUL_DRAIN_CHUNK_BYTES: Final = 8 * 1024
 _GRACEFUL_DRAIN_TIMEOUT_SECONDS: Final = 0.25
 _CHANGE_PATH_RE: Final = re.compile(r"^/change/(chg_[a-z0-9]{26,64})$")
+_FILTER_PATH_RE: Final = re.compile(r"^/filter/(all|pending|manual|comment|high-risk)$")
+_FILTER_CHANGE_PATH_RE: Final = re.compile(
+    r"^/filter/(all|pending|manual|comment|high-risk)/change/(chg_[a-z0-9]{26,64})$"
+)
+_FILTER_NAMES: Final[tuple[str, ...]] = ("all", "pending", "manual", "comment", "high-risk")
+_FILTER_LABELS: Final[dict[str, str]] = {
+    "all": "All",
+    "pending": "Pending",
+    "manual": "Manual",
+    "comment": "Comments",
+    "high-risk": "High risk",
+}
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
 _DECISIONS: Final = {
     "accepted",
@@ -66,6 +79,186 @@ def _escape(value: object) -> str:
     else:
         rendered = str(value)
     return html.escape(rendered, quote=True)
+
+
+def _render_optional(value: object) -> str:
+    if value is None:
+        return "<em>Not recorded</em>"
+    if value == "":
+        return "<pre>(empty string)</pre>"
+    return f"<pre>{_escape(value)}</pre>"
+
+
+def _render_values(values: Sequence[object]) -> str:
+    if not values:
+        return "<em>None recorded</em>"
+    return "<ul>" + "".join(f"<li>{_escape(value)}</li>" for value in values) + "</ul>"
+
+
+def _render_baseline_verification(changeset_payload: Mapping[str, Any]) -> str:
+    baseline_value = changeset_payload.get("baseline_verification")
+    if baseline_value is None:
+        return ""
+    baseline = cast("Mapping[str, Any]", baseline_value)
+    verified_scope = cast("Sequence[object]", baseline["verified_scope"])
+    unverified_scope = cast("Sequence[object]", baseline["unverified_scope"])
+    manual_review_required = baseline["manual_integrity_review_required"]
+    manual_review_notice = (
+        "<p><strong>Manual integrity review is required</strong> for the unverified "
+        "document semantics before relying on the final deliverables.</p>"
+        if manual_review_required is True
+        else ""
+    )
+    return (
+        '<section aria-labelledby="baseline-verification-scope">'
+        '<h2 id="baseline-verification-scope">Baseline verification scope</h2>'
+        "<p>This verification is scoped to safe plain-text patch planning; it is not a "
+        "claim that every Word document semantic was verified.</p><dl>"
+        f"<dt><code>status</code></dt><dd>{_escape(baseline['status'])}</dd>"
+        "<dt><code>automatic_patch_scope</code></dt>"
+        f"<dd>{_escape(baseline['automatic_patch_scope'])}</dd>"
+        "<dt><code>verified_scope</code></dt>"
+        f"<dd>{_render_values(verified_scope)}</dd>"
+        "<dt><code>unverified_scope</code></dt>"
+        f"<dd>{_render_values(unverified_scope)}</dd>"
+        "<dt><code>manual_integrity_review_required</code></dt>"
+        f"<dd>{_escape(manual_review_required)}</dd>"
+        f"</dl>{manual_review_notice}</section>"
+    )
+
+
+def _change_matches_filter(
+    change: Mapping[str, Any],
+    decision: Mapping[str, Any] | None,
+    selected_filter: str,
+) -> bool:
+    if selected_filter == "all":
+        return True
+    if selected_filter == "pending":
+        return decision is None
+    if selected_filter == "manual":
+        return change["initial_decision"] == "manual" or (
+            decision is not None and decision["decision"] == "manual"
+        )
+    if selected_filter == "comment":
+        return bool(change["kind"] == "comment")
+    if selected_filter == "high-risk":
+        return change["safety_class"] in {"manual_high_risk", "denied_unknown"}
+    raise ContractError(ErrorCode.SCHEMA_INVALID, "unknown review filter")
+
+
+def _change_href(change_id: str, selected_filter: str) -> str:
+    if selected_filter == "all":
+        return f"/change/{change_id}"
+    return f"/filter/{selected_filter}/change/{change_id}"
+
+
+def _linked_raw_events(
+    change: Mapping[str, Any], raw_events: Sequence[Mapping[str, Any]]
+) -> tuple[Mapping[str, Any], ...]:
+    index = {cast("str", item["raw_event_id"]): item for item in raw_events}
+    return tuple(index[cast("str", raw_id)] for raw_id in change["raw_event_ids"])
+
+
+def _relevant_diagnostics(
+    change: Mapping[str, Any],
+    raw_events: Sequence[Mapping[str, Any]],
+    changeset_diagnostics: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    selected: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(diagnostic: Mapping[str, Any]) -> None:
+        diagnostic_id = cast("str", diagnostic["diagnostic_id"])
+        if diagnostic_id not in seen:
+            selected.append(diagnostic)
+            seen.add(diagnostic_id)
+
+    for event in raw_events:
+        for diagnostic in cast("Sequence[Mapping[str, Any]]", event["diagnostics"]):
+            add(diagnostic)
+    change_id = change["change_id"]
+    unit_id = change["unit_id"]
+    for diagnostic in changeset_diagnostics:
+        if diagnostic["change_id"] == change_id or (
+            unit_id is not None and diagnostic["unit_id"] == unit_id
+        ):
+            add(diagnostic)
+    return tuple(selected)
+
+
+def _render_diagnostics(diagnostics: Sequence[Mapping[str, Any]]) -> str:
+    if not diagnostics:
+        return "<p>No diagnostics are linked to this change.</p>"
+    items = []
+    for diagnostic in diagnostics:
+        remediation = _render_optional(diagnostic["remediation"])
+        items.append(
+            "<li>"
+            f"<p><strong>{_escape(diagnostic['severity'])}: "
+            f"{_escape(diagnostic['code'])}</strong></p>"
+            f"<p>{_escape(diagnostic['message'])}</p>"
+            "<dl>"
+            f"<dt>Phase</dt><dd>{_escape(diagnostic['phase'])}</dd>"
+            f"<dt>Recoverable</dt><dd>{_escape(diagnostic['recoverable'])}</dd>"
+            f"<dt>Remediation</dt><dd>{remediation}</dd>"
+            f"<dt>Diagnostic ID</dt><dd><code>{_escape(diagnostic['diagnostic_id'])}</code></dd>"
+            "</dl></li>"
+        )
+    return "<ol>" + "".join(items) + "</ol>"
+
+
+def _render_raw_event(event: Mapping[str, Any]) -> str:
+    summary = (
+        f"{event['raw_event_id']} — {event['kind']} — {event['part_uri']} "
+        f"(order {event['document_order']})"
+    )
+    diagnostic_codes = [
+        item["code"] for item in cast("Sequence[Mapping[str, Any]]", event["diagnostics"])
+    ]
+    return (
+        "<details>"
+        f"<summary>{_escape(summary)}</summary><dl>"
+        f"<dt>Native ID</dt><dd>{_escape(event['native_id'])}</dd>"
+        f"<dt>Native kind</dt><dd>{_escape(event['native_kind'])}</dd>"
+        f"<dt>Author</dt><dd>{_escape(event['author'])}</dd>"
+        f"<dt>Timestamp</dt><dd>{_escape(event['timestamp'])}</dd>"
+        f"<dt>Content</dt><dd><pre>{_escape(event['content'])}</pre></dd>"
+        f"<dt>Range</dt><dd><pre>{_escape(event['range'])}</pre></dd>"
+        f"<dt>Evidence</dt><dd><pre>{_escape(event['evidence'])}</pre></dd>"
+        f"<dt>Diagnostic codes</dt><dd>{_render_values(diagnostic_codes)}</dd>"
+        "</dl></details>"
+    )
+
+
+def _automatic_applicability(
+    change: Mapping[str, Any],
+    decision: Mapping[str, Any] | None,
+    approval_status: object,
+) -> tuple[str, str]:
+    eligibility = evaluate_patch_eligibility(change, decision)
+    if eligibility.block_code is not None:
+        return "No", cast("str", eligibility.reason)
+    if eligibility.source_context_required:
+        return "Not yet", cast("str", eligibility.reason)
+    if decision is None:
+        return (
+            "Not yet",
+            "technically eligible, but an explicit acceptance and final approval are still "
+            "required",
+        )
+    decision_name = cast("str", decision["decision"])
+    if decision_name not in {"accepted", "accepted_with_edit"}:
+        return "No", f"the current decision is {decision_name}"
+    if approval_status != "final":
+        return (
+            "Not yet",
+            "accepted and technically eligible, but the ApprovalSet is still draft",
+        )
+    return (
+        "Eligible",
+        "the separate PatchPlan/apply gate must still revalidate the source bytes and policy",
+    )
 
 
 def _validate_initial_state(changeset: Mapping[str, Any], approval: Mapping[str, Any]) -> None:
@@ -219,6 +412,7 @@ class _ReviewState:
                 decision=cast("Decision", decision),
                 final_text=final_text if decision == "accepted_with_edit" else None,
                 reason=form["reason"] or None,
+                risk_acknowledgement=form["risk_acknowledgement"] or None,
                 decision_source="local_ui",
             )
             if updated != self.approval:
@@ -447,9 +641,16 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
             return None
         return fields
 
-    def _render_review(self, requested_change_id: str | None) -> bytes:
+    def _render_review(self, requested_change_id: str | None, selected_filter: str) -> bytes:
+        if selected_filter not in _FILTER_NAMES:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "unknown review filter")
         changeset, approval = self.review_server.review_state.snapshot()
-        changes = cast("Sequence[Mapping[str, Any]]", changeset["payload"]["changes"])
+        changeset_payload = cast("Mapping[str, Any]", changeset["payload"])
+        changes = cast("Sequence[Mapping[str, Any]]", changeset_payload["changes"])
+        raw_events = cast("Sequence[Mapping[str, Any]]", changeset_payload["raw_events"])
+        changeset_diagnostics = cast(
+            "Sequence[Mapping[str, Any]]", changeset_payload["diagnostics"]
+        )
         decisions = {
             cast("str", item["change_id"]): item
             for item in cast("Sequence[Mapping[str, Any]]", approval["payload"]["decisions"])
@@ -461,10 +662,64 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
         revision = cast("int", payload["revision"])
         approval_sha256 = compute_payload_sha256(approval)
         csrf = self.review_server.review_state.csrf_token
-        navigation = "".join(
-            f'<li><a href="/change/{_escape(change_id)}">{_escape(change_id)}</a></li>'
-            for change_id in change_ids
+        filtered_changes = [
+            change
+            for change in changes
+            if _change_matches_filter(
+                change,
+                decisions.get(cast("str", change["change_id"])),
+                selected_filter,
+            )
+        ]
+        filtered_ids = [cast("str", item["change_id"]) for item in filtered_changes]
+        if requested_change_id is not None and requested_change_id not in filtered_ids:
+            raise ContractError(ErrorCode.APPROVAL_CHANGE_UNKNOWN, "change is outside filter")
+        filter_counts = {
+            filter_name: sum(
+                _change_matches_filter(
+                    change,
+                    decisions.get(cast("str", change["change_id"])),
+                    filter_name,
+                )
+                for change in changes
+            )
+            for filter_name in _FILTER_NAMES
+        }
+        filter_navigation = "".join(
+            (
+                f'<li><a href="/filter/{_escape(filter_name)}"'
+                + (' aria-current="page"' if selected_filter == filter_name else "")
+                + f">{_escape(_FILTER_LABELS[filter_name])} "
+                f"({_escape(filter_counts[filter_name])})</a></li>"
+            )
+            for filter_name in _FILTER_NAMES
         )
+        total = len(changes)
+        decided_count = len(decisions)
+        pending_count = total - decided_count
+        progress = (
+            f"<p>Progress: total <strong>{total}</strong>; decided "
+            f"<strong>{decided_count}</strong>; pending <strong>{pending_count}</strong>.</p>"
+            + (
+                f'<progress value="{decided_count}" max="{total}">'
+                f"{decided_count}/{total}</progress>"
+                if total
+                else "<p>There are no decisions to record.</p>"
+            )
+        )
+        baseline_verification = _render_baseline_verification(changeset_payload)
+        navigation_items: list[str] = []
+        for item in filtered_changes:
+            item_id = cast("str", item["change_id"])
+            item_decision = decisions.get(item_id)
+            item_status = "pending" if item_decision is None else item_decision["decision"]
+            item_href = _change_href(item_id, selected_filter)
+            navigation_items.append(
+                f'<li><a href="{_escape(item_href)}">'
+                f"{_escape(item['kind'])} — {_escape(item_id)}</a> "
+                f"[{_escape(item_status)}]</li>"
+            )
+        navigation = "".join(navigation_items)
         hidden = ""
         finalize_form = ""
         if payload["status"] != "final":
@@ -480,56 +735,196 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
             )
         if not change_ids:
             return (
-                "<!doctype html><html><head><meta charset=utf-8>"
-                "<title>Local change review</title></head><body>"
+                "<!doctype html><html lang=en><head><meta charset=utf-8>"
+                '<meta name=viewport content="width=device-width, initial-scale=1">'
+                "<title>Local change review</title></head><body><header>"
                 "<h1>Local change review</h1>"
                 f"<p>Approval revision: {revision}; status: {_escape(payload['status'])}</p>"
+                f"{progress}{baseline_verification}"
+                f'<nav aria-label="Change filters"><ul>{filter_navigation}</ul></nav>'
+                "</header><main>"
                 "<p>No changes were found.</p>"
-                f"{finalize_form}</body></html>"
+                f"{finalize_form}</main></body></html>"
+            ).encode()
+        if not filtered_changes:
+            return (
+                "<!doctype html><html lang=en><head><meta charset=utf-8>"
+                '<meta name=viewport content="width=device-width, initial-scale=1">'
+                "<title>Local change review</title></head><body><header>"
+                "<h1>Local change review</h1>"
+                f"<p>Approval revision: {revision}; status: {_escape(payload['status'])}</p>"
+                f"{progress}{baseline_verification}"
+                f'<nav aria-label="Change filters"><ul>{filter_navigation}</ul></nav>'
+                "</header><main>"
+                f"<p>No changes match the {_escape(_FILTER_LABELS[selected_filter])} filter.</p>"
+                f"{finalize_form}</main></body></html>"
             ).encode()
         if requested_change_id is None:
-            pending = [change_id for change_id in change_ids if change_id not in decisions]
-            selected_id = pending[0] if pending else change_ids[0]
+            pending = [change_id for change_id in filtered_ids if change_id not in decisions]
+            selected_id = pending[0] if pending else filtered_ids[0]
         else:
             selected_id = requested_change_id
-        change = next(item for item in changes if item["change_id"] == selected_id)
+        change = next(item for item in filtered_changes if item["change_id"] == selected_id)
         decision = decisions.get(selected_id)
+        linked_raw_events = _linked_raw_events(change, raw_events)
+        diagnostics = _relevant_diagnostics(
+            change,
+            linked_raw_events,
+            changeset_diagnostics,
+        )
         evidence = {
             "raw_event_ids": change["raw_event_ids"],
             "resolution": change["resolution"],
             "change_fingerprint": change["change_fingerprint"],
         }
+        resolution = cast("Mapping[str, Any]", change["resolution"])
+        authors = cast("Sequence[object]", change["authors"])
+        timestamps = cast("Sequence[object]", change["timestamps"])
+        auto_state, auto_reason = _automatic_applicability(change, decision, payload["status"])
+        current_decision = "pending" if decision is None else cast("str", decision["decision"])
+        current_final_text = None if decision is None else decision["final_text"]
+        current_reason = None if decision is None else decision["reason"]
+        current_risk = None if decision is None else decision["risk_acknowledgement"]
+        current_decided_at = None if decision is None else decision["decided_at"]
+        current_source = None if decision is None else decision["decision_source"]
+        anchor_texts = [
+            cast("Mapping[str, Any]", event["content"])["text"]
+            for event in linked_raw_events
+            if event["kind"] == "comment"
+        ]
+        if anchor_texts:
+            rendered_anchors = (
+                "<ul>"
+                + "".join(
+                    (
+                        "<li><em>Point anchor; no text was selected.</em></li>"
+                        if anchor == ""
+                        else f"<li><pre>{_escape(anchor)}</pre></li>"
+                    )
+                    for anchor in anchor_texts
+                )
+                + "</ul>"
+            )
+        else:
+            rendered_anchors = "<em>Not recorded</em>"
+        comment_section = ""
+        if change["kind"] == "comment":
+            comment_section = (
+                "<section><h3>Comment</h3><dl>"
+                f"<dt>Comment body</dt><dd>{_render_optional(change['comment'])}</dd>"
+                f"<dt>Anchored text</dt><dd>{rendered_anchors}</dd>"
+                "</dl></section>"
+            )
+        selected_index = filtered_ids.index(selected_id)
+        previous_id = filtered_ids[selected_index - 1] if selected_index else None
+        current_global_index = change_ids.index(selected_id)
+        pending_after = [
+            change_id
+            for change_id in (
+                change_ids[current_global_index + 1 :] + change_ids[:current_global_index]
+            )
+            if change_id not in decisions
+        ]
+        next_pending_id = pending_after[0] if pending_after else None
+        previous_navigation = (
+            '<a rel="prev" '
+            f'href="{_escape(_change_href(previous_id, selected_filter))}">'
+            "Previous item</a>"
+            if previous_id is not None
+            else "<span>Previous item unavailable</span>"
+        )
+        next_pending_navigation = (
+            '<a rel="next" '
+            f'href="{_escape(_change_href(next_pending_id, "pending"))}">'
+            "Next pending</a>"
+            if next_pending_id is not None
+            else "<span>No other pending item</span>"
+        )
         decision_form = ""
         if payload["status"] != "final":
             decision_form = (
-                '<form method="post" action="/decision">'
+                '<section><h3>Record decision</h3><form method="post" action="/decision">'
                 + hidden
                 + f'<input type="hidden" name="change_id" value="{_escape(selected_id)}">'
-                '<label>Edited final text<textarea name="final_text"></textarea></label>'
-                '<label>Reason<textarea name="reason"></textarea></label>'
+                '<p><label for="final_text">Edited final text</label><br>'
+                '<textarea id="final_text" name="final_text" rows="4" cols="80">'
+                f"{_escape(current_final_text)}</textarea></p>"
+                "<p>Final text is used only with <strong>Accept edited</strong>; clear it before "
+                "submitting another decision.</p>"
+                '<p><label for="reason">Reason</label><br>'
+                '<textarea id="reason" name="reason" rows="3" cols="80">'
+                f"{_escape(current_reason)}</textarea></p>"
+                '<p><label for="risk_acknowledgement">Risk acknowledgement</label><br>'
+                '<textarea id="risk_acknowledgement" name="risk_acknowledgement" '
+                f'rows="3" cols="80">{_escape(current_risk)}</textarea></p>'
                 '<button name="decision" value="accepted">Accept</button>'
                 '<button name="decision" value="accepted_with_edit">Accept edited</button>'
                 '<button name="decision" value="rejected">Reject</button>'
                 '<button name="decision" value="manual">Manual</button>'
-                '<button name="decision" value="conflict">Conflict</button></form>'
+                '<button name="decision" value="conflict">Conflict</button></form></section>'
             )
+        raw_evidence = "".join(_render_raw_event(event) for event in linked_raw_events)
+        change_raw_event_ids = cast("Sequence[object]", change["raw_event_ids"])
         return (
-            "<!doctype html><html><head><meta charset=utf-8>"
-            "<title>Local change review</title></head><body>"
+            "<!doctype html><html lang=en><head><meta charset=utf-8>"
+            '<meta name=viewport content="width=device-width, initial-scale=1">'
+            "<title>Local change review</title></head><body><header>"
             "<h1>Local change review</h1>"
             f"<p>Approval revision: {revision}; status: {_escape(payload['status'])}</p>"
-            f"<nav><ol>{navigation}</ol></nav><main>"
+            f"{progress}{baseline_verification}"
+            f'<nav aria-label="Change filters"><ul>{filter_navigation}</ul></nav>'
+            "</header>"
+            f"<aside><h2>{_escape(_FILTER_LABELS[selected_filter])} changes</h2>"
+            f"<p>Showing {selected_index + 1} of {len(filtered_changes)} matching changes.</p>"
+            f'<nav aria-label="Filtered changes"><ol>{navigation}</ol></nav></aside><main>'
+            f'<nav aria-label="Review navigation">{previous_navigation} | '
+            f"{next_pending_navigation}</nav>"
             f"<h2>{_escape(change['change_id'])}</h2>"
-            f"<dl><dt>Type</dt><dd>{_escape(change['kind'])}</dd>"
+            "<section><h3>Change metadata</h3><dl>"
+            f"<dt>Type</dt><dd>{_escape(change['kind'])}</dd>"
+            f"<dt>Kind</dt><dd>{_escape(change['kind'])}</dd>"
+            f"<dt>Native kind</dt><dd>{_escape(change['native_kind'])}</dd>"
             f"<dt>Author</dt><dd>{_escape(change['author'])}</dd>"
+            f"<dt>Authors</dt><dd>{_render_values(authors)}</dd>"
             f"<dt>Time</dt><dd>{_escape(change['timestamp'])}</dd>"
-            f"<dt>Before</dt><dd><pre>{_escape(change['before'])}</pre></dd>"
-            f"<dt>After</dt><dd><pre>{_escape(change['after'])}</pre></dd>"
+            f"<dt>Timestamps</dt><dd>{_render_values(timestamps)}</dd>"
+            "</dl></section>"
+            f"{comment_section}"
+            "<section><h3>Before and after</h3><table>"
+            '<thead><tr><th scope="col">Before</th><th scope="col">After</th></tr></thead>'
+            "<tbody><tr>"
+            f"<td>{_render_optional(change['before'])}</td>"
+            f"<td>{_render_optional(change['after'])}</td>"
+            "</tr></tbody></table></section>"
+            "<section><h3>Source mapping and safety</h3><dl>"
             f"<dt>Source</dt><dd><pre>{_escape(change['source_location'])}</pre></dd>"
+            f"<dt>Unit ID</dt><dd>{_escape(change['unit_id'])}</dd>"
+            f"<dt>Resolution</dt><dd>{_escape(resolution['status'])}</dd>"
+            f"<dt>Resolution method</dt><dd>{_escape(resolution['method'])}</dd>"
+            f"<dt>Confidence</dt><dd>{_escape(resolution['confidence'])}</dd>"
+            f"<dt>Resolution candidates</dt><dd><pre>{_escape(resolution['candidates'])}</pre></dd>"
+            f"<dt>Safety class</dt><dd>{_escape(change['safety_class'])}</dd>"
+            f"<dt>Automatically applicable</dt><dd><strong>{_escape(auto_state)}</strong> — "
+            f"{_escape(auto_reason)}.</dd>"
+            "</dl><p>This is a review-time assessment only. The separate planner/apply gate "
+            "still checks the finalized approval, source hashes, exact bytes, overlap, and "
+            "policy.</p>"
+            "</section>"
+            "<section><h3>Audit evidence</h3><dl>"
             f"<dt>Evidence</dt><dd><pre>{_escape(evidence)}</pre></dd>"
-            "<dt>Decision</dt><dd>"
-            f"{_escape('pending' if decision is None else decision['decision'])}"
-            "</dd></dl>"
+            f"<dt>Raw event IDs</dt><dd>{_render_values(change_raw_event_ids)}</dd>"
+            "<dt>Change fingerprint</dt><dd><code>"
+            f"{_escape(change['change_fingerprint'])}</code></dd>"
+            f"</dl><h4>Raw evidence summary</h4>{raw_evidence}"
+            f"<h4>Change diagnostics</h4>{_render_diagnostics(diagnostics)}</section>"
+            "<section><h3>Current decision</h3><dl>"
+            f"<dt>Decision</dt><dd>{_escape(current_decision)}</dd>"
+            f"<dt>Final text</dt><dd>{_render_optional(current_final_text)}</dd>"
+            f"<dt>Reason</dt><dd>{_render_optional(current_reason)}</dd>"
+            f"<dt>Risk acknowledgement</dt><dd>{_render_optional(current_risk)}</dd>"
+            f"<dt>Decided at</dt><dd>{_escape(current_decided_at)}</dd>"
+            f"<dt>Decision source</dt><dd>{_escape(current_source)}</dd>"
+            "</dl></section>"
             f"{decision_form}{finalize_form}</main></body></html>"
         ).encode()
 
@@ -542,14 +937,23 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "E_PATH_TRAVERSAL", "invalid request target")
             return
         requested: str | None = None
+        selected_filter = "all"
         if path != "/":
-            match = _CHANGE_PATH_RE.fullmatch(path)
-            if match is None:
+            change_match = _CHANGE_PATH_RE.fullmatch(path)
+            filter_match = _FILTER_PATH_RE.fullmatch(path)
+            filtered_change_match = _FILTER_CHANGE_PATH_RE.fullmatch(path)
+            if change_match is not None:
+                requested = change_match.group(1)
+            elif filter_match is not None:
+                selected_filter = filter_match.group(1)
+            elif filtered_change_match is not None:
+                selected_filter = filtered_change_match.group(1)
+                requested = filtered_change_match.group(2)
+            else:
                 self._error(HTTPStatus.NOT_FOUND, "E_SCHEMA_INVALID", "endpoint not found")
                 return
-            requested = match.group(1)
         try:
-            body = self._render_review(requested)
+            body = self._render_review(requested, selected_filter)
         except ContractError as exc:
             self._error(HTTPStatus.NOT_FOUND, exc.code.value, "change not found")
             return
@@ -575,6 +979,7 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                 "decision",
                 "final_text",
                 "reason",
+                "risk_acknowledgement",
             }
             if path == "/decision"
             else {"csrf", "revision", "approval_sha256"}

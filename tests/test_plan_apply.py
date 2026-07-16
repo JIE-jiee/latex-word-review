@@ -220,6 +220,70 @@ def test_accepted_structural_or_paragraph_edit_blocks_entire_plan(
     assert raised.value.code is ErrorCode.PATCH_ACCEPTED_BUT_BLOCKED
 
 
+@pytest.mark.parametrize(
+    ("text", "change"),
+    [
+        ("Hello\tworld\n", ("replacement", 5, 6, " ")),
+        ("Hello\n", ("replacement", 0, 5, "safe\u00a0text")),
+        ("Hello\n", ("replacement", 0, 5, "safe\u2028text")),
+    ],
+)
+def test_tracked_non_u0020_whitespace_is_never_auto_patched(
+    tmp_path: Path,
+    text: str,
+    change: tuple[str, int, int, str],
+) -> None:
+    source = tmp_path / "source"
+    source_tree = _write_source(source, text)
+    changeset = _changeset(text, [change])
+    approval = _final_approval(changeset, [("accepted", None)])
+
+    result = plan_patch(
+        source,
+        source_tree_sha256=source_tree,
+        changeset=changeset,
+        approval=approval,
+        generated_at=TIME,
+    )
+
+    assert result.document["payload"]["status"] == "blocked"
+    assert result.document["payload"]["accepted_but_blocked"][0]["code"] == (
+        ErrorCode.PATCH_UNSAFE_KIND.value
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        ("insertion", 6, 6, " careful"),
+        ("replacement", 6, 11, " revised"),
+        ("replacement", 0, 5, "Hello "),
+    ],
+)
+def test_ascii_space_created_across_source_boundary_is_blocked(
+    tmp_path: Path,
+    change: tuple[str, int, int, str],
+) -> None:
+    text = "Hello world\n"
+    source = tmp_path / "source"
+    source_tree = _write_source(source, text)
+    changeset = _changeset(text, [change])
+    approval = _final_approval(changeset, [("accepted", None)])
+
+    result = plan_patch(
+        source,
+        source_tree_sha256=source_tree,
+        changeset=changeset,
+        approval=approval,
+        generated_at=TIME,
+    )
+
+    assert result.document["payload"]["status"] == "blocked"
+    assert result.document["payload"]["accepted_but_blocked"][0]["code"] == (
+        ErrorCode.PATCH_UNSAFE_KIND.value
+    )
+
+
 def test_deleting_latex_syntax_is_blocked_even_if_changeset_claims_plain_text(
     tmp_path: Path,
 ) -> None:

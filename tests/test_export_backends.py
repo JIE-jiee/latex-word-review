@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import shutil
 import sys
-from pathlib import Path
+import xml.etree.ElementTree as ET
+import zipfile
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 import latex_word_review.backends.pandoc as pandoc_module
 import latex_word_review.backends.tex2word as tex2word_module
 from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBackend
+from latex_word_review.backends.base import BackendCapabilities, BackendResult
 from latex_word_review.discovery import discover_project
+from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import ExportBindings, export_review_docx
+from latex_word_review.hashing import digest_file
 from latex_word_review.inspection import inspect_docx
 from latex_word_review.runtime import CommandResult
+from tests._docx_factory import write_docx
+from tests.test_image_materializer import _minimal_pdf, _require_pdf_runtime
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures/e0-minimal-paper"
 
@@ -48,6 +55,65 @@ def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
     ) == (34, 5, 1, 1, 9)
     assert (inspection.seq_fields, inspection.ref_fields, inspection.pageref_fields) == (5, 6, 0)
     assert not list(output.parent.glob(".review.docx.tex2word-*.docx"))
+
+
+def test_real_tex2word_embeds_selected_pdf_page_as_related_png(
+    tmp_path: Path,
+) -> None:
+    _require_pdf_runtime()
+    backend = Tex2WordBackend()
+    if backend.capabilities().tool_version != "1.0.5":
+        pytest.skip("locked tex2word runtime is unavailable")
+    source = tmp_path / "source"
+    (source / "figures").mkdir(parents=True)
+    pdf_path = source / "figures/multi.pdf"
+    pdf_path.write_bytes(_minimal_pdf(((1, 0, 0), (0, 0, 1)), width=72, height=36))
+    pdf_before = pdf_path.read_bytes()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\n\n"
+        "Review the selected second page.\n\n"
+        "\\includegraphics[page=2]{figures/multi.pdf}\n\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output/review.docx"
+
+    outcome = export_review_docx(
+        backend,
+        BackendRequest(source, "main.tex", output),
+        discovery,
+        ExportBindings(
+            source_manifest_sha256="sha256:" + "d" * 64,
+            artifact_path="artifacts/review.docx",
+            confidentiality="public_fixture",
+        ),
+    )
+
+    assert outcome.report.status == "success"
+    assert outcome.inspection is not None
+    assert outcome.inspection.image_instances == 1
+    assert pdf_path.read_bytes() == pdf_before
+    assert outcome.image_overlay is not None
+    overlay_pngs = tuple(outcome.image_overlay.derived_root.rglob("preview.png"))
+    assert len(overlay_pngs) == 1
+    assert overlay_pngs[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    with zipfile.ZipFile(output) as package:
+        members = set(package.namelist())
+        media_pngs = sorted(
+            name for name in members if name.startswith("word/media/") and name.endswith(".png")
+        )
+        assert len(media_pngs) == 1
+        assert package.read(media_pngs[0]).startswith(b"\x89PNG\r\n\x1a\n")
+        relationships = ET.fromstring(package.read("word/_rels/document.xml.rels"))
+        image_targets = {
+            relationship.attrib["Target"]
+            for relationship in relationships
+            if relationship.attrib.get("Type", "").endswith("/image")
+        }
+        assert image_targets
+        assert {(PurePosixPath("word") / target).as_posix() for target in image_targets} <= members
 
 
 def test_tex2word_worker_timeout_preserves_output_and_cleans_owned_stages(
@@ -134,6 +200,104 @@ def test_full_e0_pipeline_adds_only_exact_source_bookmarks(tmp_path: Path) -> No
     assert outcome.inspection is not None
     assert outcome.inspection.bookmarks == 11
     assert output.is_file()
+
+
+def test_export_refuses_a_successful_zero_unit_review(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n\\[x^2\\]\n\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output" / "review.docx"
+
+    with pytest.raises(ContractError) as raised:
+        export_review_docx(
+            Tex2WordBackend(),
+            BackendRequest(source, "main.tex", output),
+            discovery,
+            ExportBindings(
+                source_manifest_sha256="sha256:" + "a" * 64,
+                artifact_path="artifacts/review.docx",
+            ),
+        )
+
+    assert raised.value.code is ErrorCode.EXPORT_SILENT_LOSS
+    assert not output.exists()
+
+
+def test_export_blocks_when_a_source_image_instance_is_missing_from_docx(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n\nPlain text.\n\n"
+        "\\includegraphics{plot.png}\n\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (source / "plot.png").write_bytes(b"synthetic-static-image")
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output" / "review.docx"
+    document_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body><w:p><w:r><w:t>Plain text.</w:t></w:r></w:p></w:body>
+    </w:document>"""
+
+    class MissingImageBackend:
+        def capabilities(self) -> BackendCapabilities:
+            return Tex2WordBackend().capabilities()
+
+        def export(self, request: BackendRequest) -> BackendResult:
+            write_docx(request.output_path, document_xml=document_xml)
+            digest = digest_file(request.output_path, max_bytes=128 * 1024 * 1024)
+            return BackendResult(
+                status="success",
+                capabilities=self.capabilities(),
+                artifact_name=request.output_path.name,
+                artifact_sha256=digest.sha256,
+                artifact_size_bytes=digest.size_bytes,
+                findings=(),
+                native_report={},
+            )
+
+    outcome = export_review_docx(
+        MissingImageBackend(),
+        BackendRequest(source, "main.tex", output),
+        discovery,
+        ExportBindings(
+            source_manifest_sha256="sha256:" + "a" * 64,
+            artifact_path="artifacts/review.docx",
+        ),
+    )
+
+    assert outcome.output_path is None
+    assert outcome.report.status == "failed"
+    image_feature = next(
+        feature for feature in outcome.report.feature_results if feature.feature == "images"
+    )
+    assert (image_feature.source_count, image_feature.output_count, image_feature.status) == (
+        1,
+        0,
+        "failed",
+    )
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}.image-overlay").exists()
+
+    repeated = export_review_docx(
+        MissingImageBackend(),
+        BackendRequest(source, "main.tex", output),
+        discovery,
+        ExportBindings(
+            source_manifest_sha256="sha256:" + "a" * 64,
+            artifact_path="artifacts/review.docx",
+        ),
+    )
+    assert repeated.report.status == "failed"
+    assert not output.with_name(f"{output.name}.image-overlay").exists()
 
 
 def test_pandoc_forces_source_root_cwd_and_fixed_argv(

@@ -81,8 +81,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Install all locked test groups
-        run: uv sync --frozen --all-groups --python ${{ matrix.python-version }}
+      - name: Install all locked test groups and the PDF-figure runtime
+        run: >-
+          uv sync --frozen --all-groups --extra pdf-figures
+          --python ${{ matrix.python-version }}
       - name: Run the complete suite with branch coverage
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} pytest

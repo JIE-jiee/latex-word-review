@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from latex_word_review.discovery import discover_project
@@ -145,3 +146,23 @@ def test_unmatched_source_text_creates_no_bookmark(tmp_path: Path) -> None:
     assert result.coverage["unmapped"] == 1
     assert result.findings[0].code is ErrorCode.MAP_UNMATCHED
     assert inspect_docx(anchored).bookmarks == 0
+
+
+def test_anchoring_adds_a_valid_track_changes_settings_part(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_project(source, ["Tracked review paragraph."])
+    discovery = discover_project(source, main_document="main.tex")
+    units = scan_source_units(source, discovery)
+    unanchored = tmp_path / "unanchored.docx"
+    anchored = tmp_path / "anchored.docx"
+    _write_minimal_docx(unanchored, ["Tracked review paragraph."])
+
+    anchor_source_units(unanchored, anchored, units)
+
+    with zipfile.ZipFile(anchored) as archive:
+        settings = ElementTree.fromstring(archive.read("word/settings.xml"))
+        controls = settings.findall(f"{{{W_NS}}}trackRevisions")
+        assert len(controls) == 1
+        assert controls[0].get(f"{{{W_NS}}}val") is None
+        assert b'/word/settings.xml"' in archive.read("[Content_Types].xml")
+        assert b'relationships/settings"' in archive.read("word/_rels/document.xml.rels")

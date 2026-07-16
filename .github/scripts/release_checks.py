@@ -33,6 +33,7 @@ EXPECTED_REQUIRES_DIST = frozenset(
         "jsonschema<5,>=4.26",
         "lxml<7,>=6.1",
         "referencing<1,>=0.37",
+        "regex<2027,>=2026.7.10",
         "rfc8785<0.2,>=0.1.4",
         "tex2word==1.0.5",
         "citeproc-py<0.11,>=0.10; extra == 'citations'",
@@ -71,6 +72,7 @@ TEXT_SUFFIXES = {
     ".js",
     ".jsx",
     ".json",
+    ".lock",
     ".ltx",
     ".lua",
     ".md",
@@ -144,6 +146,7 @@ WINDOWS_RESERVED_BASENAMES = frozenset(
 )
 SDIST_ALLOWED_TOP_LEVEL = frozenset(
     {
+        ".agents",
         ".gitignore",
         "CHANGELOG.md",
         "CODE_OF_CONDUCT.md",
@@ -156,9 +159,29 @@ SDIST_ALLOWED_TOP_LEVEL = frozenset(
         "THIRD_PARTY_NOTICES.md",
         "docs",
         "pyproject.toml",
+        "plugins",
         "skills",
         "src",
         "third_party",
+    }
+)
+PLUGIN_NAME = "latex-word-review"
+PLUGIN_MANIFEST_RELATIVE = "plugins/latex-word-review/.codex-plugin/plugin.json"
+MARKETPLACE_RELATIVE = ".agents/plugins/marketplace.json"
+CANONICAL_SKILL_RELATIVE = "skills/latex-word-review/SKILL.md"
+CANONICAL_OPENAI_YAML_RELATIVE = "skills/latex-word-review/agents/openai.yaml"
+EMBEDDED_SKILL_RELATIVE = "plugins/latex-word-review/skills/latex-word-review/SKILL.md"
+EMBEDDED_OPENAI_YAML_RELATIVE = (
+    "plugins/latex-word-review/skills/latex-word-review/agents/openai.yaml"
+)
+PLUGIN_DISTRIBUTION_RELATIVE_FILES = frozenset(
+    {
+        MARKETPLACE_RELATIVE,
+        PLUGIN_MANIFEST_RELATIVE,
+        CANONICAL_SKILL_RELATIVE,
+        CANONICAL_OPENAI_YAML_RELATIVE,
+        EMBEDDED_SKILL_RELATIVE,
+        EMBEDDED_OPENAI_YAML_RELATIVE,
     }
 )
 
@@ -211,6 +234,70 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseCheckError(f"expected a JSON object: {path.name}")
     return value
+
+
+def load_json_bytes(data: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            data.decode("utf-8", errors="strict"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseCheckError(f"cannot read valid UTF-8 JSON: {label}") from exc
+    if not isinstance(value, dict):
+        raise ReleaseCheckError(f"expected a JSON object: {label}")
+    return value
+
+
+def validate_plugin_distribution_payloads(payloads: dict[str, bytes]) -> None:
+    missing = sorted(PLUGIN_DISTRIBUTION_RELATIVE_FILES - set(payloads))
+    unexpected = sorted(set(payloads) - PLUGIN_DISTRIBUTION_RELATIVE_FILES)
+    if missing or unexpected:
+        raise ReleaseCheckError(
+            "plugin distribution payload set is incomplete or unexpected: "
+            + json.dumps({"missing": missing, "unexpected": unexpected}, sort_keys=True)
+        )
+
+    for canonical, embedded in (
+        (CANONICAL_SKILL_RELATIVE, EMBEDDED_SKILL_RELATIVE),
+        (CANONICAL_OPENAI_YAML_RELATIVE, EMBEDDED_OPENAI_YAML_RELATIVE),
+    ):
+        if payloads[canonical] != payloads[embedded]:
+            raise ReleaseCheckError(
+                f"packaged plugin copy differs from canonical Skill: {embedded}"
+            )
+
+    manifest = load_json_bytes(payloads[PLUGIN_MANIFEST_RELATIVE], label="plugin.json")
+    if (
+        manifest.get("name") != PLUGIN_NAME
+        or manifest.get("skills") != "./skills/"
+        or not isinstance(manifest.get("version"), str)
+        or not manifest["version"]
+    ):
+        raise ReleaseCheckError("packaged plugin manifest identity or skills path is invalid")
+    if any(field in manifest for field in ("apps", "hooks", "mcpServers")):
+        raise ReleaseCheckError(
+            "packaged plugin declares a companion component that is not shipped"
+        )
+
+    marketplace = load_json_bytes(payloads[MARKETPLACE_RELATIVE], label="marketplace.json")
+    entries = marketplace.get("plugins")
+    if not isinstance(entries, list):
+        raise ReleaseCheckError("packaged marketplace is missing its plugins array")
+    matching = [
+        entry for entry in entries if isinstance(entry, dict) and entry.get("name") == PLUGIN_NAME
+    ]
+    expected_entry = {
+        "name": PLUGIN_NAME,
+        "source": {"source": "local", "path": "./plugins/latex-word-review"},
+        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        "category": "Productivity",
+    }
+    if matching != [expected_entry]:
+        raise ReleaseCheckError("packaged marketplace entry does not bind the packaged plugin")
+
+    todo = next((name for name, data in payloads.items() if b"[TODO:" in data), None)
+    if todo is not None:
+        raise ReleaseCheckError(f"plugin distribution contains a TODO placeholder: {todo}")
 
 
 def safe_member_name(name: str) -> PurePosixPath:
@@ -347,7 +434,13 @@ def check_wheel(path: Path) -> tuple[str, str]:
                 normalized.append(member.as_posix())
             required_exact = {
                 "latex_word_review/__about__.py",
+                "latex_word_review/_image_worker.py",
+                "latex_word_review/image_materializer.py",
+                "latex_word_review/image_overlay.py",
+                "latex_word_review/offset_mapping.py",
                 "latex_word_review/py.typed",
+                "latex_word_review/word_semantics.py",
+                "latex_word_review/workflow.py",
             }
             missing = sorted(required_exact - set(normalized))
             if missing:
@@ -455,6 +548,7 @@ def check_sdist(path: Path, expected_version: str) -> None:
     entries: dict[tuple[str, ...], tuple[bool | None, tuple[str, ...]]] = {}
     expanded = 0
     pkg_info_candidates: dict[str, bytes] = {}
+    plugin_payloads: dict[str, bytes] = {}
     try:
         with (
             path.open("rb") as compressed,
@@ -512,6 +606,10 @@ def check_sdist(path: Path, expected_version: str) -> None:
                         scan_member(name, data)
                         if safe.name == "PKG-INFO":
                             pkg_info_candidates[name] = data
+                        if len(safe.parts) > 1:
+                            relative = PurePosixPath(*safe.parts[1:]).as_posix()
+                            if relative in PLUGIN_DISTRIBUTION_RELATIVE_FILES:
+                                plugin_payloads[relative] = data
             while bounded.read(1024 * 1024):
                 pass
     except (OSError, tarfile.TarError) as exc:
@@ -541,8 +639,7 @@ def check_sdist(path: Path, expected_version: str) -> None:
         f"{root}/README.md",
         f"{root}/SUPPORT.md",
         f"{root}/pyproject.toml",
-        f"{root}/skills/latex-word-review/SKILL.md",
-        f"{root}/skills/latex-word-review/agents/openai.yaml",
+        *(f"{root}/{relative}" for relative in PLUGIN_DISTRIBUTION_RELATIVE_FILES),
         f"{root}/src/latex_word_review/__about__.py",
         f"{root}/src/latex_word_review/py.typed",
         f"{root}/third_party/Contributor-Covenant-LICENSE.txt",
@@ -551,6 +648,7 @@ def check_sdist(path: Path, expected_version: str) -> None:
     missing = sorted(required - set(names))
     if missing:
         raise ReleaseCheckError(f"sdist is missing required members: {missing}")
+    validate_plugin_distribution_payloads(plugin_payloads)
     pkg_info_bytes = pkg_info_candidates.get(f"{root}/PKG-INFO")
     if pkg_info_bytes is None:
         raise ReleaseCheckError("cannot inspect sdist PKG-INFO")

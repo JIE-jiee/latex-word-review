@@ -2,7 +2,9 @@
 
 ## Source and governance
 
-- [ ] Version and changelog agree; release tag is exactly `v<version>`.
+- [ ] Python version and changelog agree; release tag is exactly `v<python-version>`. The Codex
+      Plugin manifest uses valid SemVer and its documented CLI compatibility is reviewed separately
+      from the package's PEP 440 prerelease string.
 - [ ] License, `third_party/` license texts, third-party notices, security policy, support matrix, and
       known limitations are current.
 - [ ] Package metadata and public documentation use the canonical
@@ -22,6 +24,8 @@
 - [ ] Quality gate passes with the frozen lockfile; public extras resolve/install from their lowest
       direct bounds on Python 3.12 and 3.13.
 - [ ] Windows 3.12 and 3.13 closed-loop, fixture, and package lanes pass.
+- [ ] The Windows 3.12/3.13 test lane installs `pdf-figures` and runs the synthetic multipage-PDF
+      overlay, canonical PNG, image-instance reconciliation, and immutable-source negative tests.
 - [ ] Windows 3.12 real XeLaTeX/CTeX/`latexmk`/`latexdiff` lane records one pass, zero skips,
       the expected MiKTeX Setup Utility filename and official SHA-256, all 29 manifest-bound MiKTeX
       packages and their digests, an unchanged complete installed-package inventory count/digest,
@@ -31,6 +35,18 @@
 - [ ] No Linux or macOS result is treated as a release prerequisite or support claim.
 - [ ] Public fixture visual review is recorded as `pass`; no deferred release gate remains.
 
+## Windows product contracts
+
+- [ ] A real installed Microsoft Word run passes unchanged save/reopen, tracked local
+      insert/delete/replace plus comment, Track Changes-off untracked drift, Accept All, and broken
+      bookmark cases; the baseline hash is unchanged and the output manifest records no user path or
+      document text.
+- [ ] Ingest accepts the valid tracked case and rejects untracked drift, Accept All, and bookmark
+      damage against the exact exported baseline.
+- [ ] The approval UI and workflow status show `verified_for_text_patch`, all verified/unverified
+      baseline scopes, and `manual_integrity_review_required=true`; no release note describes it as
+      whole-document equivalence.
+
 ## Candidate artifacts
 
 - [ ] Two separate output builds use the locked Hatchling 1.31.0 backend with `--no-isolation` and
@@ -38,6 +54,9 @@
 - [ ] Wheel and sdist pass archive-boundary/privacy checks and `twine check`.
 - [ ] Wheel and sdist metadata contain exactly the reviewed Python interval, base requirements,
       public extras, extra requirements, identity, and Apache-2.0 license expression.
+- [ ] The sdist contains the canonical Skill, Plugin manifest/embedded Skill, and repository
+      marketplace; canonical and embedded Skill files are byte-identical, the marketplace binds the
+      packaged Plugin, and all Plugin payloads pass the repository validators without placeholders.
 - [ ] Archive checks reject non-canonical/Windows-aliased names, symlink/non-regular members,
       undeclared binary/top-level payloads, duplicate critical metadata, and compressed/member/full
       decompression-limit violations.
@@ -58,7 +77,11 @@
 ## Promotion
 
 - [ ] Candidate is downloaded and independently verified on another Windows machine.
+- [ ] The repository marketplace can be added and the Plugin clean-installed into a fresh isolated
+      Codex home; a new Agent follows the Skill, reaches the Word handoff, and does not bypass either
+      approval gate.
 - [ ] Maintainer explicitly authorizes the target GitHub prerelease/package-index operation.
 - [ ] Release notes state support tiers, security-relevant changes, schema/CLI compatibility, and known
-      limitations.
+      limitations, including image-count-only DOCX reconciliation and scoped Word baseline
+      verification.
 - [ ] Published bytes are never replaced; fixes use a new version.

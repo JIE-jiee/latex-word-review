@@ -102,6 +102,28 @@
         }
       }
     },
+    "ImageOverlayBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "manifest",
+        "original_source_tree_sha256",
+        "derived_source_tree_sha256",
+        "source_image_instances",
+        "materialized_pdf_instances",
+        "passthrough_raster_instances"
+      ],
+      "properties": {
+        "status": {"enum": ["ready", "manual_required"]},
+        "manifest": {"$ref": "#/$defs/ArtifactRef"},
+        "original_source_tree_sha256": {"$ref": "#/$defs/Sha256"},
+        "derived_source_tree_sha256": {"$ref": "#/$defs/Sha256"},
+        "source_image_instances": {"type": "integer", "minimum": 0},
+        "materialized_pdf_instances": {"type": "integer", "minimum": 0},
+        "passthrough_raster_instances": {"type": "integer", "minimum": 0}
+      }
+    },
     "SourceLocation": {
       "type": "object",
       "additionalProperties": false,
@@ -533,11 +555,40 @@
         "neighbor_sha256": {"$ref": "#/$defs/Sha256"}
       }
     },
+    "TextProvenanceSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_start", "review_end", "source_start_byte", "source_end_byte",
+        "transformation", "auto_patchable"
+      ],
+      "properties": {
+        "review_start": {"type": "integer", "minimum": 0},
+        "review_end": {"type": "integer", "minimum": 0},
+        "source_start_byte": {"type": "integer", "minimum": 0},
+        "source_end_byte": {"type": "integer", "minimum": 0},
+        "transformation": {"enum": ["identity", "whitespace-collapse"]},
+        "auto_patchable": {"type": "boolean"}
+      }
+    },
+    "TextProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "review_length", "segments"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/Profile"},
+        "review_length": {"type": "integer", "minimum": 0},
+        "segments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/TextProvenanceSegment"}
+        }
+      }
+    },
     "SourceMapping": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "unit_id", "source_location", "docx_anchor", "source_fingerprint",
+        "unit_id", "source_location", "docx_anchor", "source_fingerprint", "text_provenance",
         "mapping_method", "confidence", "status"
       ],
       "properties": {
@@ -545,6 +596,7 @@
         "source_location": {"$ref": "#/$defs/SourceLocation"},
         "docx_anchor": {"$ref": "#/$defs/DocxAnchor"},
         "source_fingerprint": {"$ref": "#/$defs/SourceFingerprint"},
+        "text_provenance": {"$ref": "#/$defs/TextProvenance"},
         "mapping_method": {
           "enum": ["exact_source_span", "bookmark", "source_fingerprint", "manual", "none"]
         },
@@ -572,13 +624,14 @@
       "additionalProperties": false,
       "required": [
         "source_manifest_sha256", "review_ir_sha256", "review_docx_sha256",
-        "anchor_profile", "mappings", "coverage", "diagnostics"
+        "anchor_profile", "image_overlay", "mappings", "coverage", "diagnostics"
       ],
       "properties": {
         "source_manifest_sha256": {"$ref": "#/$defs/Sha256"},
         "review_ir_sha256": {"$ref": "#/$defs/Sha256"},
         "review_docx_sha256": {"$ref": "#/$defs/Sha256"},
         "anchor_profile": {"$ref": "#/$defs/Profile"},
+        "image_overlay": {"$ref": "#/$defs/ImageOverlayBinding"},
         "mappings": {"type": "array", "items": {"$ref": "#/$defs/SourceMapping"}},
         "coverage": {"$ref": "#/$defs/Coverage"},
         "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/Diagnostic"}}
@@ -628,7 +681,7 @@
       "additionalProperties": false,
       "required": [
         "status", "source_manifest_sha256", "backend_capabilities_sha256",
-        "review_ir_sha256", "source_map_sha256", "review_docx", "metrics",
+        "review_ir_sha256", "source_map_sha256", "review_docx", "image_overlay", "metrics",
         "feature_results", "findings", "validation"
       ],
       "properties": {
@@ -644,6 +697,7 @@
         "review_docx": {
           "oneOf": [{"$ref": "#/$defs/ArtifactRef"}, {"type": "null"}]
         },
+        "image_overlay": {"$ref": "#/$defs/ImageOverlayBinding"},
         "metrics": {"$ref": "#/$defs/ExportMetrics"},
         "feature_results": {"type": "array", "items": {"$ref": "#/$defs/FeatureResult"}},
         "findings": {"type": "array", "items": {"$ref": "#/$defs/Diagnostic"}},
@@ -680,6 +734,11 @@
       "properties": {
         "node_ordinal": {"type": "integer", "minimum": 0},
         "fragment_sha256": {"$ref": "#/$defs/Sha256"},
+        "content_class": {"enum": ["plain_text", "structured", "not_applicable"]},
+        "structural_context": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
         "artifact": {
           "oneOf": [{"$ref": "#/$defs/ArtifactRef"}, {"type": "null"}]
         }
@@ -803,6 +862,50 @@
         "conflicts": {"type": "integer", "minimum": 0}
       }
     },
+    "BaselineVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "exported_docx_sha256", "returned_original_docx_sha256",
+        "drift_status", "expected_bookmarks", "verified_bookmarks", "verified_scope",
+        "unverified_scope", "automatic_patch_scope", "manual_integrity_review_required",
+        "semantic_profile"
+      ],
+      "properties": {
+        "status": {"const": "verified_for_text_patch"},
+        "exported_docx_sha256": {"$ref": "#/$defs/Sha256"},
+        "returned_original_docx_sha256": {"$ref": "#/$defs/Sha256"},
+        "drift_status": {"const": "clean"},
+        "expected_bookmarks": {"type": "integer", "minimum": 0},
+        "verified_bookmarks": {"type": "integer", "minimum": 0},
+        "verified_scope": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "visible_text", "paragraph_table_structure", "field_structure", "bookmarks",
+              "insert_delete_revisions", "move_revisions"
+            ]
+          }
+        },
+        "unverified_scope": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "paragraph_mark_revisions", "formatting", "omml", "images",
+              "hyperlink_and_relationship_targets", "content_controls_and_custom_xml",
+              "embedded_objects_and_alternate_content"
+            ]
+          }
+        },
+        "automatic_patch_scope": {"const": "plain_text_only"},
+        "manual_integrity_review_required": {"const": true},
+        "semantic_profile": {"$ref": "#/$defs/Profile"}
+      }
+    },
     "ChangeSetPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -816,6 +919,7 @@
         "source_manifest_sha256": {"$ref": "#/$defs/Sha256"},
         "source_map_sha256": {"$ref": "#/$defs/Sha256"},
         "revision_reader_capabilities_sha256": {"$ref": "#/$defs/Sha256"},
+        "baseline_verification": {"$ref": "#/$defs/BaselineVerification"},
         "ingest_profile": {"$ref": "#/$defs/Profile"},
         "raw_events": {"type": "array", "items": {"$ref": "#/$defs/RawRevisionEventData"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/Change"}},
@@ -1128,13 +1232,21 @@
     "BundleEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "role", "size_bytes", "sha256", "source_object"],
+      "required": [
+        "path", "role", "size_bytes", "sha256", "source_object", "artifact_selector"
+      ],
       "properties": {
         "path": {"$ref": "#/$defs/RelativePath"},
         "role": {"type": "string", "minLength": 1},
         "size_bytes": {"type": "integer", "minimum": 0},
         "sha256": {"$ref": "#/$defs/Sha256"},
-        "source_object": {"$ref": "#/$defs/ObjectBinding"}
+        "source_object": {"$ref": "#/$defs/ObjectBinding"},
+        "artifact_selector": {
+          "oneOf": [
+            {"const": "$document"},
+            {"type": "string", "pattern": "^art_[a-z0-9]{26,64}$"}
+          ]
+        }
       }
     },
     "ExcludedBundleEntry": {

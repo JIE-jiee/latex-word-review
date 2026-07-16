@@ -1,6 +1,10 @@
 # GitHub 生态调研与复用决策
 
 > 调研快照：2026-07-16。上游状态会变化，实施前必须重新核验版本、许可证、维护状态和接口。
+>
+> 2026-07 成熟化阶段对 Word 修订双视图、局部 UTF-8 provenance 与 PDF/SVG/EPS
+> 图像路线的增量调研及 adopt/wrap/contribute/self-build 决策，见
+> [`reviews/maturity-upstream-reuse-2026-07.md`](reviews/maturity-upstream-reuse-2026-07.md)。
 
 ## 调研结论
 

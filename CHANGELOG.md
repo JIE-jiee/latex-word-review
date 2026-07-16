@@ -19,6 +19,45 @@ source version below.
 - Narrow the maintained platform scope to Windows with CPython 3.12/3.13. Linux and macOS are no
   longer CI, release, or support targets; historical upstream and security evidence remains intact.
 
+## [0.1.0b2] - 2026-07-17
+
+### Added
+
+- Add a no-clobber Windows workflow layer with fixed `snapshot/`, `objects/`, `export/`, and
+  `receive/` layout plus `workflow init`, `export`, `receive`, `status`, and allowlisted cleanup.
+- Add a current Codex Plugin package, personal marketplace manifest, reusable thin Skill, Windows
+  Quick Start, and isolated installation/forward-test contracts.
+- Materialize statically referenced PDF pages as deterministic PNG review previews in a derived
+  overlay while preserving the authoritative LaTeX/PDF bytes; record page, crop, rotation, pixel,
+  renderer, source, cache, and derived-tree evidence.
+- Add real Microsoft Word COM contract tests for tracked insert/delete/replace/comment round trips,
+  Track Changes disabled edits, Accept All, bookmark damage, and unchanged saves.
+
+### Changed
+
+- Enable exactly one `w:trackRevisions` setting in every produced review DOCX and require the
+  returned document to match the immutable export under a reject-changes semantic projection before
+  revision extraction.
+- Map supported bookmark-local edits to exact LaTeX UTF-8 byte spans, including repeated text, CJK,
+  emoji, and Unicode extended grapheme boundaries; ambiguous or lossy whitespace remains manual.
+- Expand the loopback review UI with filters, progress, complete raw evidence/diagnostics, explicit
+  risk acknowledgement, automatic-applicability explanations, and baseline-scope warnings.
+- Restrict automatic patch text to ordinary U+0020 spaces with normalization-safe source boundaries;
+  tab, NBSP, Unicode separators, structural text, fields, hyperlinks, drawings, and mixed OOXML are
+  auditable manual items.
+- Describe baseline verification honestly as `verified_for_text_patch`: visible text, structure,
+  bookmarks, and insert/delete/move semantics are checked, while formatting, OMML, images, and
+  paragraph-mark revisions still require human integrity review.
+
+### Security
+
+- Recheck returned DOCX bytes between semantic comparison and extraction, fail closed on complex
+  field-state injection, and bind PDF-overlay evidence into sealed export contracts.
+- Isolate native PDFium rendering behind a bounded Windows worker and preserve renderer failures as
+  explicit manual diagnostics without running EPS/PostScript.
+- Use the maintained `regex` implementation of Unicode `\X` rather than an incomplete local
+  grapheme heuristic, and refresh frozen dependency, license, OSV, and PyPI audit evidence.
+
 ## [0.1.0b1] - 2026-07-16
 
 ### Added

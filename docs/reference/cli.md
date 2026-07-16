@@ -28,6 +28,7 @@ Skill 复用同一套库逻辑；Skill 不另行实现转换、修订解析或�
 | `reader-capabilities` | 修订读取器 `BackendCapabilities` | 否 |
 | `archive` | 返回 Word 原件和归档清单 | 否 |
 | `ingest` | 完整 `ChangeSet` | 否 |
+| `workflow init/export/receive/status/clean` | 固定目录的安全编排、状态与暂存清理 | 否 |
 | `approve init/set/finalize` | 逐版不可变 `ApprovalSet` | 否 |
 | `approve serve` | 仅绑定 `127.0.0.1` 的逐条审批页 | 否 |
 | `plan` | dry-run `PatchPlan` 和 exact unified diff | 否 |
@@ -40,34 +41,59 @@ Skill 复用同一套库逻辑；Skill 不另行实现转换、修订解析或�
 
 每个子命令的完整参数以 `latex-word-review <command> --help` 为准。
 
+`run-manifest --artifact PATH ROLE MEDIA_TYPE CONFIDENTIALITY` 用于登记 ledger 等在领域对象
+之后生成的交付文件，可重复给出。`PATH` 必须相对于 RunManifest 输出目录，读取时执行
+portable-path、root containment、symlink/junction、普通文件、64 MiB 上限和稳定哈希检查；
+重复路径或读取期漂移均 fail closed。生成的 immutable `ArtifactRef` 进入 sealed
+RunManifest `payload.artifacts`，供 AuditBundle selector 离线复核。
+
 Pandoc 适配器目前是显式选择的 baseline/degraded 后端，而不是与固定
 `tex2word==1.0.5` 同等级的持续验证默认值；缺少 Pandoc 或 pandoc-crossref 时必须由
 `doctor` 和能力对象报告，不能静默降级。
 
-## 建议运行目录
+## 首选高层工作流
+
+日常使用优先运行 `workflow init`、`workflow export`、`workflow receive` 与
+`workflow status`。它们只减少路径和对象传递的重复工作，不绕过任何底层合同：
+
+- `init` 原子创建新 run root、只读 snapshot 与 sealed `SourceManifest`；
+- `export` 只使用 snapshot，保存启用 Track Changes 的不可变 Word baseline；
+- `receive` 先归档返回原件，再强制比较 baseline 与返回稿 reject view 后生成 ChangeSet；
+- `status` 只读重验高层 workflow 已完成的 snapshot/export/receive 阶段及跨对象绑定；它只
+  返回 `snapshotted`、`exported` 或 `ingested`，不会发现后续 ApprovalSet、PatchPlan 或
+  revised tree。进入 granular 阶段后，以最新 sealed 对象和显式输出路径为准；
+- `clean` 默认 dry-run，只允许删除严格命名的工具暂存目录，执行删除必须显式
+  `--execute`。
+
+高层命令永不创建审批结论，也永不调用 `plan` 或 `apply`。完整可复制流程见
+[Windows Quick Start](../quick-start-windows.md)。
+
+## 固定运行目录
 
 ```text
 run-root/
 ├── snapshot/                    # 只读 LaTeX 快照
 ├── objects/
-│   ├── source-manifest.json
-│   ├── reader-capabilities.json
-│   ├── changeset.json
-│   └── run-manifest.json
+│   └── source-manifest.json
 ├── export/
 │   ├── review.docx
 │   └── objects/                 # capabilities/IR/SourceMap/report
-├── returned/                    # 只读归档副本和 manifest
+├── receive/
+│   ├── original/                # 只读返回原件和 manifest
+│   ├── revision-reader.json
+│   └── changeset.json
+├── .lwr-staging/                # 仅工具拥有的临时 stage
 ├── approvals/                   # approval-r1.json, approval-r2.json, ...
-├── plan/                        # patch-plan.json + changes.patch
-├── revised/                     # apply 唯一允许创建的 LaTeX 副本
+├── plans/                       # patch-plan.json + changes.patch
+├── revised-clean/               # apply 唯一允许创建的 LaTeX 副本
 ├── verification/                # clean source/PDF, latexdiff, report, logs
 ├── ledger/                      # ledger.json + ledger.html
 └── audit.zip
 ```
 
-目录名可以改，但同一步的输入树、输出树和权威源必须彼此分离。返回的
-Word 先经 `archive`，`ingest` 只读归档副本。
+`workflow` 管理到 `receive/` 为止；之后的审批、计划、应用、验证和打包仍使用同一批
+granular 命令。若不用高层命令，目录名可以改，但同一步的输入树、输出树和权威源必须
+彼此分离；返回 Word 仍必须先经 `archive`，`ingest` 只读归档副本。
 
 ## 两道人工闸门
 
@@ -101,7 +127,7 @@ comment 和不精确定位在 v0.1 中即使被接受，也会进入 `accepted_b
 不需要私人论文或 Word 安装的确定性闭环：
 
 ```console
-uv sync --frozen --group fixture --python 3.12
+uv sync --frozen --group fixture --extra pdf-figures --python 3.12
 uv run --frozen pytest -q tests/test_e2e_public_roundtrip.py -k bounded-command-double
 ```
 

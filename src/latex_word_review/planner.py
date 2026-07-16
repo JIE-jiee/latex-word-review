@@ -23,6 +23,7 @@ from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.hashing import digest_bytes, read_stable_bytes
 from latex_word_review.ids import derive_artifact_id, stable_id
 from latex_word_review.paths import resolve_within, validate_relative_path
+from latex_word_review.source_units import normalize_review_text
 
 _INTERFACE_VERSION: Final = "planner-v1alpha1"
 _CONFIDENCE_THRESHOLD: Final = 0.99
@@ -30,10 +31,11 @@ _STRUCTURAL_CHARACTERS: Final = frozenset("\\{}$%&#_^~")
 POLICY_SHA256: Final = sha256_canonical(
     {
         "name": "v0.1-exact-plain-text-only",
-        "version": "1",
+        "version": "2",
         "confidence_threshold": _CONFIDENCE_THRESHOLD,
         "allowed_kinds": ["insertion", "deletion", "replacement"],
         "forbidden_replacement_characters": sorted(_STRUCTURAL_CHARACTERS),
+        "whitespace": "only-u+0020-and-no-lossy-boundary-normalization",
         "paragraph_changes": "denied",
         "accepted_unsafe": "block_entire_plan",
     }
@@ -46,6 +48,22 @@ class PatchPlanResult:
 
     document: dict[str, Any]
     unified_diff: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class PatchEligibility:
+    """Shared planner/UI result for the exact plain-text auto-patch policy."""
+
+    block_code: ErrorCode | None
+    reason: str | None
+    source_context_required: bool
+    replacement_text: str | None
+
+    @property
+    def eligible(self) -> bool:
+        """Return whether the policy has proved the edit automatically patchable."""
+
+        return self.block_code is None and not self.source_context_required
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,40 +143,215 @@ def _authorization_context(
     )
 
 
-def _resolution_block_code(change: Mapping[str, Any]) -> ErrorCode | None:
+def _blocked(
+    code: ErrorCode,
+    reason: str,
+    *,
+    replacement_text: str | None = None,
+) -> PatchEligibility:
+    return PatchEligibility(
+        block_code=code,
+        reason=reason,
+        source_context_required=False,
+        replacement_text=replacement_text,
+    )
+
+
+def _resolution_block(change: Mapping[str, Any]) -> PatchEligibility | None:
     if change["kind"] not in {"insertion", "deletion", "replacement"}:
-        return ErrorCode.PATCH_UNSAFE_KIND
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the change kind is outside the automatic plain-text subset",
+        )
     if change["safety_class"] != "plain_text_candidate":
-        return ErrorCode.PATCH_UNSAFE_KIND
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the safety class is not plain_text_candidate",
+        )
     resolution = cast("Mapping[str, Any]", change["resolution"])
     if resolution["status"] != "exact":
-        return ErrorCode.MAP_UNMATCHED
+        return _blocked(ErrorCode.MAP_UNMATCHED, "the source resolution is not exact")
     if float(cast("float", resolution["confidence"])) < _CONFIDENCE_THRESHOLD:
-        return ErrorCode.MAP_CONFIDENCE_LOW
+        return _blocked(
+            ErrorCode.MAP_CONFIDENCE_LOW,
+            "the source confidence is below 0.99",
+        )
     candidates = cast("Sequence[Mapping[str, Any]]", resolution["candidates"])
     if len(candidates) > 1:
-        return ErrorCode.MAP_AMBIGUOUS
+        return _blocked(
+            ErrorCode.MAP_AMBIGUOUS,
+            "the source resolution has multiple candidates",
+        )
     if candidates:
         candidate = candidates[0]
         if candidate["unit_id"] != change["unit_id"]:
-            return ErrorCode.MAP_AMBIGUOUS
+            return _blocked(
+                ErrorCode.MAP_AMBIGUOUS,
+                "the source candidate points to another review unit",
+            )
         if float(cast("float", candidate["confidence"])) < _CONFIDENCE_THRESHOLD:
-            return ErrorCode.MAP_CONFIDENCE_LOW
+            return _blocked(
+                ErrorCode.MAP_CONFIDENCE_LOW,
+                "the source candidate confidence is below 0.99",
+            )
     if change["unit_id"] is None or change["source_location"] is None:
-        return ErrorCode.MAP_UNMATCHED
+        return _blocked(
+            ErrorCode.MAP_UNMATCHED,
+            "the source unit or byte location is missing",
+        )
     return None
 
 
-def _replacement_blocked(before: str, replacement: str, kind: str) -> bool:
+def _resolution_block_code(change: Mapping[str, Any]) -> ErrorCode | None:
+    blocked = _resolution_block(change)
+    return None if blocked is None else blocked.block_code
+
+
+def _contains_non_ascii_space_whitespace(text: str) -> bool:
+    return any(character != " " and character.isspace() for character in text)
+
+
+def _left_review_context(prefix: str) -> str:
+    """Keep the trailing ASCII-space run and one non-whitespace anchor."""
+
+    cursor = len(prefix)
+    while cursor and prefix[cursor - 1] == " ":
+        cursor -= 1
+    if cursor and not prefix[cursor - 1].isspace():
+        cursor -= 1
+    return prefix[cursor:]
+
+
+def _right_review_context(suffix: str) -> str:
+    """Keep the leading ASCII-space run and one non-whitespace anchor."""
+
+    cursor = 0
+    while cursor < len(suffix) and suffix[cursor] == " ":
+        cursor += 1
+    if cursor < len(suffix) and not suffix[cursor].isspace():
+        cursor += 1
+    return suffix[:cursor]
+
+
+def evaluate_patch_eligibility(
+    change: Mapping[str, Any],
+    decision: Mapping[str, Any] | None = None,
+    *,
+    source_prefix: str | None = None,
+    source_suffix: str | None = None,
+) -> PatchEligibility:
+    """Evaluate the single fail-closed auto-patch policy used by planner and UI.
+
+    The browser has no source bytes, so an edit whose leading/trailing ASCII
+    spaces need adjacent source text is reported as requiring context.  The
+    planner always supplies exact decoded prefix/suffix text and makes the
+    authoritative decision.
+    """
+
+    resolution_block = _resolution_block(change)
+    if resolution_block is not None:
+        return resolution_block
+
+    before = change["before"]
+    after = change["after"]
+    if not isinstance(before, str) or not isinstance(after, str):
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the before/after payload is not plain text",
+        )
+    replacement = after
+    if decision is not None and decision["decision"] == "accepted_with_edit":
+        replacement = decision["final_text"]
+        if not isinstance(replacement, str):
+            return _blocked(
+                ErrorCode.PATCH_UNSAFE_KIND,
+                "the edited final text is missing",
+            )
+
+    kind = cast("str", change["kind"])
     if before == replacement:
-        return True
-    if "\n" in before or "\r" in before or "\n" in replacement or "\r" in replacement:
-        return True
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the approved replacement would not change the source",
+            replacement_text=replacement,
+        )
+    if _contains_non_ascii_space_whitespace(before + replacement):
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the text contains Unicode whitespace other than U+0020 SPACE",
+            replacement_text=replacement,
+        )
     if any(character in _STRUCTURAL_CHARACTERS for character in before + replacement):
-        return True
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the text contains a LaTeX structural character",
+            replacement_text=replacement,
+        )
     if kind == "insertion" and before:
-        return True
-    return bool(kind == "deletion" and replacement)
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "an insertion unexpectedly contains before text",
+            replacement_text=replacement,
+        )
+    if kind == "deletion" and replacement:
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "a deletion unexpectedly contains replacement text",
+            replacement_text=replacement,
+        )
+    if "  " in before or "  " in replacement:
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the edit contains consecutive ASCII spaces that review normalization collapses",
+            replacement_text=replacement,
+        )
+
+    context_sensitive = (
+        not replacement
+        or before.startswith(" ")
+        or before.endswith(" ")
+        or replacement.startswith(" ")
+        or replacement.endswith(" ")
+    )
+    if source_prefix is None or source_suffix is None:
+        if source_prefix is not None or source_suffix is not None:
+            return _blocked(
+                ErrorCode.PATCH_UNSAFE_KIND,
+                "both source prefix and suffix are required for boundary validation",
+                replacement_text=replacement,
+            )
+        if context_sensitive:
+            return PatchEligibility(
+                block_code=None,
+                reason="exact source prefix/suffix context is required to prove whitespace safety",
+                source_context_required=True,
+                replacement_text=replacement,
+            )
+        return PatchEligibility(None, None, False, replacement)
+
+    left = _left_review_context(source_prefix)
+    right = _right_review_context(source_suffix)
+    original_window = left + before + right
+    revised_window = left + replacement + right
+    if normalize_review_text(original_window) != original_window:
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the original source context changes under review normalization",
+            replacement_text=replacement,
+        )
+    if "  " in revised_window:
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the edit would create consecutive ASCII spaces at a source boundary",
+            replacement_text=replacement,
+        )
+    if normalize_review_text(revised_window) != revised_window:
+        return _blocked(
+            ErrorCode.PATCH_UNSAFE_KIND,
+            "the edited source context would change under review normalization",
+            replacement_text=replacement,
+        )
+    return PatchEligibility(None, None, False, replacement)
 
 
 def _ranges_overlap(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
@@ -186,9 +379,9 @@ def _make_operation(
     source_root: Path,
     limits: DiscoveryLimits,
 ) -> tuple[dict[str, Any] | None, ErrorCode | None]:
-    blocked = _resolution_block_code(change)
-    if blocked is not None:
-        return None, blocked
+    preliminary = evaluate_patch_eligibility(change, decision)
+    if preliminary.block_code is not None:
+        return None, preliminary.block_code
     location = cast("Mapping[str, Any]", change["source_location"])
     if location["encoding"] != "utf-8" or location["newline"] == "mixed":
         return None, ErrorCode.PATCH_UNSAFE_KIND
@@ -212,9 +405,9 @@ def _make_operation(
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "patch target slice hash drifted")
     try:
         data.decode("utf-8", errors="strict")
-        data[:start].decode("utf-8", errors="strict")
+        source_prefix = data[:start].decode("utf-8", errors="strict")
         actual_before = expected_bytes.decode("utf-8", errors="strict")
-        data[end:].decode("utf-8", errors="strict")
+        source_suffix = data[end:].decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ContractError(
             ErrorCode.PATCH_UNSAFE_KIND,
@@ -225,16 +418,18 @@ def _make_operation(
         raise ContractError(
             ErrorCode.HASH_SOURCE_MISMATCH, "ChangeSet before text differs from source"
         )
-    replacement = (
-        cast("str", decision["final_text"])
-        if decision["decision"] == "accepted_with_edit"
-        else cast("str", change["after"])
+    eligibility = evaluate_patch_eligibility(
+        change,
+        decision,
+        source_prefix=source_prefix,
+        source_suffix=source_suffix,
     )
+    if eligibility.block_code is not None or eligibility.source_context_required:
+        return None, eligibility.block_code or ErrorCode.PATCH_UNSAFE_KIND
+    replacement = cast("str", eligibility.replacement_text)
     kind = {"insertion": "insert", "deletion": "delete", "replacement": "replace"}[
         cast("str", change["kind"])
     ]
-    if _replacement_blocked(before, replacement, cast("str", change["kind"])):
-        return None, ErrorCode.PATCH_UNSAFE_KIND
     hunk_sha256 = sha256_canonical(
         {
             "path": path,
@@ -532,9 +727,11 @@ def verify_plan_identity(document: Mapping[str, Any]) -> None:
 
 __all__ = [
     "POLICY_SHA256",
+    "PatchEligibility",
     "PatchPlanResult",
     "apply_operations_to_bytes",
     "build_unified_diff",
+    "evaluate_patch_eligibility",
     "plan_patch",
     "verify_plan_identity",
 ]

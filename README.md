@@ -8,7 +8,7 @@ LaTeX–Microsoft Word 审阅桥接。它让合作者在 Word 里使用“修订
 [`tex2word`](https://github.com/yfyang86/tex2word) 等上游转换器，专注于不可变归档、
 稳定源映射、完整修订账本、人工审批闸门、局部补丁与编译验证。
 
-> 状态：`0.1.0b1` beta 候选，公开源仓库为
+> 状态：`0.1.0b2` beta 候选，公开源仓库为
 > [`JIE-jiee/latex-word-review`](https://github.com/JIE-jiee/latex-word-review)。远程验证结果
 > 以 GitHub Actions 对当前提交的检查为准；尚未创建 GitHub Release。公共契约为
 > `v1alpha`；适合评估、实验和审计，尚不应把任意复杂 LaTeX 文档的全自动回填视为稳定
@@ -22,7 +22,8 @@ LaTeX–Microsoft Word 审阅桥接。它让合作者在 Word 里使用“修订
 ```text
 LaTeX 权威源
   → 只读快照 + SourceManifest
-  → 带稳定 bookmark 的可编辑 Word 审阅稿
+  → PDF 图片派生 overlay（原稿不变）
+  → 带稳定 bookmark 且启用 Track Changes 的可编辑 Word 审阅稿
   → 返回 Word 原件只读归档
   → 包含作者、时间、插入、删除、move、格式和批注证据的 ChangeSet
   → 本机浏览器或 CLI 逐条审批
@@ -41,7 +42,13 @@ OOXML 证据进入独立账本；`latexdiff` 只用于产生人类可视的 LaTe
 - 审批和应用是两道独立闸门：审批只生成 `ApprovalSet`，无权改 `.tex`。
 - `plan` 默认仅 dry-run；`apply` 重新验证所有哈希和字节范围，仅写全新目录。
 - v0.1 只自动应用精确 bookmark 内、置信度至少 0.99 的 UTF-8 纯正文插入/
-  删除/替换，并拒绝 LaTeX 结构字符、换段、重叠或漂移。
+  删除/替换，并拒绝 LaTeX 结构字符、非普通空格、换段、grapheme cluster 截断、
+  重叠或漂移。
+- 导出件确定性包含一个启用的 `w:trackRevisions`；返回件必须绑定同一次导出基线。
+  Accept All、未跟踪正文漂移或 bookmark 损坏会在 ingest 时 fail closed。
+- 基线状态 `verified_for_text_patch` 只证明纯文本补丁所需的可见文字、结构、字段、
+  bookmark 和修订语义；格式、段落标记修订、OMML、图片、超链接/relationship
+  目标、content control/custom XML 与嵌入对象仍明确要求人工完整性复核。
 - 公式、引用、标签、命令、环境、图表结构、move、格式修订和批注会完整入账，
   但默认转人工处理。
 - 所有外部命令使用固定 argv、无 shell、小环境、硬超时和输出上限；TeX
@@ -57,7 +64,7 @@ OOXML 证据进入独立账本；`latexdiff` 只用于产生人类可视的 LaTe
 ```console
 git clone https://github.com/JIE-jiee/latex-word-review.git
 cd latex-word-review
-uv sync --frozen --group fixture --python 3.12
+uv sync --frozen --group fixture --extra pdf-figures --python 3.12
 uv run --frozen latex-word-review --version
 uv run --frozen latex-word-review doctor
 ```
@@ -73,11 +80,15 @@ latex-word-review --version
 从 wheel 安装时：
 
 ```console
-python -m pip install latex_word_review-0.1.0b1-py3-none-any.whl
+python -m pip install latex_word_review-0.1.0b2-py3-none-any.whl
 latex-word-review --help
 ```
 
-`tex2word==1.0.5` 是默认运行时后端。Pandoc 是可选外部基线。生成 PDF 审计产物需要
+`tex2word==1.0.5` 是默认运行时后端。`pdf-figures` extra 使用 pypdfium2/Pillow 将 LaTeX
+引用的 PDF 页在派生副本中物化为规范 PNG，便于 Word 显示；原始 LaTeX/PDF 不会被修改。
+SVG/EPS 和不能安全静态解释的图片操作会明确转人工，不会隐式执行外部转换器。Pandoc
+是可选外部基线。导出还会检查 Word 中的图片实例数不低于 LaTeX 图片引用数；这是
+静默丢图的下限门禁，不是逐图视觉等价证明。生成 PDF 审计产物需要
 Windows 上可用的 `latexmk`、对应 TeX 引擎和 `latexdiff`；缺失时会显式 `blocked`，不会
 伪报成功。远程真实 TeX 门禁在 Windows runner 上使用 MiKTeX 官方 Setup Utility
 `miktexsetup-5.5.0+1763023-x64.zip`，先核对固定 SHA-256，再无交互安装 basic 集合并显式
@@ -113,6 +124,27 @@ Word 修订、归档、审批、回填、核验、账本和审计包。
 
 ## 实际工作流
 
+日常使用优先走固定目录的高层命令：
+
+```console
+latex-word-review workflow init <source> <new-run-root> --main main.tex
+latex-word-review workflow export <run-root>
+latex-word-review workflow status <run-root>
+latex-word-review workflow receive <run-root> <returned.docx>
+latex-word-review workflow clean <run-root>
+```
+
+它们自动绑定只读 snapshot、导出 Word 基线、SourceMap 与返回原件，且每一步都返回下一条
+安全命令。`clean` 默认仅预览工具拥有的暂存目录，只有显式 `--execute` 才删除。可复制的
+完整 Windows 流程见 [Windows Quick Start](docs/quick-start-windows.md)。
+
+高层 workflow 的状态范围到 `receive` 为止：`workflow status` 只识别 `snapshotted`、
+`exported` 和 `ingested`，不会发现后来创建的 ApprovalSet、PatchPlan 或 revised tree。
+进入逐条审批后，应以每条 granular 命令的显式输出路径、最新 sealed 对象和 receipt 为准；
+不要把 `status` 仍显示的通用 `approve init` 提示误认为审批尚未开始。
+
+底层命令保留用于逐条审批、第二闸门、验证和高级恢复：
+
 ```console
 latex-word-review new-run
 latex-word-review snapshot --help
@@ -132,12 +164,23 @@ latex-word-review bundle --help
 [CLI 与运行目录契约](docs/reference/cli.md)。逐条浏览器审批见
 [本地审批服务](docs/reference/review-server.md)。
 
-## Codex Skill
+## Codex Plugin 与 Skill
 
-仓库内的 [`skills/latex-word-review/`](skills/latex-word-review/) 是同一 CLI 的薄编排层。
+仓库同时提供可安装的 Codex Plugin 与独立 canonical Skill。Plugin 通过仓库 marketplace
+安装：
+
+```console
+codex plugin marketplace add JIE-jiee/latex-word-review --ref main
+codex plugin add latex-word-review@personal
+```
+
+Plugin 内的 Skill 与 [`skills/latex-word-review/`](skills/latex-word-review/) 字节同步，是
+同一 CLI 的薄编排层。
 它负责建立只读边界、按顺序调用命令、在逐条审批和应用前停在正确闸门，并汇报可恢复
 状态；它不包含转换、OOXML 解析、审批或补丁业务逻辑。将该目录作为 Skill 安装后可用
 `$latex-word-review` 触发。核心 Python 包仍须单独安装并以 CLI 输出为权威。
+可复现使用应把 marketplace 固定到已审核的 tag 或 commit；跟随 `main` 只适合评估当前
+开发候选。
 
 Skill 不会把“处理返回稿”解释成默认接受全部修订。用户须逐项决定，或明确委托一条
 精确审批策略；即使 ApprovalSet 已 final，执行 `apply` 仍需要第二个独立指令。两种
@@ -151,6 +194,7 @@ Skill 不会把“处理返回稿”解释成默认接受全部修订。用户�
 - `docs/adr/`：上游 adopt/wrap/contribute/self-build 决策。
 - `docs/reference/`：公开契约与安全不变量。
 - `skills/latex-word-review/`：只编排 CLI 的薄 Codex Skill。
+- `plugins/latex-word-review/` 与 `.agents/plugins/marketplace.json`：可安装 Codex Plugin。
 - `samples/private/`：仅本地压力测试，Git 默认忽略。
 
 ## 支持与已知限制
@@ -169,7 +213,7 @@ Windows 支持矩阵见 [platform-support.md](docs/compat/platform-support.md)�
 ## 开发与贡献
 
 ```console
-uv sync --frozen --group fixture --python 3.12
+uv sync --frozen --group fixture --extra pdf-figures --python 3.12
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy

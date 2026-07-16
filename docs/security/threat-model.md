@@ -11,6 +11,9 @@ The primary security property is not confidentiality alone: an attacker or accid
 must not cause an unapproved source change, silently lose review evidence, replace an immutable
 input, or make a failed/degraded conversion appear successful.
 
+The supported operational boundary is Windows with CPython 3.12/3.13. Behavior observed on Linux
+or macOS is not release evidence and does not extend the threat-model support claim.
+
 ## Trust boundaries
 
 ```text
@@ -34,6 +37,8 @@ JSON file is not automatically trusted merely because it has the expected filena
 
 - malformed, oversized, duplicate-member, encrypted, symlink-bearing, entity-bearing, or
   relationship-abusing DOCX/ZIP/XML input;
+- malformed or oversized PDF/raster input, decompression/pixel bombs, unsafe image paths/options,
+  renderer failure, stale cache entries, and image loss between LaTeX and DOCX;
 - path traversal, absolute paths, UNC/drive paths, symlink/junction escape, special files and
   output aliasing;
 - source, returned Word, approval, plan or diff substitution between workflow phases;
@@ -67,6 +72,34 @@ XML and DTD/entity limits and never follow external relationships. Revisions ret
 evidence before normalization. Unknown, incomplete, moved, formatted or ambiguously mapped content
 remains visible as manual/conflict/ledger-only evidence.
 
+PDF images are never rendered in the authoritative snapshot. A bounded worker materializes static
+PDF requests as canonical RGB PNGs in a disjoint, content-addressed overlay; copied TeX commands are
+rewritten only in that derived tree. Requests bind the original image digest, page/crop/rotation,
+quality profile, renderer identity, cache key, PNG bytes, and decoded pixels. Existing cache entries
+are revalidated and never silently overwritten. SVG/EPS/PostScript and any path or option that
+cannot be interpreted statically remain manual and block the backend. The overlay manifest is
+canonical JSON whose digest and original/derived tree bindings enter the sealed `SourceMap` and
+`ExportReport`; the manifest alone is not a signed or sealed authorization object.
+It can contain source-relative paths and original `\includegraphics` commands, so its ArtifactRef
+inherits the run's confidentiality class and it is not a public diagnostic by default.
+
+DOCX inspection requires the output image-instance count to be at least the source
+`\includegraphics` occurrence count. This detects a lower-bound class of silent loss; it does not
+prove one-to-one relationship identity, rendering fidelity, or pixel equality inside Word.
+
+Text revisions are eligible for automatic mapping only when the revision wrapper contains plain
+text runs with a narrow OOXML whitelist. Field instructions/results, hyperlinks, drawings/text
+boxes, nested structures, and other mixed content retain their raw evidence but are classified as
+structured and forced to manual review. Exact byte offsets alone never promote structured evidence
+to a patch candidate.
+
+The reject-view baseline comparison is deliberately scoped. It verifies visible text,
+paragraph/table and field structure, bookmarks, and insert/delete/move revision semantics needed by
+the plain-text patch gate. Paragraph-mark revisions, formatting, OMML, images, hyperlink and
+relationship targets, content controls/custom XML, and embedded/alternate-content objects are
+explicitly listed as unverified and require manual integrity review; `verified_for_text_patch` must not be
+interpreted as whole-document visual or semantic equivalence.
+
 Every public domain object has a versioned JSON Schema with unknown security fields denied.
 Approval and plan state transitions revalidate the complete hash chain; old revisions remain
 immutable. Stable error and process exit codes allow automation to fail closed without parsing
@@ -80,21 +113,24 @@ revision/hash checks. It has no endpoint or capability for reading or writing La
 
 Acceptance records reviewer intent but does not elevate a change's safety class. v0.1 plans only
 exact, unique, high-confidence UTF-8 plain-text insertion/deletion/replacement operations and
-rejects LaTeX structural characters, line breaks, overlaps and source drift. Apply independently
+rejects LaTeX structural characters, line breaks, all whitespace except ordinary U+0020 spaces,
+normalization-changing space boundaries, overlaps and source drift. Extended grapheme clusters are
+segmented with Unicode `\X`; a patch boundary that splits a cluster is forced to manual review.
+Apply independently
 regenerates the plan and diff, then materializes a new tree from inventoried bytes. Verification
 again replays every operation and proves that the actual diff contains no missing, extra,
 duplicate or unapproved change.
 
 ### External processes
 
-The tex2word Python API runs in a bounded child worker. Pandoc, latexmk and latexdiff use fixed list
-argv, no shell, fixed working directories, a minimal allowlisted environment, bounded output and
-hard timeout. On Windows the TeX verifier adds only MiKTeX's three documented isolated-root
-variables (`MIKTEX_USERINSTALL`, `MIKTEX_USERCONFIG`, and `MIKTEX_USERDATA`) to that minimal
-environment; unrelated environment values remain excluded, and other backends do not inherit the
-MiKTeX-specific values. When all three isolated roots are present, `latexmk` also receives MiKTeX's
-fixed `-disable-installer` option and forwards it to the TeX engine, so an engine-level missing
-package fails instead of opening an unattended installation prompt. The hosted public gate also
+The tex2word Python API and PDF renderer run in bounded child workers. Pandoc, latexmk and latexdiff
+use fixed list argv, no shell, fixed working directories, a minimal allowlisted environment,
+bounded output and hard timeout. On Windows the TeX verifier adds only MiKTeX's three documented
+isolated-root variables (`MIKTEX_USERINSTALL`, `MIKTEX_USERCONFIG`, and `MIKTEX_USERDATA`) to that
+minimal environment; unrelated environment values remain excluded, and other backends do not
+inherit the MiKTeX-specific values. When all three isolated roots are present, `latexmk` also
+receives MiKTeX's fixed `-disable-installer` option and forwards it to the TeX engine, so an
+engine-level missing package fails instead of opening an unattended installation prompt. The hosted public gate also
 compares MiKTeX's complete installed-package inventory before and after the test, so an unexpected
 package installed by a helper process fails the gate. This comparison is detection, not a network
 sandbox; the fixed public fixture and explicit package closure remain part of the trust boundary.
@@ -105,15 +141,22 @@ container sandbox with network and host-file access removed.
 
 ### Deliverables and privacy
 
-Audit ZIP creation is allowlist-only and deterministic. Offline verification checks member names,
-set, type, metadata, compression, sizes, hashes, privacy report, source-object bindings and bundle
-stable ID. `public_fixture` bundles fail if the built-in scanner finds common absolute user paths,
+Audit ZIP creation is allowlist-only and deterministic. A normal entry must resolve to an immutable
+`ArtifactRef` already sealed inside its source contract payload; extensions are never artifact
+authority. Contract-document entries must be exact
+canonical sealed bytes. The exact RunManifest, VerificationReport and every referenced source
+contract are themselves explicit allowlist members, and RunManifest must authorize those source
+objects. Offline verification reloads that chain and checks selector, path, role, size, hash and
+artifact ID in addition to member names, set, type, metadata, compression, privacy report and bundle
+stable ID. A valid same-run object cannot sponsor unrelated bytes. `public_fixture` bundles fail if the built-in scanner finds common absolute user paths,
 email addresses, private-key headers or API-key patterns. This scan is a release gate, not a proof
 of anonymity, copyright clearance or absence of all secrets; human review remains required.
 
 ## Explicit non-goals and residual risk
 
 - The tool does not make Microsoft Word, LibreOffice, tex2word, Pandoc, TeX or latexdiff trusted.
+- The tool does not make pypdfium2/PDFium or Pillow trusted, and image-instance counts are not visual
+  equivalence proofs.
 - Loopback binding does not isolate a malicious process running as the same operating-system user.
 - Hashes prove byte identity and binding, not the truth or quality of reviewer decisions.
 - The v0.1 source scanner is intentionally conservative and is not a complete TeX parser.

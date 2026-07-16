@@ -16,12 +16,17 @@ Before creating a candidate:
 3. confirm the public fixture provenance, license, privacy, determinism, and visual review all pass;
 4. confirm schemas, CLI behavior, known limitations, support matrix, security policy, and third-party
    notices describe the candidate;
-5. ensure the source commit contains no private document, reviewer metadata, local path, build output,
+5. confirm the real Microsoft Word contract run covers unchanged save/reopen, tracked edits,
+   Track Changes-off drift, Accept All, and bookmark damage, and that documentation preserves the
+   `verified_for_text_patch`/manual-integrity scope boundary;
+6. ensure the source commit contains no private document, reviewer metadata, local path, build output,
    credentials, or unlicensed fixture;
-6. enable and test
+7. validate the canonical Skill, Plugin manifest/embedded Skill, and repository marketplace; require
+   byte-identical Skill copies and record Plugin SemVer-to-Python/CLI compatibility;
+8. enable and test
    [private vulnerability reporting](https://github.com/JIE-jiee/latex-word-review/security/advisories/new)
    without placing a private document or secret in the test report;
-7. create a signed or protected tag named exactly `v<package-version>` only after review.
+9. create a signed or protected tag named exactly `v<package-version>` only after review.
 
 `workflow_dispatch` is useful for an untagged rehearsal. It produces a candidate artifact but does
 not turn the selected branch into a release.
@@ -32,7 +37,8 @@ not turn the selected branch into a release.
 
 - binds a `v*` tag exactly to the package version;
 - derives `SOURCE_DATE_EPOCH` from the checked-out commit;
-- re-runs lock, lint, format, typing, tests, and branch coverage;
+- installs the locked `pdf-figures` runtime and re-runs lock, lint, format, typing, the complete
+  synthetic PDF-overlay/image-loss suite, and branch coverage;
 - verifies the public extras' bounded lowest-direct dependency sets install on the supported Python
   versions in the package matrix;
 - downloads the official MiKTeX Setup Utility `miktexsetup-5.5.0+1763023-x64.zip`, verifies its
@@ -53,7 +59,9 @@ not turn the selected branch into a release.
 - builds wheel and sdist twice with locked Hatchling 1.31.0 and `--no-isolation`, then requires
   identical filenames and SHA-256 digests;
 - inspects archive paths, required metadata/schemas/license, forbidden private/runtime content, and
-  secret/private-path patterns, then runs `twine check`;
+  secret/private-path patterns, then runs `twine check`; for the sdist this also binds the canonical
+  Skill, Plugin manifest/embedded Skill, and marketplace entry, and rejects drift, missing payloads,
+  invalid identity, companion components, or placeholders;
 - exports the exact runtime closure and upstream hashes from `uv.lock`, produces a local wheelhouse
   with the verified locked builder and no PEP 517 isolation, re-hashes those wheels, and installs
   both runtime and project artifacts with `--no-index --no-deps` in separate venvs;
@@ -66,7 +74,7 @@ not turn the selected branch into a release.
 - creates `SHA256SUMS`, a CycloneDX 1.6 Python runtime-closure SBOM, an unsigned SLSA v1-compatible
   custom provenance statement, and an evidence manifest;
 - verifies all evidence against the candidate bytes before uploading a 14-day Actions artifact,
-  including the Windows real-TeX JUnit and toolchain records.
+  including public-fixture QA JSON and the Windows real-TeX JUnit/toolchain records.
 
 No step uses a package index token, GitHub release token, trusted publisher, or write permission.
 
@@ -76,7 +84,7 @@ After downloading the candidate artifact, a maintainer must verify it from a sep
 the exact source SHA (the verification scripts are intentionally not copied into the sdist):
 
 ```text
-uv sync --frozen --all-groups --python 3.12
+uv sync --frozen --all-groups --extra pdf-figures --python 3.12
 uv run --frozen python .github/scripts/release_checks.py repo --root . --include-untracked
 uv run --frozen python .github/scripts/release_checks.py dist --dir dist --twine
 uv run --frozen python .github/scripts/release_checks.py evidence --dist-dir dist --evidence-dir release-evidence
@@ -85,7 +93,9 @@ uv run --frozen python .github/scripts/clean_install.py --artifact sdist --dist-
 ```
 
 Compare `SHA256SUMS` with freshly calculated hashes, inspect the SBOM and unsigned provenance, and
-inspect both `demo-summary.json` files. Only then may an authorized maintainer create a GitHub
+inspect both `demo-summary.json` files. In a fresh isolated Codex home, add the repository
+marketplace, clean-install the Plugin, and run a new-Agent forward test that stops both at
+per-change approval and before `apply`. Only then may an authorized maintainer create a GitHub
 prerelease or upload to a package index through a separately reviewed process. That process is
 intentionally not encoded in this repository yet.
 

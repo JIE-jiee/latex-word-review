@@ -1,6 +1,6 @@
 # Python API 与稳定性边界
 
-状态：包版本 `0.1.0b1`（beta candidate，尚未公开发布）；领域 Schema 版本
+状态：包版本 `0.1.0b2`（beta candidate，尚未公开发布）；领域 Schema 版本
 `1.0.0-alpha.1`（`v1alpha`）。Python API 已可运行并有测试覆盖，但尚未承诺 1.0
 级别的签名稳定性。完整工作流的首选自动化入口仍是 CLI；Python API 适合需要在同一
 进程内组合、验证或测试底层能力的调用方。

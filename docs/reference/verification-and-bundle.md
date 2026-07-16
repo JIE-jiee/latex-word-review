@@ -33,8 +33,13 @@ SourceManifest + ChangeSet + final ApprovalSet + PatchPlan
 ```powershell
 latex-word-review verify ORIGINAL REVISED RETURNED_ORIGINAL SOURCE_MANIFEST CHANGESET FINAL_APPROVAL PLAN/patch-plan.json VERIFICATION_OUTPUT
 latex-word-review ledger CHANGESET FINAL_APPROVAL PLAN/patch-plan.json VERIFICATION_OUTPUT/verification-report.json LEDGER_OUTPUT
-latex-word-review run-manifest SOURCE_MANIFEST RUN_MANIFEST --object VERIFICATION_OUTPUT/verification-report.json --phase verified --status completed
-latex-word-review bundle BUNDLE_SOURCE_ROOT audit.zip RUN_MANIFEST VERIFICATION_OUTPUT/verification-report.json --classification local_private --item RELATIVE_PATH ROLE SOURCE_OBJECT.json
+latex-word-review run-manifest SOURCE_MANIFEST BUNDLE_SOURCE_ROOT/run-manifest.json --object VERIFICATION_OUTPUT/verification-report.json --phase verified --status completed `
+  --artifact ledger.json review_ledger_json application/json local_private `
+  --artifact ledger.html review_ledger_html text/html local_private
+latex-word-review bundle BUNDLE_SOURCE_ROOT audit.zip RUN_MANIFEST VERIFICATION_OUTPUT/verification-report.json --classification local_private `
+  --item run-manifest.json run_manifest RUN_MANIFEST `
+  --item verification-report.json verification_report VERIFICATION_OUTPUT/verification-report.json `
+  --item actual.diff actual_diff VERIFICATION_OUTPUT/verification-report.json
 latex-word-review verify-bundle audit.zip --run-manifest RUN_MANIFEST --verification VERIFICATION_OUTPUT/verification-report.json
 ```
 
@@ -172,9 +177,15 @@ result = create_audit_bundle(
     "verification-r1",
     "release/audit-r1.zip",
     allowlist=[
-        BundleItem("verification-report.json", "verification_report", verification_report),
-        BundleItem("ledger.json", "review_ledger_json", verification_report),
-        BundleItem("ledger.html", "review_ledger_html", verification_report),
+        BundleItem("run-manifest.json", "run_manifest", run_manifest, "$document"),
+        BundleItem(
+            "verification-report.json",
+            "verification_report",
+            verification_report,
+            "$document",
+        ),
+        BundleItem("ledger.json", "review_ledger_json", run_manifest),
+        BundleItem("ledger.html", "review_ledger_html", run_manifest),
         BundleItem("actual.diff", "actual_diff", verification_report),
     ],
     run_manifest=run_manifest,
@@ -190,8 +201,21 @@ verified = verify_audit_bundle(
 )
 ```
 
-每个 `BundleItem` 含 portable relative path、role 和一个已验证 domain object，后者
-作为 `BundleEntry.source_object` 的完整 payload/document 哈希来源。allowlist 路径
+每个普通 `BundleItem` 含 portable relative path、role 和一个已验证 domain object；
+该对象的 sealed `payload` 内必须已有唯一匹配的 immutable `ArtifactRef`；`extensions`
+不构成 artifact authority。可选 `artifact_selector` 是准确的
+artifact ID；省略时只在 path/role/size/SHA-256 唯一全等时自动选择。`$document` 是唯一
+例外：它只接受与 source object 的 RFC 8785 canonical sealed bytes 加 LF 完全相同的合同
+文件。RunManifest 和 VerificationReport 必须作为 `$document` 项显式进入 allowlist，所有
+其他 source object 也必须同样收录并出现在 RunManifest `object_bindings` 中。账本等后生成
+文件须先登记为 RunManifest `artifacts`，不能再借任意同-run 合同背书。
+
+因此离线验证可以重新载入 source contract、解析 selector，并逐项复核 ArtifactRef 的
+path/role/size/SHA-256/artifact ID；只修改 ZIP member 和重封 AuditBundle 也不能绕过来源
+绑定。CLI 的三参数 `--item PATH ROLE SOURCE_OBJECT` 使用唯一精确匹配；不唯一或不存在即
+失败。`run-manifest --artifact PATH ROLE MEDIA_TYPE CONFIDENTIALITY` 可重复使用；PATH
+相对于 RunManifest 输出目录，注册时拒绝重复、绝对/越界路径、symlink/junction、非普通
+文件、超限文件和读取期漂移。allowlist 路径
 拒绝绝对路径、盘符、UNC、反斜杠、空组件、`..`、保留 metadata 名、重复项、symlink
 与 junction；目标必须为源树外尚不存在的显式 `.zip` 文件。
 
@@ -203,7 +227,7 @@ manifest/audit-bundle.json
 manifest/privacy-scan.json
 ```
 
-AuditBundle 的 `entries` 逐项绑定 path/role/size/SHA-256/source object，
+AuditBundle 的 `entries` 逐项绑定 path/role/size/SHA-256/source object/artifact selector，
 `manifest_sha256` 等于 canonical entries 哈希；对象同时绑定 RunManifest 和
 VerificationReport payload。创建时先验证临时 ZIP，再以 no-clobber hard link 原子
 发布，发布后再次验证，并复核 allowlist 源文件未变化。失败只清理自己创建的临时名和

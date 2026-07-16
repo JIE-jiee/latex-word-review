@@ -223,12 +223,17 @@ def diagnose_environment(
     packages = (
         probe_package("tex2word", required=True),
         probe_package("lxml", required=True),
+        probe_package("pypdfium2", required=False),
+        probe_package("Pillow", required=False),
     )
     required_failed = any(probe.required and probe.status != "available" for probe in tools)
     required_failed = required_failed or any(
         probe.required and probe.status != "available" for probe in packages
     )
     optional_failed = any(not probe.required and probe.status != "available" for probe in tools)
+    optional_failed = optional_failed or any(
+        not probe.required and probe.status != "available" for probe in packages
+    )
     status = "blocked" if required_failed else "degraded" if optional_failed else "pass"
     return DoctorReport(
         status=status,
