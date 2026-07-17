@@ -13,6 +13,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.hypothesis/
 .tox/
 .nox/
 coverage.xml
@@ -24,7 +25,14 @@ output/
 runs/
 archives/
 /par-*/
-/mik*.tmp
+
+# Editor and interrupted-tool leftovers.
+*.tmp
+*.bak
+*.orig
+*.rej
+*.swp
+*~
 
 # Local or private review material. Public fixtures belong under tests/fixtures/
 # and must carry provenance and redistribution metadata.
@@ -59,9 +67,20 @@ Thumbs.db
 *.bbl
 *.bcf
 *.blg
+*.dvi
 *.fdb_latexmk
 *.fls
+*.fff
+*.lof
 *.log
+*.lot
+*.nav
 *.out
 *.run.xml
+*.snm
+*.synctex
 *.synctex.gz
+*.toc
+*.ttt
+*.vrb
+*.xdv

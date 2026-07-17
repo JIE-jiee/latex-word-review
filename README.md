@@ -301,7 +301,9 @@ Microsoft Word 的合同另有本机记录：
 
 ## 文档导航
 
+- [完整文档索引](docs/README.md)
 - [中文 Windows 完整使用指南](docs/guide.zh-CN.md)
+- [English Windows Quick Start](docs/quick-start-windows.md)
 - [开发来源与 Vibe Coding 记录](docs/development-provenance.md)
 - [公开 E0 可执行教程](docs/tutorial-public-e0.md)
 - [CLI 与运行目录契约](docs/reference/cli.md)

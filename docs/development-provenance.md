@@ -92,7 +92,7 @@ LaTeX 保持为唯一权威源。
 - [ADR-0001：转换与修订解析上游策略](adr/0001-upstream-strategy.md)
 - [成熟化阶段上游复用决策](reviews/maturity-upstream-reuse-2026-07.md)
 - [上游依赖矩阵](compat/upstream-dependency-matrix.md)
-- [GitHub 生态调研](GitHub生态调研.md)
+- [上游契约实验结果](compat/upstream-contract-results.md)
 
 ## 质量怎样判断
 
