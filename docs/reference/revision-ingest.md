@@ -2,6 +2,40 @@
 
 本模块是 v1alpha 的生产库边界：它把导师返回的 DOCX 作为不可变证据读取，规范化为可验证的 `ChangeSet`。它不接受/拒绝修订，不保存 DOCX，不解压到磁盘，不运行 Word、LibreOffice、宏、嵌入对象或关系目标。
 
+## 返回原件的只读归档门
+
+修订解析前必须先调用 `archive_returned_docx()`。它把收到的 `.docx` 原始字节复制到全新
+目录，固定命名为 `returned-original.docx`，并写入规范化
+`returned-original.manifest.json`。清单绑定 run、导出审阅稿哈希、返回件哈希、大小和保密
+级别，但不记录导师文件名或绝对路径。
+
+归档通过同级临时目录和原子 rename 发布。复制前后重新读取来源并逐字节比较；目标已存在时
+只允许完全一致的幂等复用，任何冲突或篡改均返回
+`E_HASH_RETURNED_ORIGINAL_MISMATCH`，不会覆盖旧证据。目录内只允许清单和 DOCX 两个普通
+文件，发布前设为只读。后续 OOXML 读取器只能接收 `verify_returned_archive()` 返回的已验证
+路径：
+
+```python
+from pathlib import Path
+
+from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
+
+archive = archive_returned_docx(
+    Path('received/review.docx'),
+    Path('run/returned'),
+    run_id='run_019b0000-0000-7000-8000-000000000001',
+    exported_docx_sha256='sha256:' + 'a' * 64,
+)
+verified = verify_returned_archive(
+    archive.directory,
+    expected_run_id=archive.run_id,
+    expected_returned_docx_sha256=archive.returned_docx_sha256,
+)
+```
+
+归档不会接受或拒绝 Word 修订。审批只写独立 `ApprovalSet`，回填只发生在新的 LaTeX 工作
+副本中。
+
 ## 处理链
 
 ```text

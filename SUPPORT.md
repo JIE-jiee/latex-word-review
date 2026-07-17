@@ -26,7 +26,9 @@ The detailed operating-system, Python, backend, and external-tool tiers are main
 The canonical repository is
 [`JIE-jiee/latex-word-review`](https://github.com/JIE-jiee/latex-word-review). For this public beta
 source, the authoritative remote validation state is the GitHub Actions result attached to the exact
-commit. A tagged public prerelease remains blocked until the required lanes pass.
+commit. The eight required Windows CI jobs and the untagged candidate rehearsal passed for base
+commit `addd3d43463cbd015b076a30d19c90296e6d1fda` on 2026-07-17. Later commits must be judged by
+their own Actions results. No tag, GitHub Release, or PyPI publication has been created.
 Support means that the declared, repository-controlled checks pass. It does not imply that every
 LaTeX package, Word layout, TeX distribution, or third-party converter behavior is covered.
 The Windows real-TeX workflow and its release rerun are configured, but configuration alone is not

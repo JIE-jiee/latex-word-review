@@ -4,6 +4,9 @@ This guide is the shortest supported path from a LaTeX project to a Word review 
 LaTeX copy. The original LaTeX tree and the returned Word file remain immutable. Run every command
 in PowerShell on Windows with Python 3.12 or 3.13.
 
+For a complete Chinese walkthrough through verification, ledger, and offline audit bundle, see
+[`guide.zh-CN.md`](guide.zh-CN.md).
+
 ## 1. Install the core CLI
 
 Clone a reviewed commit of the public repository and install the locked development environment:
@@ -11,11 +14,19 @@ Clone a reviewed commit of the public repository and install the locked developm
 ```powershell
 git clone https://github.com/JIE-jiee/latex-word-review.git
 Set-Location latex-word-review
+$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
+git checkout --detach $ReviewedCommit
+if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
 uv sync --frozen --group fixture --extra pdf-figures --python 3.12
-$Lwr = (Resolve-Path .\.venv\Scripts\latex-word-review.exe).Path
+$VenvScripts = (Resolve-Path .\.venv\Scripts).Path
+$env:PATH = "$VenvScripts;$env:PATH"
+$Lwr = (Resolve-Path "$VenvScripts\latex-word-review.exe").Path
 & $Lwr --version
 & $Lwr doctor
 ```
+
+Replace `$ReviewedCommit` with the exact 40-character commit SHA you reviewed. The placeholder is
+intentionally invalid, so the checkout fails instead of silently following a moving branch.
 
 The `pdf-figures` extra enables safe PDF-page previews for Word. It does not install Microsoft Word,
 MiKTeX, Pandoc, or other external programs implicitly.
@@ -28,22 +39,26 @@ wheel, set `$Lwr = "latex-word-review"` instead.
 Choose a new, absent run directory outside the source project:
 
 ```powershell
-& $Lwr workflow init C:\research\paper C:\review-runs\paper-r1 --main main.tex
+& $Lwr workflow init C:\research\paper C:\review-runs\paper-r1 `
+  --main main.tex --confidentiality local_private
 Set-Location C:\review-runs\paper-r1
-& $Lwr workflow export .
+& $Lwr workflow export . --backend tex2word --confidentiality local_private
 & $Lwr workflow status .
 ```
 
 Send `export\review.docx` to the reviewer. Ask them to edit a copy in Microsoft Word with Track
 Changes enabled and to use comments for discussion. Keep `export\review.docx` unchanged: it is the
-semantic baseline used to detect untracked edits, Accept All, or damaged anchors.
+semantic baseline used to detect untracked visible-text edits, Accept All, or damaged anchors within
+the `verified_for_text_patch` scope. Formatting, OMML, images, hyperlink targets, content controls,
+custom XML, and embedded objects still require a manual integrity review.
 
 ## 3. Receive and inspect the returned Word file
 
 Keep the file received from the reviewer outside the run directory and ingest it once:
 
 ```powershell
-& $Lwr workflow receive . C:\received\reviewed.docx
+& $Lwr workflow receive . C:\received\reviewed.docx `
+  --confidentiality local_private
 & $Lwr workflow status .
 ```
 
@@ -74,12 +89,13 @@ Create a dry-run plan from the final approval revision:
 
 ```powershell
 & $Lwr plan snapshot objects\source-manifest.json receive\changeset.json `
-  approvals\approval-rN.json plans\plan-r1
+  approvals\approval-rN.json plans\plan-r1 --confidentiality local_private
 ```
 
-Review `plans\plan-r1\changes.patch`, the planned operations, and every
-`accepted_but_blocked` item. Only after a separate decision to apply that exact plan, write a new
-LaTeX tree:
+Review `plans\plan-r1\changes.patch` and the planned operations. Any `accepted_but_blocked` item
+makes the plan `blocked`; revise the approval to `manual` or `rejected`, finalize a new approval,
+and create a fresh plan. Only after a `ready` or `noop` plan and a separate decision to apply that
+exact plan, write a new LaTeX tree:
 
 ```powershell
 & $Lwr apply snapshot plans\plan-r1 `

@@ -47,6 +47,12 @@ latex-word-review verify-bundle audit.zip --run-manifest RUN_MANIFEST --verifica
 所有成功摘要均为 stdout 上的 canonical JSON；稳定失败类别使用公共退出码。命令不会
 覆盖既有输出，`verify`/`ledger`/`bundle` 均要求显式输入与新目标。
 
+`run-manifest --artifact` 的 `PATH` 相对于 RunManifest 输出文件所在目录；`bundle --item`
+指定的每个路径必须已经是 `source_root` 下的普通文件。因此，真实交付应先建立新的
+`delivery/`，把 verification 和 ledger 中准备交付的文件显式复制进去，再生成 RunManifest
+和审计包。可直接复制运行的 Windows 命令见
+[`guide.zh-CN.md`](../guide.zh-CN.md#13-创建并离线验证审计包)。
+
 ## 编译与 latexdiff API
 
 ```python

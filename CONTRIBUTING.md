@@ -8,14 +8,14 @@ candidate: public contracts and safety invariants take precedence over adding co
 Use Python 3.12 or 3.13 and a recent `uv` release. From the repository root:
 
 ```console
-uv sync --frozen --python 3.12
-uv run latex-word-review --version
-uv run pytest --cov=latex_word_review --cov-report=term-missing
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy
-uv run python -m build --no-isolation
-uv run twine check dist/*
+uv sync --frozen --group fixture --extra pdf-figures --python 3.12
+uv run --frozen latex-word-review --version
+uv run --frozen pytest --cov=latex_word_review --cov-report=term-missing
+uv run --frozen ruff check .
+uv run --frozen ruff format --check .
+uv run --frozen mypy
+uv run --frozen python -m build --no-isolation
+uv run --frozen twine check dist/*
 ```
 
 The lock file is authoritative for development and CI. Official artifacts are built with
@@ -46,6 +46,19 @@ and installation evidence.
 4. Run the quality, test, and package commands above on a clean checkout.
 5. Describe security implications, fallback behavior, and any untested platform in the pull
    request template.
+
+## AI-assisted contributions
+
+This project was itself developed through maintainer-driven Vibe Coding with OpenAI Codex. AI use
+is welcome, but responsibility stays with the contributor. If an AI tool materially influenced the
+design or implementation, disclose that in the pull request and describe how the result was
+verified.
+
+Do not submit security-critical code that you cannot explain. Do not copy private papers, reviewer
+documents, credentials, personal prompt content, or unlicensed training examples into the
+repository. Maintainers may ask for a smaller reproducer, additional tests, or a human explanation
+before reviewing an AI-assisted change. See
+[`docs/development-provenance.md`](docs/development-provenance.md) for the project's own disclosure.
 
 By intentionally submitting a contribution for inclusion, you agree that it is licensed under
 Apache License 2.0 as described in Section 5 of `LICENSE`, unless you conspicuously designate it

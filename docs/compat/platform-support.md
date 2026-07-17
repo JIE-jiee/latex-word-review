@@ -4,11 +4,13 @@ This matrix defines the Windows-only release support target and the repeatable e
 claim it. A GitHub-hosted runner label is recorded instead of guessing a permanent Windows image
 version; runner image migrations must be reviewed through the CI result and this document.
 
-**Evidence status (2026-07-16):** the canonical public repository is
+**Evidence status (2026-07-17):** the canonical public repository is
 [`JIE-jiee/latex-word-review`](https://github.com/JIE-jiee/latex-word-review). The Windows workflows
-publish the required evidence, but configuration alone is not a passing result. The authoritative
-hosted state is the GitHub Actions result attached to the exact source commit. A tagged public
-prerelease requires every required Windows lane to pass for the selected source commit.
+publish the required evidence. All eight required Windows CI jobs and the untagged candidate
+rehearsal passed for base commit `addd3d43463cbd015b076a30d19c90296e6d1fda`; no tag, GitHub
+Release, or PyPI publication has been created. The authoritative state for any later commit remains
+the GitHub Actions result attached to that exact source commit. A tagged public prerelease requires
+the same required lanes to pass for the selected source commit.
 
 ## Supported platform
 

@@ -12,12 +12,39 @@ and private vulnerability reporting are public and enabled; tag creation and art
 remain explicit maintainer promotion steps. No GitHub or package-index release is implied by the
 source version below.
 
+### Added
+
+- Add a grouped documentation index that separates user workflows, public contracts, upstream
+  decisions, security material, and maintainer evidence.
+- Add a detailed Chinese Windows guide covering installation, the two approval gates, PDF-page
+  previews, verification, ledger creation, delivery staging, and offline audit-bundle verification.
+- Add a public development-provenance record that discloses the maintainer-driven Vibe Coding and
+  OpenAI Codex collaboration, separates human and AI responsibilities, and states the evidence and
+  limitations behind the project.
+
 ### Changed
 
+- Ignore common Python, LaTeX, editor, and interrupted-tool artifacts without hiding legitimate
+  PostScript figure sources.
+- Rebuild the GitHub README around the real LaTeX/Word review pain, the auditable-review-bridge idea,
+  concrete outputs, supported and manual-only behavior, upstream reuse, and three runnable entry
+  paths.
+- Correct the Windows source-checkout instructions so bounded child processes can resolve the
+  virtual environment's executables, and document explicit `local_private` handling for real papers.
+- Clarify that text-patch baseline verification is not whole-DOCX integrity, manual LaTeX edits must
+  follow automatic-tree verification in a separate copy, `pagebox` remains manual, optional Codex
+  use has a separate data-policy boundary, and delivery staging is fail-closed no-clobber.
+- Clarify the last passing Windows evidence commit, untagged rehearsal versus formal promotion,
+  reusable release-checklist status, and the receive-only boundary of `workflow status`.
 - Add canonical Homepage, Repository, Documentation, Issues, Changelog, clone, support, and private
   vulnerability-reporting URLs for the public source repository.
 - Narrow the maintained platform scope to Windows with CPython 3.12/3.13. Linux and macOS are no
   longer CI, release, or support targets; historical upstream and security evidence remains intact.
+
+### Removed
+
+- Remove superseded implementation plans and historical decision snapshots after preserving their
+  current contracts in ADR, compatibility, reference, release, and provenance documentation.
 
 ## [0.1.0b2] - 2026-07-17
 

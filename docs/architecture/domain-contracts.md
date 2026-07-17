@@ -207,6 +207,10 @@ BackendCapabilities 是后端探测快照，被 ExportReport/ChangeSet 引用。
 
 每次阶段变化产生新的 RunManifest revision；旧 revision 不修改，审计包保存完整哈希链。`blocked` 可以在输入或决定改变后由新 revision 恢复；禁止删除先前阻塞证据。
 
+这里列出的是完整领域生命周期。当前便利命令 `workflow status` 只重验 snapshot、export 和
+receive，并只返回 `snapshotted`、`exported` 或 `ingested`；后续阶段以 granular 命令生成的
+sealed 对象、receipt 和最终 RunManifest 为准。
+
 ### 5.2 `SourceManifest`
 
 用途：定义不可变 LaTeX 快照和文件图。
