@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -294,6 +295,101 @@ def test_missing_author_and_timestamp_are_null_with_diagnostics(tmp_path: Path) 
         ErrorCode.REVISION_AUTHOR_MISSING.value,
         ErrorCode.REVISION_TIMESTAMP_MISSING.value,
     }
+
+
+def _replacement_order_xml(
+    *,
+    insert_first: bool,
+    separator: str = "",
+    insert_author: str = "Reviewer",
+    delete_author: str = "Reviewer",
+    insert_timestamp: str = "2026-01-01T10:00:00Z",
+    delete_timestamp: str = "2026-01-01T10:00:00Z",
+) -> bytes:
+    insertion = f"""<w:ins w:id="2" w:author="{insert_author}" w:date="{insert_timestamp}">
+      <w:r><w:t>originalX</w:t></w:r>
+    </w:ins>"""
+    deletion = f"""<w:del w:id="1" w:author="{delete_author}" w:date="{delete_timestamp}">
+      <w:r><w:delText>original</w:delText></w:r>
+    </w:del>"""
+    revisions = (
+        insertion + separator + deletion if insert_first else deletion + separator + insertion
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="{W_NS}"><w:body><w:p>
+      {revisions}
+    </w:p></w:body></w:document>""".encode()
+
+
+@pytest.mark.parametrize("insert_first", [False, True])
+def test_replacement_combines_both_word_sibling_orders(
+    tmp_path: Path,
+    insert_first: bool,
+) -> None:
+    extraction = extract_revision_events(
+        write_docx(
+            tmp_path / f"replacement-{insert_first}.docx",
+            document_xml=_replacement_order_xml(insert_first=insert_first),
+        )
+    )
+
+    changes = normalize_revision_changes(extraction).changes
+
+    assert len(changes) == 1
+    assert changes[0].change["kind"] == "replacement"
+    assert changes[0].change["before"] == "original"
+    assert changes[0].change["after"] == "originalX"
+    assert len(changes[0].change["raw_event_ids"]) == 2
+
+
+def test_replacement_rejects_adjacent_events_from_different_bookmarks(tmp_path: Path) -> None:
+    extraction = extract_revision_events(
+        write_docx(
+            tmp_path / "different-bookmarks.docx",
+            document_xml=_replacement_order_xml(insert_first=True),
+        )
+    )
+    events = (
+        replace(extraction.events[0], bookmark_name="lwr_" + "1" * 32),
+        replace(extraction.events[1], bookmark_name="lwr_" + "2" * 32),
+    )
+
+    changes = normalize_revision_changes(replace(extraction, events=events)).changes
+
+    assert len(changes) == 2
+    assert {change.change["kind"] for change in changes} == {"insertion", "deletion"}
+
+
+@pytest.mark.parametrize(
+    ("separator", "delete_author", "delete_timestamp"),
+    [
+        ("<w:r><w:t>separate</w:t></w:r>", "Reviewer", "2026-01-01T10:00:00Z"),
+        ("", "Different Reviewer", "2026-01-01T10:00:00Z"),
+        ("", "Reviewer", "2026-01-01T10:00:01Z"),
+    ],
+)
+def test_replacement_rejects_nonadjacent_or_ambiguous_pairs(
+    tmp_path: Path,
+    separator: str,
+    delete_author: str,
+    delete_timestamp: str,
+) -> None:
+    extraction = extract_revision_events(
+        write_docx(
+            tmp_path / "not-a-replacement.docx",
+            document_xml=_replacement_order_xml(
+                insert_first=True,
+                separator=separator,
+                delete_author=delete_author,
+                delete_timestamp=delete_timestamp,
+            ),
+        )
+    )
+
+    changes = normalize_revision_changes(extraction).changes
+
+    assert len(changes) == 2
+    assert {change.change["kind"] for change in changes} == {"insertion", "deletion"}
 
 
 def test_missing_deleted_text_fails_closed(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import webbrowser
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +20,7 @@ from latex_word_review.approval import (
     record_decision,
     write_approval_json,
 )
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBackend
 from latex_word_review.bundle import BundleItem, create_audit_bundle, verify_audit_bundle
 from latex_word_review.canonical import canonical_json, compute_payload_sha256
@@ -79,13 +81,20 @@ _DECISIONS = (
 def _emit(document: object, *, error: bool = False) -> None:
     stream = sys.stderr if error else sys.stdout
     data = canonical_json(document) + b"\n"
-    binary = getattr(stream, "buffer", None)
-    if binary is not None:
-        binary.write(data)
-        binary.flush()
+    # A windowed PyInstaller executable intentionally has no console streams;
+    # reporting a primary failure must never be replaced by ``None.write``.
+    if stream is None:
         return
-    stream.write(data.decode("utf-8"))
-    stream.flush()
+    try:
+        binary = getattr(stream, "buffer", None)
+        if binary is not None:
+            binary.write(data)
+            binary.flush()
+            return
+        stream.write(data.decode("utf-8"))
+        stream.flush()
+    except (OSError, ValueError):
+        return
 
 
 def _mkdir_parent(path: Path) -> None:
@@ -167,6 +176,18 @@ def _handle_new_run(args: argparse.Namespace) -> int:
 
     del args
     _emit({"run_id": new_run_id()})
+    return int(ExitCode.SUCCESS)
+
+
+def _handle_app(args: argparse.Namespace) -> int:
+    from latex_word_review.app_server import serve_app
+
+    with suppress(KeyboardInterrupt):
+        serve_app(
+            args.data_root,
+            port=args.port,
+            launch_browser=not args.no_browser,
+        )
     return int(ExitCode.SUCCESS)
 
 
@@ -509,7 +530,7 @@ def _publish_plan_directory(directory: Path, document: dict[str, Any], diff: byt
     try:
         write_new_json(staged / "patch-plan.json", document, contract=True)
         write_new_bytes(staged / "changes.patch", diff)
-        staged.rename(directory)
+        publish_new_directory(staged, directory)
     except Exception:
         if (
             staged.exists()
@@ -618,7 +639,7 @@ def _publish_ledger_directory(directory: Path, json_bytes: bytes, html_bytes: by
     try:
         write_new_bytes(staged / "ledger.json", json_bytes)
         write_new_bytes(staged / "ledger.html", html_bytes)
-        staged.rename(directory)
+        publish_new_directory(staged, directory)
     except Exception:
         if (
             staged.exists()
@@ -750,6 +771,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command")
+
+    app = commands.add_parser("app", help="open the local Windows graphical application")
+    app.add_argument(
+        "--data-root",
+        type=Path,
+        help="per-user task directory; defaults to LOCALAPPDATA\\LatexWordReview",
+    )
+    app.add_argument("--port", type=int, default=0, help="loopback port; 0 chooses a free port")
+    app.add_argument("--no-browser", action="store_true", help="serve without opening a browser")
+    app.set_defaults(handler=_handle_app)
 
     new_run = commands.add_parser("new-run", help="generate a new UUIDv7 run ID")
     new_run.set_defaults(handler=_handle_new_run)

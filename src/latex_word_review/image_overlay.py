@@ -10,14 +10,17 @@ derived tree is atomically published.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import canonical_json, sha256_canonical
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.errors import ContractError, ErrorCode
@@ -27,6 +30,7 @@ from latex_word_review.image_materializer import (
     REVIEW_QUALITY,
     GraphicOption,
     GraphicsDiagnostic,
+    ImageRequest,
     IncludeGraphics,
     MaterializedImage,
     QualityProfile,
@@ -36,14 +40,31 @@ from latex_word_review.image_materializer import (
     scan_graphics_text,
 )
 from latex_word_review.paths import ensure_disjoint_roots, resolve_within, validate_relative_path
+from latex_word_review.tex2word_compat import (
+    rewrite_tex2word_front_matter,
+    rewrite_tex2word_layout_controls,
+)
 
 IMAGE_OVERLAY_MANIFEST: Final[str] = "image-overlay-manifest.json"
 IMAGE_OVERLAY_ROOT: Final[str] = "lwr-images"
 IMAGE_OVERLAY_FORMAT: Final[str] = "latex-word-review-image-overlay-v1"
+TEX2WORD_COMPATIBILITY_PROFILE: Final[str] = "tex2word-1.0.5-review-compat-v4"
 _RASTER_FORMATS: Final[frozenset[str]] = frozenset({"png", "jpg", "jpeg"})
 _LAYOUT_OPTIONS: Final[frozenset[str]] = frozenset(
     {"width", "height", "totalheight", "scale", "keepaspectratio"}
 )
+_ENVIRONMENT_RE: Final[re.Pattern[str]] = re.compile(r"\\(begin|end)\s*\{([A-Za-z*@]+)\}")
+_INCLUDE_GRAPHICS_RE: Final[re.Pattern[str]] = re.compile(r"\\includegraphics\b")
+_CAPTION_RE: Final[re.Pattern[str]] = re.compile(r"\\caption\b")
+_LABEL_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"\\label\s*\{([^{}]+)\}")
+_LABEL_COMMAND_RE: Final[re.Pattern[str]] = re.compile(r"\\label\b")
+_SUBFIGURE_CONSTRUCT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\\begin\s*\{subfigure\*?\}|\\subfigure\b|\\subfloat\b"
+)
+_OUTER_FIGURE_LAYOUT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\\(?:centering|hfill|quad|qquad)\b|\\hspace\*?\s*\{[^{}\r\n]*\}"
+)
+_MAX_IMAGE_MATERIALIZATION_WORKERS: Final[int] = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +131,8 @@ class ImageOverlayResult:
     materialized_pdf_instances: int
     passthrough_raster_instances: int
     diagnostics: tuple[ImageOverlayDiagnostic, ...]
+    compatibility_profile: str | None
+    compatibility_transformations: int
 
     @property
     def ready(self) -> bool:
@@ -125,6 +148,8 @@ class ImageOverlayResult:
             "source_image_instances": self.source_image_instances,
             "materialized_pdf_instances": self.materialized_pdf_instances,
             "passthrough_raster_instances": self.passthrough_raster_instances,
+            "compatibility_profile": self.compatibility_profile,
+            "compatibility_transformations": self.compatibility_transformations,
             "ready": self.ready,
             "diagnostic_ids": [item.diagnostic_id for item in self.diagnostics],
         }
@@ -361,6 +386,268 @@ def _has_unescaped_comment(command: str) -> bool:
     return False
 
 
+@dataclass(frozen=True, slots=True)
+class _OpenEnvironment:
+    name: str
+    begin_start: int
+    begin_name_start: int
+    begin_name_end: int
+    body_start: int
+    parent: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectMinipage:
+    begin_start: int
+    body_start: int
+    end_start: int
+    end_command_end: int
+    line: int
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FigureMinipageSplitCandidate:
+    name: str
+    begin_start: int
+    body_start: int
+    end_start: int
+    end_command_end: int
+    line: int
+    children: tuple[_DirectMinipage, ...]
+    copy_centering: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingMaterialization:
+    occurrence: IncludeGraphics
+    entry: dict[str, object]
+    passthrough_options: tuple[GraphicOption, ...]
+    request: ImageRequest
+    future: Future[MaterializedImage]
+
+
+def _mask_tex_comments(text: str) -> str:
+    """Mask TeX comments without changing character offsets."""
+
+    characters = list(text)
+    in_comment = False
+    slash_count = 0
+    for index, character in enumerate(characters):
+        if in_comment:
+            if character in "\r\n":
+                in_comment = False
+                slash_count = 0
+            else:
+                characters[index] = " "
+            continue
+        if character == "%" and slash_count % 2 == 0:
+            characters[index] = " "
+            in_comment = True
+            slash_count = 0
+            continue
+        if character == "\\":
+            slash_count += 1
+        else:
+            slash_count = 0
+    return "".join(characters)
+
+
+def _figure_body_start(scanned: str, start: int, limit: int) -> int | None:
+    cursor = start
+    while cursor < limit and scanned[cursor].isspace():
+        cursor += 1
+    if cursor >= limit or scanned[cursor] != "[":
+        return start
+    end = scanned.find("]", cursor + 1, limit)
+    if end < 0 or "[" in scanned[cursor + 1 : end]:
+        return None
+    return end + 1
+
+
+def _tex2word_minipage_candidates(
+    text: str,
+) -> tuple[_FigureMinipageSplitCandidate, ...]:
+    """Find only complete multi-minipage figures that are safe to split.
+
+    tex2word 1.0.5 drops figure-number bookmarks when an uncaptioned outer
+    figure is converted through its subfigure path.  The source semantics of
+    the supported shape are several independent minipage captions, so the
+    derived overlay presents each minipage as its own consecutive figure.
+    """
+
+    scanned = _mask_tex_comments(text)
+    stack: list[_OpenEnvironment] = []
+    direct_children: dict[int, list[_DirectMinipage]] = {}
+    candidates: list[_FigureMinipageSplitCandidate] = []
+    for match in _ENVIRONMENT_RE.finditer(scanned):
+        action = match.group(1)
+        name = match.group(2)
+        if action == "begin":
+            stack.append(
+                _OpenEnvironment(
+                    name=name,
+                    begin_start=match.start(),
+                    begin_name_start=match.start(2),
+                    begin_name_end=match.end(2),
+                    body_start=match.end(),
+                    parent=None if not stack else stack[-1].name,
+                )
+            )
+            continue
+        if not stack or stack[-1].name != name:
+            # A cross-file or malformed environment is not locally provable.
+            return ()
+        opened = stack.pop()
+        if opened.name == "minipage" and opened.parent in {"figure", "figure*"}:
+            body = scanned[opened.body_start : match.start()]
+            labels = tuple(item.group(1) for item in _LABEL_VALUE_RE.finditer(body))
+            if (
+                len(_INCLUDE_GRAPHICS_RE.findall(body)) != 1
+                or len(_CAPTION_RE.findall(body)) != 1
+                or len(_LABEL_COMMAND_RE.findall(body)) != len(labels)
+                or len(labels) > 1
+                or _SUBFIGURE_CONSTRUCT_RE.search(body) is not None
+                or _ENVIRONMENT_RE.search(body) is not None
+                or not stack
+            ):
+                continue
+            direct_children.setdefault(stack[-1].begin_start, []).append(
+                _DirectMinipage(
+                    begin_start=opened.begin_start,
+                    body_start=opened.body_start,
+                    end_start=match.start(),
+                    end_command_end=match.end(),
+                    line=text.count("\n", 0, opened.begin_start) + 1,
+                    labels=labels,
+                )
+            )
+            continue
+        if opened.name not in {"figure", "figure*"}:
+            continue
+        children = tuple(direct_children.pop(opened.begin_start, ()))
+        if len(children) < 2:
+            continue
+        body_start = _figure_body_start(scanned, opened.body_start, match.start())
+        if body_start is None:
+            continue
+        residual = list(scanned[body_start : match.start()])
+        for child in children:
+            if child.begin_start < body_start or child.end_command_end > match.start():
+                raise ContractError(
+                    ErrorCode.INTERNAL_INVARIANT,
+                    "minipage split child escaped its outer figure",
+                )
+            relative_start = child.begin_start - body_start
+            relative_end = child.end_command_end - body_start
+            residual[relative_start:relative_end] = " " * (relative_end - relative_start)
+        layout = "".join(residual)
+        if _OUTER_FIGURE_LAYOUT_RE.sub(" ", layout).strip():
+            continue
+        candidates.append(
+            _FigureMinipageSplitCandidate(
+                name=opened.name,
+                begin_start=opened.begin_start,
+                body_start=body_start,
+                end_start=match.start(),
+                end_command_end=match.end(),
+                line=text.count("\n", 0, opened.begin_start) + 1,
+                children=children,
+                copy_centering=re.search(r"\\centering\b", layout) is not None,
+            )
+        )
+    if stack:
+        return ()
+    return tuple(candidates)
+
+
+def _rewrite_tex2word_minipages(
+    text: str,
+    *,
+    source_path: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Split only proven multi-minipage figures and return hash-bound evidence."""
+
+    validate_relative_path(source_path)
+    candidates = _tex2word_minipage_candidates(text)
+    replacements: list[tuple[int, int, str, str]] = []
+    evidence: list[dict[str, object]] = []
+    for candidate in candidates:
+        block = text[candidate.begin_start : candidate.end_command_end]
+        begin_command = text[candidate.begin_start : candidate.body_start]
+        end_command = text[candidate.end_start : candidate.end_command_end]
+        derived_figures: list[str] = []
+        for child in candidate.children:
+            child_block = text[child.begin_start : child.end_command_end]
+            centering = "\n  \\centering" if candidate.copy_centering else ""
+            derived_figures.append(f"{begin_command}{centering}\n{child_block}\n{end_command}")
+        normalized_block = "\n".join(derived_figures)
+        original_sha256 = digest_bytes(block.encode("utf-8")).sha256
+        derived_sha256 = digest_bytes(normalized_block.encode("utf-8")).sha256
+        start_utf8 = len(text[: candidate.begin_start].encode("utf-8"))
+        end_utf8 = start_utf8 + len(block.encode("utf-8"))
+        labels = [label for child in candidate.children for label in child.labels]
+        transformation_id = "compat_" + sha256_canonical(
+            {
+                "profile": TEX2WORD_COMPATIBILITY_PROFILE,
+                "source_path": source_path,
+                "start_utf8": start_utf8,
+                "end_utf8": end_utf8,
+                "original_sha256": original_sha256,
+                "derived_sha256": derived_sha256,
+            }
+        ).removeprefix("sha256:")
+        evidence.append(
+            {
+                "transformation_id": transformation_id,
+                "kind": "figure_minipage_split",
+                "source_path": source_path,
+                "source_span": {
+                    "start_char": candidate.begin_start,
+                    "end_char": candidate.end_command_end,
+                    "start_utf8": start_utf8,
+                    "end_utf8": end_utf8,
+                    "line": candidate.line,
+                },
+                "original_environment": candidate.name,
+                "derived_environment": "figure_sequence",
+                "direct_child_count": len(candidate.children),
+                "includegraphics_count": len(candidate.children),
+                "caption_count": len(candidate.children),
+                "label_count": len(labels),
+                "labels": labels,
+                "nested_subfigure_constructs": 0,
+                "original_block_sha256": original_sha256,
+                "derived_block_sha256": derived_sha256,
+            }
+        )
+        replacements.append(
+            (
+                candidate.begin_start,
+                candidate.end_command_end,
+                block,
+                normalized_block,
+            )
+        )
+
+    result = text
+    previous_start = len(text) + 1
+    for start, end, expected, replacement in sorted(replacements, reverse=True):
+        if end > previous_start:
+            raise ContractError(
+                ErrorCode.INTERNAL_INVARIANT,
+                "tex2word compatibility rewrite spans overlap",
+            )
+        if result[start:end] != expected:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "tex2word compatibility figure changed before rewrite",
+            )
+        result = result[:start] + replacement + result[end:]
+        previous_start = start
+    return result, evidence
+
+
 def _byte_offsets(text: str, occurrences: tuple[IncludeGraphics, ...]) -> dict[int, int]:
     requested = sorted(
         {boundary for item in occurrences for boundary in (item.start_char, item.end_char)}
@@ -475,6 +762,7 @@ def build_image_overlay(
     discovery: ProjectDiscovery,
     *,
     quality: QualityProfile = REVIEW_QUALITY,
+    compatibility_profile: str | None = None,
 ) -> ImageOverlayResult:
     """Build and atomically publish a derived image overlay.
 
@@ -483,6 +771,11 @@ def build_image_overlay(
     conversion backend.
     """
 
+    if compatibility_profile not in {None, TEX2WORD_COMPATIBILITY_PROFILE}:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "image-overlay compatibility profile is unsupported",
+        )
     source, target = ensure_disjoint_roots(source_root, destination)
     if target.exists() or target.is_symlink():
         raise ContractError(
@@ -496,7 +789,7 @@ def build_image_overlay(
             ErrorCode.HASH_SOURCE_MISMATCH,
             "source discovery binding changed before image-overlay creation",
         )
-    prefix = f".{target.name}.image-overlay-"
+    prefix = ".lwr-img-"
     try:
         stage = Path(tempfile.mkdtemp(prefix=prefix, dir=target.parent))
     except OSError as exc:
@@ -510,8 +803,13 @@ def build_image_overlay(
     source_image_instances = 0
     materialized_pdf_instances = 0
     passthrough_raster_instances = 0
+    compatibility_transformations: list[dict[str, object]] = []
+    materialization_futures: dict[str, Future[MaterializedImage]] = {}
+    materialization_use_counts: dict[str, int] = {}
+    materializer: ThreadPoolExecutor | None = None
     published = False
     try:
+        materializer = ThreadPoolExecutor(max_workers=_MAX_IMAGE_MATERIALIZATION_WORKERS)
         _copy_discovery(source, stage, discovery)
         for source_file in discovery.files:
             if not source_file.path.casefold().endswith(".tex"):
@@ -538,6 +836,7 @@ def build_image_overlay(
             diagnostics.extend(scan_diagnostics)
             byte_offsets = _byte_offsets(text, scan.includes)
             replacements: list[tuple[IncludeGraphics, str]] = []
+            pending_materializations: list[_PendingMaterialization] = []
 
             for occurrence in scan.includes:
                 source_image_instances += 1
@@ -633,13 +932,21 @@ def build_image_overlay(
                             diagnostics=[diagnostic.as_dict()],
                         )
                     else:
+                        derived_command = _derived_command(
+                            plan.passthrough_options,
+                            resolved.source_path,
+                        )
+                        replacements.append((occurrence, derived_command))
                         passthrough_raster_instances += 1
                         entry.update(
                             status="passthrough_raster",
                             passthrough_options=_passthrough_options(plan.passthrough_options),
                             request=None,
                             request_sha256=None,
-                            derived_command=occurrence.source_text,
+                            derived_command=derived_command,
+                            derived_command_sha256=digest_bytes(
+                                derived_command.encode("utf-8")
+                            ).sha256,
                             materialized=None,
                             diagnostics=[],
                         )
@@ -650,44 +957,93 @@ def build_image_overlay(
                 # above.  Reaching this point therefore proves a PDF request.
                 assert resolved.source_format == "pdf"
                 assert plan.request is not None
-                try:
-                    materialized = materialize_image(
-                        plan.request,
+                request = plan.request
+                future = materialization_futures.get(request.request_sha256)
+                if future is None:
+                    assert materializer is not None
+                    future = materializer.submit(
+                        materialize_image,
+                        request,
                         source_root=source,
                         cache_root=stage / IMAGE_OVERLAY_ROOT,
                     )
+                    materialization_futures[request.request_sha256] = future
+                pending_materializations.append(
+                    _PendingMaterialization(
+                        occurrence=occurrence,
+                        entry=entry,
+                        passthrough_options=plan.passthrough_options,
+                        request=request,
+                        future=future,
+                    )
+                )
+                # The mutable entry is finalized only after all requests from
+                # this TeX file have been submitted.  Appending it now keeps
+                # manifest order identical to source occurrence order even
+                # when workers complete out of order.
+                entries.append(entry)
+
+            for pending in pending_materializations:
+                try:
+                    materialized = pending.future.result()
                 except ContractError as error:
-                    diagnostic = _contract_diagnostic(occurrence, error)
+                    diagnostic = _contract_diagnostic(pending.occurrence, error)
                     diagnostics.append(diagnostic)
-                    entry.update(
+                    pending.entry.update(
                         status="manual_required",
-                        passthrough_options=_passthrough_options(plan.passthrough_options),
-                        request=plan.request.as_cache_input(),
-                        request_sha256=plan.request.request_sha256,
+                        passthrough_options=_passthrough_options(pending.passthrough_options),
+                        request=pending.request.as_cache_input(),
+                        request_sha256=pending.request.request_sha256,
                         derived_command=None,
                         materialized=None,
                         diagnostics=[diagnostic.as_dict()],
                     )
-                    entries.append(entry)
                     continue
 
+                use_count = materialization_use_counts.get(
+                    pending.request.request_sha256,
+                    0,
+                )
+                materialization_use_counts[pending.request.request_sha256] = use_count + 1
+                if use_count:
+                    materialized = replace(materialized, reused=True)
                 target_path = f"{IMAGE_OVERLAY_ROOT}/{materialized.png_path}"
-                derived_command = _derived_command(plan.passthrough_options, target_path)
-                replacements.append((occurrence, derived_command))
+                derived_command = _derived_command(
+                    pending.passthrough_options,
+                    target_path,
+                )
+                replacements.append((pending.occurrence, derived_command))
                 materialized_pdf_instances += 1
-                entry.update(
+                pending.entry.update(
                     status="materialized_pdf",
-                    passthrough_options=_passthrough_options(plan.passthrough_options),
-                    request=plan.request.as_cache_input(),
-                    request_sha256=plan.request.request_sha256,
+                    passthrough_options=_passthrough_options(pending.passthrough_options),
+                    request=pending.request.as_cache_input(),
+                    request_sha256=pending.request.request_sha256,
                     derived_command=derived_command,
                     derived_command_sha256=digest_bytes(derived_command.encode("utf-8")).sha256,
                     materialized=_materialized_record(materialized),
                     diagnostics=[],
                 )
-                entries.append(entry)
 
             rewritten = _rewrite_text(text, replacements)
+            if compatibility_profile == TEX2WORD_COMPATIBILITY_PROFILE:
+                rewritten, file_transformations = _rewrite_tex2word_minipages(
+                    rewritten,
+                    source_path=source_file.path,
+                )
+                compatibility_transformations.extend(file_transformations)
+                rewritten, front_matter_transformations = rewrite_tex2word_front_matter(
+                    rewritten,
+                    source_path=source_file.path,
+                    profile=compatibility_profile,
+                )
+                compatibility_transformations.extend(front_matter_transformations)
+                rewritten, layout_control_transformations = rewrite_tex2word_layout_controls(
+                    rewritten,
+                    source_path=source_file.path,
+                    profile=compatibility_profile,
+                )
+                compatibility_transformations.extend(layout_control_transformations)
             if rewritten != text:
                 _replace_stage_file(
                     resolve_within(stage, source_file.path),
@@ -717,6 +1073,11 @@ def build_image_overlay(
                 "image_root": IMAGE_OVERLAY_ROOT,
             },
             "quality": quality.as_dict(),
+            "compatibility": {
+                "profile": compatibility_profile,
+                "transformation_count": len(compatibility_transformations),
+                "transformations": compatibility_transformations,
+            },
             "counts": {
                 "source_image_instances": source_image_instances,
                 "materialized_pdf_instances": materialized_pdf_instances,
@@ -732,7 +1093,7 @@ def build_image_overlay(
         _write_exclusive(stage / IMAGE_OVERLAY_MANIFEST, manifest_bytes)
         manifest_sha256 = digest_bytes(manifest_bytes).sha256
         try:
-            stage.rename(target)
+            publish_new_directory(stage, target)
         except FileExistsError as exc:
             raise ContractError(
                 ErrorCode.BACKEND_FAILED,
@@ -774,8 +1135,15 @@ def build_image_overlay(
             materialized_pdf_instances=materialized_pdf_instances,
             passthrough_raster_instances=passthrough_raster_instances,
             diagnostics=tuple(diagnostics),
+            compatibility_profile=compatibility_profile,
+            compatibility_transformations=len(compatibility_transformations),
         )
     finally:
+        # No stage cleanup may race a renderer.  On an unexpected exit, queued
+        # work is cancelled and any already-running contained workers are
+        # reaped before the owned stage is inspected or removed.
+        if materializer is not None:
+            materializer.shutdown(wait=True, cancel_futures=True)
         if not published and stage.exists():
             _remove_owned_stage(stage, target.parent, prefix)
 
@@ -784,6 +1152,7 @@ __all__ = [
     "IMAGE_OVERLAY_FORMAT",
     "IMAGE_OVERLAY_MANIFEST",
     "IMAGE_OVERLAY_ROOT",
+    "TEX2WORD_COMPATIBILITY_PROFILE",
     "ImageOverlayDiagnostic",
     "ImageOverlayResult",
     "build_image_overlay",

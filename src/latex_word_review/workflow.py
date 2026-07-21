@@ -16,19 +16,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBackend
 from latex_word_review.canonical import compute_payload_sha256
 from latex_word_review.contracts import load_contract_json
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.errors import ContractError, ErrorCode
-from latex_word_review.export import ExportBindings, export_review_docx
+from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
+from latex_word_review.export_models import ExportReport
 from latex_word_review.hashing import FileDigest, digest_file, read_stable_bytes
 from latex_word_review.ids import new_run_id
-from latex_word_review.image_materializer import verify_image_cache_entry
+from latex_word_review.image_materializer import SealedImageCacheVerifier
 from latex_word_review.image_overlay import IMAGE_OVERLAY_FORMAT, IMAGE_OVERLAY_MANIFEST
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
 from latex_word_review.jsonio import read_contract_file, write_new_json
-from latex_word_review.paths import ensure_disjoint_roots, resolve_within, validate_relative_path
+from latex_word_review.paths import (
+    ensure_disjoint_roots,
+    resolve_within,
+    validate_relative_path,
+    windows_extended_path,
+)
 from latex_word_review.revisions import build_changeset
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
 from latex_word_review.workflow_objects import (
@@ -120,7 +127,7 @@ def _tree_entries_without_links(root: Path) -> list[Path]:
     """Return a bounded-by-filesystem tree walk after rejecting reparse points."""
 
     entries: list[Path] = []
-    pending = [root]
+    pending = [windows_extended_path(root)]
     while pending:
         directory = pending.pop()
         try:
@@ -209,16 +216,18 @@ def _make_tree_writable(root: Path) -> None:
 def _remove_owned_tree(path: Path, parent: Path, *, prefixes: tuple[str, ...]) -> None:
     if not any(path.name.startswith(prefix) for prefix in prefixes):
         raise ContractError(ErrorCode.INTERNAL_INVARIANT, "refusing to remove an unowned tree")
-    resolved_parent = _require_real_directory(parent, "workflow stage parent")
+    filesystem_path = windows_extended_path(path)
+    filesystem_parent = windows_extended_path(parent)
+    resolved_parent = _require_real_directory(filesystem_parent, "workflow stage parent")
     try:
-        resolved_path = path.resolve(strict=True)
+        resolved_path = filesystem_path.resolve(strict=True)
     except OSError as exc:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "workflow stage is unavailable") from exc
-    if resolved_path.parent != resolved_parent or _is_link_or_junction(path):
+    if resolved_path.parent != resolved_parent or _is_link_or_junction(filesystem_path):
         raise ContractError(ErrorCode.PATH_LINK_ESCAPE, "workflow stage escaped its parent")
-    _make_tree_writable(path)
+    _make_tree_writable(filesystem_path)
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(filesystem_path)
     except OSError as exc:
         raise ContractError(ErrorCode.INTERNAL_INVARIANT, "workflow stage cleanup failed") from exc
 
@@ -235,7 +244,12 @@ def _prepare_stage(root: Path, operation: Literal["export", "receive"]) -> tuple
                 ErrorCode.INTERNAL_INVARIANT,
                 "workflow staging directory could not be created",
             ) from exc
-    stage = Path(tempfile.mkdtemp(prefix=f".lwr-stage-{operation}-", dir=staging))
+    stage = Path(
+        tempfile.mkdtemp(
+            prefix=f".lwr-stage-{operation}-",
+            dir=windows_extended_path(staging),
+        )
+    )
     payload = stage / "payload"
     payload.mkdir()
     return stage, payload
@@ -244,11 +258,13 @@ def _prepare_stage(root: Path, operation: Literal["export", "receive"]) -> tuple
 def _publish_payload(payload: Path, destination: Path) -> None:
     if destination.exists() or destination.is_symlink():
         raise ContractError(ErrorCode.SCHEMA_INVALID, "workflow output already exists")
-    expected_staging = destination.parent.resolve(strict=True) / _STAGING
+    expected_staging = windows_extended_path(
+        destination.parent.resolve(strict=True) / _STAGING
+    ).resolve(strict=True)
     if payload.parent.parent.resolve(strict=True) != expected_staging:
         raise ContractError(ErrorCode.INTERNAL_INVARIANT, "workflow payload is not owned")
     try:
-        payload.rename(destination)
+        publish_new_directory(payload, destination)
     except OSError as exc:
         raise ContractError(
             ErrorCode.INTERNAL_INVARIANT,
@@ -298,7 +314,7 @@ def initialize_workflow(
         raise ContractError(ErrorCode.SCHEMA_INVALID, "run root parent is unavailable") from exc
     parent = _require_real_directory(target.parent, "run root parent")
     prefix = f".{target.name}.lwr-init-"
-    staged = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    staged = Path(tempfile.mkdtemp(prefix=prefix, dir=windows_extended_path(parent)))
     published = False
     try:
         snapshot = staged / _SNAPSHOT
@@ -320,7 +336,7 @@ def initialize_workflow(
         _seal_file(source_manifest_path)
         (staged / _STAGING).mkdir()
         try:
-            staged.rename(target)
+            publish_new_directory(staged, target)
         except OSError as exc:
             raise ContractError(
                 ErrorCode.INTERNAL_INVARIANT,
@@ -441,15 +457,11 @@ def _write_export_objects(
     report = build_export_report_document(outcome, run_id=core.run_id, generated_at=timestamp)
     write_new_json(objects / "backend-capabilities.json", capabilities, contract=True)
     if outcome.output_path is None or outcome.anchoring is None:
-        raise ContractError(
-            ErrorCode.BACKEND_FAILED,
-            "workflow export did not produce a review DOCX",
-            details={"export_status": outcome.report.status},
-        )
-    if outcome.report.status != "success":
+        raise _export_failure_error(outcome, backend_name=backend_name)
+    if not _is_reviewable_export_report(outcome.report):
         raise ContractError(
             ErrorCode.EXPORT_SILENT_LOSS,
-            "workflow export requires a fully successful report",
+            "workflow export contains a blocking or non-recoverable finding",
             details={
                 "export_status": outcome.report.status,
                 "finding_count": len(outcome.report.findings),
@@ -478,6 +490,69 @@ def _write_export_objects(
         "exact_mappings": coverage["exact"],
         "export_findings": len(outcome.report.findings),
     }
+
+
+def _is_reviewable_export_report(report: ExportReport) -> bool:
+    """Accept a complete baseline with explicit recoverable warnings.
+
+    ``partial`` is useful for journal-specific formatting or source units that
+    cannot be mapped automatically.  It is still safe to review because the
+    immutable DOCX, image count, OOXML structure and SourceMap have already
+    passed their independent gates.  Errors, fatal findings and any
+    non-recoverable warning remain blocking.
+    """
+
+    if report.status == "success":
+        return True
+    return (
+        report.status == "partial"
+        and bool(report.findings)
+        and all(
+            finding.severity == "warning" and finding.recoverable for finding in report.findings
+        )
+    )
+
+
+def _export_failure_error(
+    outcome: ExportOutcome,
+    *,
+    backend_name: BackendName,
+) -> ContractError:
+    """Preserve a backend's stable cause without exposing logs or host paths."""
+
+    primary = next(
+        (item for item in outcome.report.findings if item.severity in {"error", "fatal"}),
+        None,
+    )
+    code = primary.code if primary is not None else ErrorCode.BACKEND_FAILED
+    backend_result = outcome.backend_result
+    details: dict[str, object] = {
+        "provider": backend_name,
+        "stage": "backend_export" if not backend_result.succeeded else "review_validation",
+        "export_status": outcome.report.status,
+        "backend_status": backend_result.status,
+        "backend_error_code": code.value,
+        "timed_out": "yes" if backend_result.timed_out else "no",
+        "finding_count": len(outcome.report.findings),
+    }
+    if backend_result.returncode is not None:
+        details["returncode"] = backend_result.returncode
+    native_report = backend_result.native_report
+    for key in ("duration_ms", "error_count", "warning_count"):
+        value = native_report.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            details[key] = value
+    output_truncated = native_report.get("output_truncated")
+    if isinstance(output_truncated, bool):
+        details["output_truncated"] = "yes" if output_truncated else "no"
+    failure_kind = native_report.get("failure_kind")
+    if isinstance(failure_kind, str):
+        details["failure_kind"] = failure_kind
+    return ContractError(
+        code,
+        "workflow export did not produce a review DOCX",
+        details=details,
+    )
 
 
 def export_workflow(
@@ -563,7 +638,7 @@ def _validate_export(core: _CoreState) -> _ExportState:
         cast("int", artifact["size_bytes"]), cast("str", artifact["sha256"])
     )
     if (
-        report_payload["status"] != "success"
+        not _is_reviewable_export_payload(report_payload)
         or report_payload["source_manifest_sha256"] != core.source_manifest_sha256
         or report_payload["backend_capabilities_sha256"] != compute_payload_sha256(capabilities)
         or report_payload["review_ir_sha256"] != compute_payload_sha256(review_ir)
@@ -586,6 +661,23 @@ def _validate_export(core: _CoreState) -> _ExportState:
         source_map=source_map,
         source_map_sha256=compute_payload_sha256(source_map),
         counts=counts,
+    )
+
+
+def _is_reviewable_export_payload(report_payload: dict[str, Any]) -> bool:
+    """Re-validate the sealed success/partial policy without trusting Python objects."""
+
+    status = report_payload.get("status")
+    if status == "success":
+        return True
+    findings = report_payload.get("findings")
+    if status != "partial" or not isinstance(findings, list) or not findings:
+        return False
+    return all(
+        isinstance(finding, dict)
+        and finding.get("severity") == "warning"
+        and finding.get("recoverable") is True
+        for finding in findings
     )
 
 
@@ -686,6 +778,7 @@ def _validate_image_overlay(
             ErrorCode.HASH_SOURCE_MISMATCH,
             "ready image overlay contains manual instances",
         )
+    sealed_image_verifier: SealedImageCacheVerifier | None = None
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("status") != "materialized_pdf":
             continue
@@ -695,13 +788,18 @@ def _validate_image_overlay(
                 ErrorCode.HASH_SOURCE_MISMATCH,
                 "materialized image evidence is missing",
             )
-        _validate_materialized_image(overlay_root, entry)
+        sealed_image_verifier = _validate_materialized_image(
+            overlay_root,
+            entry,
+            sealed_image_verifier,
+        )
 
 
 def _validate_materialized_image(
     overlay_root: Path,
     entry: dict[str, Any],
-) -> None:
+    verifier: SealedImageCacheVerifier | None,
+) -> SealedImageCacheVerifier:
     materialized = entry.get("materialized")
     request = entry.get("request")
     expected_fields = {
@@ -752,7 +850,10 @@ def _validate_materialized_image(
             "materialized image cache target differs",
         )
     try:
-        verified = verify_image_cache_entry(
+        active_verifier = verifier or SealedImageCacheVerifier(
+            cast("dict[str, Any]", materialized["renderer"]),
+        )
+        verified = active_verifier.verify(
             cache_path.parent,
             request=cast("dict[str, Any]", request),
             renderer=cast("dict[str, Any]", materialized["renderer"]),
@@ -779,6 +880,7 @@ def _validate_materialized_image(
             ErrorCode.HASH_SOURCE_MISMATCH,
             "materialized image cache binding differs",
         )
+    return active_verifier
 
 
 def receive_workflow(

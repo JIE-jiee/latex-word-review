@@ -40,6 +40,7 @@ LaTeX 保持为唯一权威源。
 | 修订后的 LaTeX 需要可视标记 | 输出干净 PDF 与 `latexdiff.pdf`，同时把 Word 原始修订证据保存在账本中 |
 | PDF 图片不方便直接放入 Word | 在派生 overlay 中把 PDF 页规范化为 PNG，原 PDF 和原 LaTeX 保持不变 |
 | 只考虑 Windows | 收敛平台、CI、文档和发布承诺到 Windows 与 Python 3.12/3.13 |
+| 普通用户不应记忆和拼接一长串命令 | 增加本机中文四步应用、Windows 文件选择器、后台任务、断点恢复、安装器和便携包；CLI 保留给自动化与精细恢复 |
 | 最终放到 GitHub 供别人参考 | 清理个人路径和私人语料，补齐许可、CI、发行检查、Plugin、Skill 和公开 E0 样例 |
 
 这些修订说明了 Vibe Coding 在本项目中的实际作用：需求不是预先写成一份完整规格后一次
@@ -115,6 +116,8 @@ LaTeX 保持为唯一权威源。
 - 固定 MiKTeX 包闭包的真实编译和 latexdiff；
 - wheel/sdist clean-install；
 - bundle 篡改、路径、隐私和对象绑定测试；
+- 本机四步应用的会话恢复、循环地址安全、后台任务、退出等待和两道人工闸门测试；
+- 同一套冻结目录生成 GUI/控制台入口、安装器和便携包的构建与隔离验证；
 - Codex Skill 与 Plugin 内嵌 Skill 的字节一致性检查。
 
 具体结果应绑定 commit，不在本页写成永久不变的数字。项目尚无正式 tag、GitHub Release 或

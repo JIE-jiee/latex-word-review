@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,21 @@ FORBIDDEN_LATEX_TEXT = frozenset("\\{}%$&#^_~")
 
 class DemoError(RuntimeError):
     """A public-demo invariant or CLI step failed."""
+
+
+def _cli_command(*arguments: str | Path) -> list[str]:
+    frozen_cli = os.environ.get("LATEX_WORD_REVIEW_DEMO_CLI")
+    if frozen_cli:
+        executable = Path(frozen_cli)
+        if not executable.is_absolute() or not executable.is_file():
+            raise DemoError("LATEX_WORD_REVIEW_DEMO_CLI must name an existing absolute file")
+        return [os.fspath(executable), *(os.fspath(item) for item in arguments)]
+    return [
+        sys.executable,
+        "-m",
+        "latex_word_review",
+        *(os.fspath(item) for item in arguments),
+    ]
 
 
 def _emit_json(value: Mapping[str, Any], *, error: bool = False) -> None:
@@ -70,7 +86,7 @@ def _run_cli(
     *arguments: str | Path,
     timeout_s: float = 180.0,
 ) -> dict[str, Any]:
-    command = [sys.executable, "-m", "latex_word_review", *(str(item) for item in arguments)]
+    command = _cli_command(*arguments)
     try:
         completed = subprocess.run(
             command,

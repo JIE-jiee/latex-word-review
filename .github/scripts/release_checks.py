@@ -103,6 +103,23 @@ TEXT_BASENAMES = {
     "README",
     "WHEEL",
 }
+REQUIRED_PACKAGE_ASSETS = frozenset(
+    {
+        "latex_word_review/assets/app.css",
+        "latex_word_review/assets/finalize_review_fields.ps1",
+    }
+)
+SCHEMA_PACKAGE_PREFIX = "latex_word_review/schemas/v1alpha/"
+SCHEMA_SOURCE_ROOT = (
+    Path(__file__).resolve().parents[2] / "src" / "latex_word_review" / "schemas" / "v1alpha"
+)
+SCHEMA_CATALOG_FILENAME = "catalog.json"
+EXPECTED_SCHEMA_VERSION = "1.0.0-alpha.1"
+MAX_SCHEMA_CATALOG_BYTES = 64 * 1024
+MAX_SCHEMA_COUNT = 64
+SCHEMA_NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9]{0,63}$")
+SCHEMA_FILENAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.schema\.json$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BUNDLE_ATTACK_TOKENS = (
     b"/home/alice/paper.tex",
     b"/Users/Alice/paper.tex",
@@ -246,6 +263,97 @@ def load_json_bytes(data: bytes, *, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseCheckError(f"expected a JSON object: {label}")
     return value
+
+
+def _schema_catalog_entries(catalog_bytes: bytes) -> dict[str, str]:
+    if not catalog_bytes or len(catalog_bytes) > MAX_SCHEMA_CATALOG_BYTES:
+        raise ReleaseCheckError("schema catalog size is outside its accepted range")
+    catalog = load_json_bytes(catalog_bytes, label=SCHEMA_CATALOG_FILENAME)
+    if set(catalog) != {"catalog_format", "schema_version", "common", "objects"}:
+        raise ReleaseCheckError("schema catalog has an invalid root shape")
+    if type(catalog["catalog_format"]) is not int or catalog["catalog_format"] != 1:
+        raise ReleaseCheckError("schema catalog format is unsupported")
+    if catalog["schema_version"] != EXPECTED_SCHEMA_VERSION:
+        raise ReleaseCheckError("schema catalog version differs from the supported contract")
+
+    common = catalog["common"]
+    if not isinstance(common, dict) or set(common) != {"file", "sha256"}:
+        raise ReleaseCheckError("schema catalog common entry is invalid")
+    objects = catalog["objects"]
+    if not isinstance(objects, list) or not 1 <= len(objects) <= MAX_SCHEMA_COUNT:
+        raise ReleaseCheckError("schema catalog object count is invalid")
+
+    entries: dict[str, str] = {}
+    object_names: set[str] = set()
+    for entry, is_common in [(common, True), *((item, False) for item in objects)]:
+        expected_keys = {"file", "sha256"} if is_common else {"name", "file", "sha256"}
+        if not isinstance(entry, dict) or set(entry) != expected_keys:
+            raise ReleaseCheckError("schema catalog entry has unexpected fields")
+        filename = entry.get("file")
+        digest = entry.get("sha256")
+        if not isinstance(filename, str) or SCHEMA_FILENAME_RE.fullmatch(filename) is None:
+            raise ReleaseCheckError("schema catalog entry has an invalid filename")
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            raise ReleaseCheckError("schema catalog entry has an invalid SHA-256")
+        if filename in entries:
+            raise ReleaseCheckError("schema catalog contains a duplicate filename")
+        entries[filename] = digest
+        if not is_common:
+            name = entry.get("name")
+            if not isinstance(name, str) or SCHEMA_NAME_RE.fullmatch(name) is None:
+                raise ReleaseCheckError("schema catalog entry has an invalid object name")
+            if name in object_names:
+                raise ReleaseCheckError("schema catalog contains a duplicate object name")
+            object_names.add(name)
+    return entries
+
+
+def authoritative_schema_payloads() -> dict[str, bytes]:
+    """Read the reviewed source catalog and its exact current schema byte set."""
+
+    if SCHEMA_SOURCE_ROOT.is_symlink() or not SCHEMA_SOURCE_ROOT.is_dir():
+        raise ReleaseCheckError("authoritative source schema directory is unavailable")
+    try:
+        paths = sorted(SCHEMA_SOURCE_ROOT.glob("*.json"), key=lambda path: path.name)
+        if any(path.is_symlink() or not path.is_file() for path in paths):
+            raise ReleaseCheckError("authoritative source schema set contains a special file")
+        payloads = {path.name: path.read_bytes() for path in paths}
+    except OSError as exc:
+        raise ReleaseCheckError("authoritative source schema set cannot be read") from exc
+    catalog_bytes = payloads.get(SCHEMA_CATALOG_FILENAME)
+    if catalog_bytes is None:
+        raise ReleaseCheckError("authoritative source schema catalog is missing")
+    entries = _schema_catalog_entries(catalog_bytes)
+    expected = {SCHEMA_CATALOG_FILENAME, *entries}
+    if set(payloads) != expected:
+        raise ReleaseCheckError("authoritative source schema set differs from its catalog")
+    for filename, expected_sha256 in entries.items():
+        data = payloads[filename]
+        if not data or len(data) > MAX_SCAN_BYTES:
+            raise ReleaseCheckError(f"authoritative schema size is invalid: {filename}")
+        if hashlib.sha256(data).hexdigest() != expected_sha256:
+            raise ReleaseCheckError(f"authoritative schema hash differs from catalog: {filename}")
+        load_json_bytes(data, label=filename)
+    return payloads
+
+
+def require_exact_schema_payloads(payloads: dict[str, bytes], *, label: str) -> None:
+    """Require an artifact to ship the reviewed catalog and no other JSON schemas."""
+
+    expected = authoritative_schema_payloads()
+    missing = sorted(set(expected) - set(payloads))
+    unexpected = sorted(set(payloads) - set(expected))
+    if missing or unexpected:
+        raise ReleaseCheckError(
+            f"{label} schema payload set is incomplete or unexpected: "
+            + json.dumps({"missing": missing, "unexpected": unexpected}, sort_keys=True)
+        )
+    changed = next(
+        (filename for filename in sorted(expected) if payloads[filename] != expected[filename]),
+        None,
+    )
+    if changed is not None:
+        raise ReleaseCheckError(f"{label} schema payload differs from source catalog: {changed}")
 
 
 def validate_plugin_distribution_payloads(payloads: dict[str, bytes]) -> None:
@@ -409,6 +517,7 @@ def check_wheel(path: Path) -> tuple[str, str]:
             entries: dict[tuple[str, ...], tuple[bool | None, tuple[str, ...]]] = {}
             expanded = 0
             normalized: list[str] = []
+            schema_payloads: dict[str, bytes] = {}
             for info in infos:
                 member = safe_member_name(info.filename)
                 if info.is_dir():
@@ -439,16 +548,14 @@ def check_wheel(path: Path) -> tuple[str, str]:
                 "latex_word_review/image_overlay.py",
                 "latex_word_review/offset_mapping.py",
                 "latex_word_review/py.typed",
+                "latex_word_review/schema_catalog.py",
                 "latex_word_review/word_semantics.py",
                 "latex_word_review/workflow.py",
+                *REQUIRED_PACKAGE_ASSETS,
             }
             missing = sorted(required_exact - set(normalized))
             if missing:
                 raise ReleaseCheckError(f"wheel is missing required members: {missing}")
-            if not any(
-                name.startswith("latex_word_review/schemas/v1alpha/") for name in normalized
-            ):
-                raise ReleaseCheckError("wheel does not contain versioned JSON schemas")
             metadata_infos = [
                 info
                 for info, name in zip(infos, normalized, strict=True)
@@ -486,7 +593,10 @@ def check_wheel(path: Path) -> tuple[str, str]:
             }
             for name in normalized:
                 if name.startswith("latex_word_review/"):
-                    if not (
+                    if name.startswith("latex_word_review/assets/"):
+                        if name not in REQUIRED_PACKAGE_ASSETS:
+                            raise ReleaseCheckError(f"unexpected package asset: {name}")
+                    elif not (
                         name == "latex_word_review/py.typed"
                         or name.endswith(".py")
                         or name.endswith(".json")
@@ -503,12 +613,15 @@ def check_wheel(path: Path) -> tuple[str, str]:
                 data = archive.read(info)
                 if len(data) != info.file_size:
                     raise ReleaseCheckError(f"wheel member size mismatch: {info.filename}")
+                if name.startswith(SCHEMA_PACKAGE_PREFIX) and name.endswith(".json"):
+                    schema_payloads[name.removeprefix(SCHEMA_PACKAGE_PREFIX)] = data
                 if should_scan_text(name):
                     if len(data) > MAX_SCAN_BYTES:
                         raise ReleaseCheckError(f"text member exceeds scan limit: {name}")
                     scan_member(name, data)
                 if info is metadata_infos[0]:
                     metadata_bytes = data
+            require_exact_schema_payloads(schema_payloads, label="wheel")
             if metadata_bytes is None:
                 raise ReleaseCheckError("wheel metadata could not be read")
             metadata = BytesParser().parsebytes(metadata_bytes)
@@ -549,6 +662,7 @@ def check_sdist(path: Path, expected_version: str) -> None:
     expanded = 0
     pkg_info_candidates: dict[str, bytes] = {}
     plugin_payloads: dict[str, bytes] = {}
+    schema_payloads: dict[str, bytes] = {}
     try:
         with (
             path.open("rb") as compressed,
@@ -610,6 +724,9 @@ def check_sdist(path: Path, expected_version: str) -> None:
                             relative = PurePosixPath(*safe.parts[1:]).as_posix()
                             if relative in PLUGIN_DISTRIBUTION_RELATIVE_FILES:
                                 plugin_payloads[relative] = data
+                            schema_prefix = "src/" + SCHEMA_PACKAGE_PREFIX
+                            if relative.startswith(schema_prefix) and relative.endswith(".json"):
+                                schema_payloads[relative.removeprefix(schema_prefix)] = data
             while bounded.read(1024 * 1024):
                 pass
     except (OSError, tarfile.TarError) as exc:
@@ -642,12 +759,14 @@ def check_sdist(path: Path, expected_version: str) -> None:
         *(f"{root}/{relative}" for relative in PLUGIN_DISTRIBUTION_RELATIVE_FILES),
         f"{root}/src/latex_word_review/__about__.py",
         f"{root}/src/latex_word_review/py.typed",
+        f"{root}/src/latex_word_review/schema_catalog.py",
         f"{root}/third_party/Contributor-Covenant-LICENSE.txt",
         f"{root}/third_party/python-docx-LICENSE.txt",
     }
     missing = sorted(required - set(names))
     if missing:
         raise ReleaseCheckError(f"sdist is missing required members: {missing}")
+    require_exact_schema_payloads(schema_payloads, label="sdist")
     validate_plugin_distribution_payloads(plugin_payloads)
     pkg_info_bytes = pkg_info_candidates.get(f"{root}/PKG-INFO")
     if pkg_info_bytes is None:

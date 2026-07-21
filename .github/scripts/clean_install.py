@@ -927,9 +927,15 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "-c",
                 (
                     "from pathlib import Path; import sys; import latex_word_review; "
+                    "import importlib.resources as resources; "
                     "import latex_word_review.contracts; "
                     "module = Path(latex_word_review.__file__).resolve(); "
                     "module.relative_to(Path(sys.prefix).resolve()); "
+                    "assets = resources.files('latex_word_review').joinpath('assets'); "
+                    "expected = {'app.css', 'finalize_review_fields.ps1'}; "
+                    "found = {item.name for item in assets.iterdir() if item.is_file()}; "
+                    "assert found == expected; "
+                    "assert all(assets.joinpath(name).read_bytes() for name in expected); "
                     "assert sys.flags.safe_path"
                 ),
             ],

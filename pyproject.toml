@@ -84,6 +84,13 @@ fixture = [
   "pillow>=12,<13",
   "python-docx>=1.2,<2",
 ]
+browser-e2e = [
+  "playwright==1.61.0",
+  "pytest>=8.3,<10",
+]
+release = [
+  "pyinstaller==6.21.0",
+]
 
 [tool.hatch.version]
 path = "src/latex_word_review/__about__.py"

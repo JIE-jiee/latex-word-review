@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from scripts.run_public_e0_cli_demo import _decision_for
+from scripts.run_public_e0_cli_demo import DemoError, _cli_command, _decision_for
 
 from latex_word_review.jsonio import read_contract_file
 
@@ -61,6 +61,26 @@ def test_public_demo_accepts_only_exact_safe_text_kinds(kind: str) -> None:
 )
 def test_public_demo_routes_everything_else_to_manual(change: dict[str, object]) -> None:
     assert _decision_for(change) == "manual"
+
+
+def test_public_demo_can_drive_an_explicit_frozen_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = (tmp_path / "latex-word-review.exe").resolve()
+    executable.write_bytes(b"MZ")
+    monkeypatch.setenv("LATEX_WORD_REVIEW_DEMO_CLI", str(executable))
+
+    assert _cli_command("new-run") == [str(executable), "new-run"]
+
+
+def test_public_demo_rejects_a_relative_frozen_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LATEX_WORD_REVIEW_DEMO_CLI", "latex-word-review.exe")
+
+    with pytest.raises(DemoError, match="existing absolute file"):
+        _cli_command("new-run")
 
 
 def test_public_e0_demo_runs_snapshot_through_apply_via_cli(tmp_path: Path) -> None:

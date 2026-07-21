@@ -1,6 +1,6 @@
 # E0 上游依赖、许可证与接口证据矩阵
 
-> 核验快照：2026-07-16T05:03:24Z。本文只记录官方 GitHub 仓库、GitHub Release、版本标签源码、PyPI 元数据或项目官方文档中的证据。README 中的功能声明仅作为接口线索；尚未通过本项目 fixture 实测的能力均标为“待契约测试”。
+> 核验快照：2026-07-18T04:20:00Z。本文只记录官方 GitHub 仓库、GitHub Release、版本标签源码、PyPI 元数据或项目官方文档中的证据。README 中的功能声明仅作为接口线索；尚未通过本项目 fixture 实测的能力均标为“待契约测试”。
 >
 > 当前项目支持范围由 ADR-0002 收敛为 Windows-only。本文关于上游提供 Linux/macOS
 > 二进制的描述仅是上游事实，不构成本项目的平台支持、CI 或维护承诺。
@@ -74,6 +74,8 @@ Pandoc 声明 [`GPL-2.0-or-later`](https://github.com/jgm/pandoc/blob/3.10/pando
 - [`tex2word.__init__`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/__init__.py) 明确导出 `convert_source`、`convert_file`、`ConversionResult`。
 - [`ConversionResult`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/pipeline.py#L18-L40) 包含 IR `document`、`ConversionReport` 和 DOCX bytes，适合适配成统一 `ExportReport`，但本项目不得把其类直接暴露为公共 Schema。
 - [`convert_file`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/pipeline.py#L208-L235) 是文件级 API；CLI 提供 `convert --report`、`coverage`、`benchmark` 和 `to-latex`。
+- `convert_source`/`convert_file` 的公开 `reference_doc` 参数会导入标准 Word 样式、页面尺寸和
+  页边距；本项目据此采用内置 `academic-review-v1`，不再自研第二套 DOCX 样式引擎。
 - [`roundtrip.py`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/roundtrip.py#L23-L104) 提供 manifest v1、`read_manifest`、`recover_ir` 与 manifest-biased `to_latex(reconcile=True)`。
 
 **为何不能把 round-trip 当审阅账本**
@@ -82,10 +84,35 @@ Pandoc 声明 [`GPL-2.0-or-later`](https://github.com/jgm/pandoc/blob/3.10/pando
 - [`_read_comments`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/frontend/docx_reader.py#L155-L168) 当前只返回 `(author, plain text)`，没有评论日期、范围锚点、回复/解决状态和原 XML 证据。
 - reconcile 的目标是保守恢复/合并 LaTeX，不提供逐项 change ID、原文/新文、作者/时间、审批状态或只应用批准项的补丁计划。
 
+**本地契约测试发现的 1.0.5 转换缺口**
+
+- `figure` 直接包含多个 `minipage`、且每个列中有一张图和一个 caption 时，
+  1.0.5 的 figure 解析会反复覆盖单一图片槽，最终 DOCX 可能只保留最后一张图。
+- raster 图片通过 `\graphicspath` 找到且原命令省略目录时，直接保留原目标会让后端
+  无法定位资源。
+- 本项目不复制或修改上游 parser。wrapper 只在能力精确匹配 1.0.5 时，对派生树中
+  可证明安全的 direct-minipage 形态做带 span/hash 证据的 `subfigure` 归一化，并把
+  raster 命令改为已验证的根相对路径；原始 LaTeX 始终不变。任何未覆盖形态仍由
+  DOCX 图片计数门禁阻断，而不是猜测补图。后续优先把最小复现和多图数据模型建议
+  贡献给上游。
+- On Windows with the legacy long-path policy, tex2word 1.0.5 joins `base_dir`
+  and LaTeX forward-slash image paths before `os.path.isfile()`. Images beyond
+  MAX_PATH are reported as missing even when conversion returns success. The real
+  stress test retained only 1/64 images, and the project silent-loss gate blocked it.
+- The only temporary private-API exception is confined to the isolated worker and
+  guarded by Windows plus the exact `tex2word==1.0.5` version. It supplies an
+  extended absolute path only while resolving an image and applies
+  `os.path.normpath()` immediately before the upstream resolver. The conversion
+  `base_dir` remains relative so `input`/`include` preprocessing keeps working.
+  Version or API-shape drift fails closed; the installed package is not modified.
+  Remove this shim after an equivalent upstream release.
+
 **决策**
 
 - **Adopt**：LaTeX parser、IR、OMML、活字段、reference doc、package builder、manifest 和转换报告。
-- **Wrap**：在 `Tex2WordBackend` 中调用公开 API；若公开 API 发生不兼容，可切换到版本固定的 CLI `convert --report`，不侵入核心 Schema。
+- **Wrap**：在 `Tex2WordBackend` 中调用公开 API；reference DOCX 由固定 XML 代码生成并绑定
+  哈希，必须取得上游 `reference-doc/info` 成功证据，warning/静默 fallback 直接阻断。若公开
+  API 发生不兼容，可切换到版本固定的 CLI `convert --report`，不侵入核心 Schema。
 - **Contribute**：建议上游提供“不接受修订”的原始事件 API、评论日期/范围、manifest/source-map 扩展点和稳定 capability 信息。
 - **Self-build**：不可变运行、跨后端 `SourceMap`、完整 `ChangeSet`、审批、局部补丁和综合核验。
 - **替换策略**：`Backend` 输出只允许本项目的 `ReviewIR`/`SourceMap`/`ExportReport`；若 tex2word 不再兼容，切换 Pandoc 或其他后端不会改变账本、审批和补丁 Schema。

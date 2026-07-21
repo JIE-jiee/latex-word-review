@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import canonical_json, compute_payload_sha256, sha256_canonical
 from latex_word_review.discovery import DEFAULT_DISCOVERY_LIMITS, DiscoveryLimits
 from latex_word_review.errors import ContractError, ErrorCode
@@ -153,7 +154,7 @@ def _verify_output(
 
 def _publish_directory(staged: Path, destination: Path) -> None:
     try:
-        staged.rename(destination)
+        publish_new_directory(staged, destination)
     except FileExistsError as exc:
         raise ContractError(ErrorCode.APPLY_PARTIAL_WRITE, "apply destination appeared") from exc
     except OSError as exc:

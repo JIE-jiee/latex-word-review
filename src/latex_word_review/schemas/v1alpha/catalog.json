@@ -1,0 +1,70 @@
+{
+  "catalog_format": 1,
+  "schema_version": "1.0.0-alpha.1",
+  "common": {
+    "file": "common.schema.json",
+    "sha256": "56e4d46e1bf9c4b08c4b8c7daf615a8392530cf814f474aea83361984128e798"
+  },
+  "objects": [
+    {
+      "name": "RunManifest",
+      "file": "run-manifest.schema.json",
+      "sha256": "5a77353c519889783365852ae81ccb6002b66ca81656a23221b2279f65d60de3"
+    },
+    {
+      "name": "SourceManifest",
+      "file": "source-manifest.schema.json",
+      "sha256": "08303add87236de7e69cd5c68bf57e945f9ecbcf07983941363b3e5b95748349"
+    },
+    {
+      "name": "BackendCapabilities",
+      "file": "backend-capabilities.schema.json",
+      "sha256": "5a9fb3f376355a6216535110e587702447605265dd03c53d14478386a562bdde"
+    },
+    {
+      "name": "ReviewIR",
+      "file": "review-ir.schema.json",
+      "sha256": "8cf538e486ab69553d7482158b9ae0f2ae698a6833839929c25b4586b2abac2a"
+    },
+    {
+      "name": "SourceMap",
+      "file": "source-map.schema.json",
+      "sha256": "525862b65707df864b2d15c25a8c534f9a33c36bc1377fe2e51b48125eb1dbc2"
+    },
+    {
+      "name": "ExportReport",
+      "file": "export-report.schema.json",
+      "sha256": "fe576f0b88cc64214837ef33e58f605993064dee245f8ce4f8d629d1c723ccb9"
+    },
+    {
+      "name": "RawRevisionEvent",
+      "file": "raw-revision-event.schema.json",
+      "sha256": "0e2b4076df6a54308ff40545344929df9edaa13e22bb1be7345cbef8b0f7e223"
+    },
+    {
+      "name": "ChangeSet",
+      "file": "change-set.schema.json",
+      "sha256": "b996f009834e951aaa9ea0872a9921436d0238df35af214ed84636f3168b3ad1"
+    },
+    {
+      "name": "ApprovalSet",
+      "file": "approval-set.schema.json",
+      "sha256": "37c5a1bf4bf5b25eb35c73628d07d10404d012a32c9b2ceb448fd638a265b383"
+    },
+    {
+      "name": "PatchPlan",
+      "file": "patch-plan.schema.json",
+      "sha256": "b550e789e58af475f5f3a82e0b19a0466400798d2588473d90db174352f8d53a"
+    },
+    {
+      "name": "VerificationReport",
+      "file": "verification-report.schema.json",
+      "sha256": "48322303aed8a52a39de5f180ac14e2e1eaa54bd9d4368d112d0d465a0dd0a48"
+    },
+    {
+      "name": "AuditBundle",
+      "file": "audit-bundle.schema.json",
+      "sha256": "79f118ea57ef734391062a2dc5631db0f54b98a03271a2162135ad312a3bee15"
+    }
+  ]
+}

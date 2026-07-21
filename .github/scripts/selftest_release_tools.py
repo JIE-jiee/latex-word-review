@@ -148,7 +148,17 @@ class ArchiveAndPrivacyTests(unittest.TestCase):
 
 
 class DistributionMetadataTests(unittest.TestCase):
-    def write_wheel(self, root: Path, *, requires_python: str, extra_metadata: str = "") -> Path:
+    def write_wheel(
+        self,
+        root: Path,
+        *,
+        requires_python: str,
+        extra_metadata: str = "",
+        omit_asset: str | None = None,
+        omit_schema: str | None = None,
+        extra_schema: str | None = None,
+        tamper_schema: str | None = None,
+    ) -> Path:
         path = root / "latex_word_review-0.1.0b1-py3-none-any.whl"
         dist_info = "latex_word_review-0.1.0b1.dist-info"
         metadata = (
@@ -173,9 +183,32 @@ class DistributionMetadataTests(unittest.TestCase):
             archive.writestr("latex_word_review/image_overlay.py", "# overlay\n")
             archive.writestr("latex_word_review/offset_mapping.py", "# offsets\n")
             archive.writestr("latex_word_review/py.typed", "")
+            archive.writestr("latex_word_review/schema_catalog.py", "# schema catalog\n")
+            for asset_name, asset_data in (
+                ("latex_word_review/assets/app.css", "body{}\n"),
+                (
+                    "latex_word_review/assets/finalize_review_fields.ps1",
+                    "#Requires -Version 5.1\n",
+                ),
+            ):
+                if asset_name != omit_asset:
+                    archive.writestr(asset_name, asset_data)
             archive.writestr("latex_word_review/word_semantics.py", "# Word semantics\n")
             archive.writestr("latex_word_review/workflow.py", "# workflow\n")
-            archive.writestr("latex_word_review/schemas/v1alpha/test.json", "{}\n")
+            for schema_name, schema_data in CHECKS.authoritative_schema_payloads().items():
+                if schema_name == omit_schema:
+                    continue
+                if schema_name == tamper_schema:
+                    schema_data += b" "
+                archive.writestr(
+                    f"latex_word_review/schemas/v1alpha/{schema_name}",
+                    schema_data,
+                )
+            if extra_schema is not None:
+                archive.writestr(
+                    f"latex_word_review/schemas/v1alpha/{extra_schema}",
+                    "{}\n",
+                )
             archive.writestr(f"{dist_info}/METADATA", metadata)
             archive.writestr(
                 f"{dist_info}/entry_points.txt",
@@ -192,6 +225,56 @@ class DistributionMetadataTests(unittest.TestCase):
                 Path(temporary), requires_python=CHECKS.EXPECTED_REQUIRES_PYTHON
             )
             self.assertEqual(CHECKS.check_wheel(wheel), ("latex-word-review", "0.1.0b1"))
+
+    def test_wheel_requires_every_exact_runtime_asset(self) -> None:
+        for missing_asset in sorted(CHECKS.REQUIRED_PACKAGE_ASSETS):
+            with (
+                self.subTest(missing_asset=missing_asset),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                wheel = self.write_wheel(
+                    Path(temporary),
+                    requires_python=CHECKS.EXPECTED_REQUIRES_PYTHON,
+                    omit_asset=missing_asset,
+                )
+                with self.assertRaisesRegex(
+                    CHECKS.ReleaseCheckError,
+                    "missing required members",
+                ):
+                    CHECKS.check_wheel(wheel)
+
+    def test_wheel_requires_exact_cataloged_schema_set(self) -> None:
+        for missing_schema in ("catalog.json", "change-set.schema.json"):
+            with (
+                self.subTest(missing_schema=missing_schema),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                wheel = self.write_wheel(
+                    Path(temporary),
+                    requires_python=CHECKS.EXPECTED_REQUIRES_PYTHON,
+                    omit_schema=missing_schema,
+                )
+                with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "schema payload set"):
+                    CHECKS.check_wheel(wheel)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            wheel = self.write_wheel(
+                Path(temporary),
+                requires_python=CHECKS.EXPECTED_REQUIRES_PYTHON,
+                extra_schema="rogue.schema.json",
+            )
+            with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "schema payload set"):
+                CHECKS.check_wheel(wheel)
+
+    def test_wheel_rejects_schema_bytes_that_differ_from_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            wheel = self.write_wheel(
+                Path(temporary),
+                requires_python=CHECKS.EXPECTED_REQUIRES_PYTHON,
+                tamper_schema="change-set.schema.json",
+            )
+            with self.assertRaisesRegex(CHECKS.ReleaseCheckError, "differs from source catalog"):
+                CHECKS.check_wheel(wheel)
 
     def test_unbounded_python_metadata_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -211,7 +294,13 @@ class DistributionMetadataTests(unittest.TestCase):
                 CHECKS.check_wheel(wheel)
 
     def test_wheel_rejects_symlink_nontext_and_duplicate_identity_metadata(self) -> None:
-        mutations = ("symlink", "nontext", "duplicate-metadata", "duplicate-extra")
+        mutations = (
+            "symlink",
+            "nontext",
+            "rogue-asset",
+            "duplicate-metadata",
+            "duplicate-extra",
+        )
         for mutation in mutations:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -233,6 +322,11 @@ class DistributionMetadataTests(unittest.TestCase):
                             info.create_system = 3
                             info.external_attr = 0o120777 << 16
                             archive.writestr(info, "target.py")
+                        elif mutation == "rogue-asset":
+                            archive.writestr(
+                                "latex_word_review/assets/rogue.ps1",
+                                "Write-Output 'must be rejected'\n",
+                            )
                         else:
                             archive.writestr("latex_word_review/payload.bin", b"binary")
                 with self.assertRaises(CHECKS.ReleaseCheckError):

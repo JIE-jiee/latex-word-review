@@ -22,6 +22,7 @@ dist/
 
 build/
 output/
+/tmp/
 runs/
 archives/
 /par-*/
@@ -44,6 +45,7 @@ archives/
 
 samples/input/
 samples/private/
+/测试Latex/
 samples/**/*.docx
 samples/**/*.pdf
 
@@ -60,6 +62,7 @@ samples/**/*.pdf
 
 .DS_Store
 Thumbs.db
+/*.lnk
 .idea/
 .vscode/
 

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
+import pytest
+
 from latex_word_review.discovery import discover_project
-from latex_word_review.errors import ErrorCode
+from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import anchor_source_units
 from latex_word_review.inspection import inspect_docx
 from latex_word_review.source_units import scan_source_units
@@ -166,3 +169,104 @@ def test_anchoring_adds_a_valid_track_changes_settings_part(tmp_path: Path) -> N
         assert controls[0].get(f"{{{W_NS}}}val") is None
         assert b'/word/settings.xml"' in archive.read("[Content_Types].xml")
         assert b'relationships/settings"' in archive.read("word/_rels/document.xml.rels")
+
+
+def test_anchoring_refuses_an_existing_destination_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source, ["No-clobber paragraph."])
+    units = scan_source_units(
+        source,
+        discover_project(source, main_document="main.tex"),
+    )
+    unanchored = tmp_path / "unanchored.docx"
+    anchored = tmp_path / "anchored.docx"
+    _write_minimal_docx(unanchored, ["No-clobber paragraph."])
+    source_before = unanchored.read_bytes()
+    anchored.write_bytes(b"existing-destination")
+
+    with pytest.raises(ContractError) as raised:
+        anchor_source_units(unanchored, anchored, units)
+
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
+    assert unanchored.read_bytes() == source_before
+    assert anchored.read_bytes() == b"existing-destination"
+    assert not list(tmp_path.glob(".anchored.docx.anchor-*.docx"))
+
+
+def test_anchoring_refuses_the_source_as_its_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_project(source, ["Aliased paragraph."])
+    units = scan_source_units(
+        source,
+        discover_project(source, main_document="main.tex"),
+    )
+    unanchored = tmp_path / "unanchored.docx"
+    _write_minimal_docx(unanchored, ["Aliased paragraph."])
+    source_before = unanchored.read_bytes()
+
+    with pytest.raises(ContractError) as raised:
+        anchor_source_units(unanchored, unanchored, units)
+
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
+    assert unanchored.read_bytes() == source_before
+    assert not list(tmp_path.glob(".unanchored.docx.anchor-*.docx"))
+
+
+def test_anchoring_refuses_a_hardlink_alias_of_the_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_project(source, ["Hardlink alias paragraph."])
+    units = scan_source_units(
+        source,
+        discover_project(source, main_document="main.tex"),
+    )
+    unanchored = tmp_path / "unanchored.docx"
+    alias = tmp_path / "alias.docx"
+    _write_minimal_docx(unanchored, ["Hardlink alias paragraph."])
+    source_before = unanchored.read_bytes()
+    os.link(unanchored, alias, follow_symlinks=False)
+    assert os.path.samefile(unanchored, alias)
+
+    with pytest.raises(ContractError) as raised:
+        anchor_source_units(unanchored, alias, units)
+
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
+    assert unanchored.read_bytes() == source_before
+    assert alias.read_bytes() == source_before
+    assert not list(tmp_path.glob(".alias.docx.anchor-*.docx"))
+
+
+def test_anchoring_publication_race_preserves_the_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source, ["Racing paragraph."])
+    units = scan_source_units(
+        source,
+        discover_project(source, main_document="main.tex"),
+    )
+    unanchored = tmp_path / "unanchored.docx"
+    anchored = tmp_path / "anchored.docx"
+    _write_minimal_docx(unanchored, ["Racing paragraph."])
+    source_before = unanchored.read_bytes()
+
+    def occupy_destination(
+        staged: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        del staged, follow_symlinks
+        Path(destination).write_bytes(b"racing-destination")
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr("latex_word_review.export.os.link", occupy_destination)
+    with pytest.raises(ContractError) as raised:
+        anchor_source_units(unanchored, anchored, units)
+
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
+    assert unanchored.read_bytes() == source_before
+    assert anchored.read_bytes() == b"racing-destination"
+    assert not list(tmp_path.glob(".anchored.docx.anchor-*.docx"))

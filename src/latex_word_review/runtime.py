@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -16,6 +14,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.frozen_runtime import internal_worker_command
 from latex_word_review.hashing import digest_bytes
 
 _PASSTHROUGH_ENVIRONMENT = (
@@ -31,24 +30,37 @@ _PASSTHROUGH_ENVIRONMENT = (
 )
 _TERMINATION_GRACE_SECONDS = 5.0
 _PIPE_DRAIN_GRACE_SECONDS = 0.25
-_WINDOWS_GATED_LAUNCHER = """\
-import subprocess
-import sys
 
-if sys.stdin.buffer.read(1) != b"1":
-    raise SystemExit(125)
-try:
-    child = subprocess.Popen(
-        sys.argv[1:],
-        stdin=subprocess.DEVNULL,
-        stdout=sys.stdout.buffer,
-        stderr=sys.stderr.buffer,
-    )
-except OSError:
-    sys.stderr.buffer.write(b"contained launcher could not start command\\n")
-    raise SystemExit(126) from None
-raise SystemExit(child.wait())
-"""
+
+def _which_windows_path_only(
+    command: str,
+    *,
+    search_path: str,
+    path_extensions: str,
+) -> str | None:
+    """Search absolute PATH entries without Windows' implicit cwd fallback."""
+
+    suffixes: tuple[str, ...] = ("",)
+    if not Path(command).suffix:
+        configured = tuple(
+            item for item in path_extensions.split(os.pathsep) if item and item.startswith(".")
+        )
+        suffixes = configured or (".COM", ".EXE", ".BAT", ".CMD")
+    for raw_directory in search_path.split(os.pathsep):
+        raw_directory = raw_directory.strip().strip('"')
+        if not raw_directory:
+            continue
+        directory = Path(raw_directory)
+        if not directory.is_absolute():
+            continue
+        for suffix in suffixes:
+            candidate = directory / f"{command}{suffix}"
+            try:
+                if candidate.is_file():
+                    return os.fspath(candidate)
+            except OSError:
+                continue
+    return None
 
 
 def _resolve_windows_executable(
@@ -57,13 +69,44 @@ def _resolve_windows_executable(
     cwd: Path,
     environment: Mapping[str, str],
 ) -> str:
-    """Preserve Popen's missing-tool contract before starting the launcher."""
+    """Resolve a Windows command without implicitly trusting the tool cwd.
 
-    search_path = os.pathsep.join((os.fspath(cwd), environment.get("PATH", "")))
-    located = shutil.which(os.fspath(executable), path=search_path)
+    ``CreateProcess`` and the standard Windows command search can otherwise select an executable
+    planted in the current working directory.  A bare command is therefore
+    resolved from ``PATH`` only.  Callers that intentionally use a relative
+    executable must include a path component, which is resolved against the
+    supplied command cwd before the contained launcher is started.
+    """
+
+    requested = os.fspath(executable)
+    requested_path = Path(requested)
+    has_path_component = (
+        requested_path.is_absolute()
+        or requested_path.parent != Path(".")
+        or "/" in requested
+        or "\\" in requested
+    )
+    if has_path_component:
+        candidate = requested_path if requested_path.is_absolute() else cwd / requested_path
+        try:
+            located = os.fspath(candidate.resolve(strict=True))
+        except OSError:
+            located = None
+    else:
+        located = _which_windows_path_only(
+            requested,
+            search_path=environment.get("PATH", ""),
+            path_extensions=environment.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+        )
     if located is None:
         raise ContractError(ErrorCode.TOOL_MISSING, "tool process could not be started")
-    return os.fspath(Path(located).resolve())
+    try:
+        resolved = Path(located).resolve(strict=True)
+    except OSError as exc:
+        raise ContractError(ErrorCode.TOOL_MISSING, "tool process could not be started") from exc
+    if not resolved.is_file():
+        raise ContractError(ErrorCode.TOOL_MISSING, "tool process could not be started")
+    return os.fspath(resolved)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +138,7 @@ def minimal_environment(
         {
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
+            "NoDefaultCurrentDirectoryInExePath": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
             "TEMP": os.fspath(temp_root),
@@ -322,7 +366,8 @@ def _run_command_with_environment(
         # The trusted launcher cannot spawn the requested tool until its stdin
         # gate is released.  This closes the CreateProcess -> AssignJob race:
         # every requested process is born under the already-assigned launcher.
-        command = [sys.executable, "-I", "-S", "-c", _WINDOWS_GATED_LAUNCHER, *requested_command]
+        launcher = internal_worker_command("windows-gated-launcher", requested_command)
+        command = [launcher.executable, *launcher.arguments]
         child_stdin = subprocess.PIPE
     started = time.monotonic()
     try:

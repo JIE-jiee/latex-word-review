@@ -21,7 +21,6 @@ import math
 import os
 import re
 import shutil
-import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,8 +28,14 @@ from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, cast
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import canonical_json, sha256_bytes, sha256_canonical
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.frozen_runtime import internal_worker_command
+from latex_word_review.graphic_targets import (
+    is_dynamic_graphic_target_error,
+    normalize_static_graphic_target,
+)
 from latex_word_review.hashing import digest_bytes, digest_file, read_stable_bytes
 from latex_word_review.paths import ensure_disjoint_roots, resolve_within, validate_relative_path
 from latex_word_review.runtime import minimal_environment, run_command
@@ -79,10 +84,10 @@ _SAFE_RELATIVE_LENGTH_RE = re.compile(
     re.IGNORECASE,
 )
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-_MATERIALIZER_POLICY_VERSION: Final[str] = "pdf-png-v2"
-_CACHE_FORMAT: Final[str] = "latex-word-review-image-cache-v1"
-_WORKER_REQUEST_FORMAT: Final[str] = "latex-word-review-image-worker-request-v1"
-_WORKER_REPORT_FORMAT: Final[str] = "latex-word-review-image-worker-report-v1"
+_MATERIALIZER_POLICY_VERSION: Final[str] = "pdf-png-v3"
+_CACHE_FORMAT: Final[str] = "latex-word-review-image-cache-v2"
+_WORKER_REQUEST_FORMAT: Final[str] = "latex-word-review-image-worker-request-v2"
+_WORKER_REPORT_FORMAT: Final[str] = "latex-word-review-image-worker-report-v2"
 _WORKER_SOURCE_NAME: Final[str] = "source.pdf"
 _WORKER_REQUEST_NAME: Final[str] = "request.json"
 _WORKER_PNG_NAME: Final[str] = "rendered.png"
@@ -99,10 +104,16 @@ def _contract(condition: bool, message: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class QualityProfile:
-    """Bounded render and scan policy included in every cache key."""
+    """Bounded render and scan policy included in every cache key.
+
+    ``dpi`` is the requested upper bound.  Rendering may select a lower integer
+    DPI to stay within the pixel limits, but never below ``min_render_dpi``
+    unless the requested upper bound itself is lower.
+    """
 
     name: str = "review"
     dpi: int = 200
+    min_render_dpi: int = 96
     max_tex_bytes: int = 8 * 1024 * 1024
     max_graphics_commands: int = 4096
     max_source_bytes: int = 128 * 1024 * 1024
@@ -115,7 +126,14 @@ class QualityProfile:
 
     def __post_init__(self) -> None:
         _contract(bool(_PROFILE_NAME_RE.fullmatch(self.name)), "quality profile name is invalid")
-        _contract(72 <= self.dpi <= 600, "quality profile DPI must be in [72, 600]")
+        _contract(
+            type(self.dpi) is int and 72 <= self.dpi <= 600,
+            "quality profile DPI must be an integer in [72, 600]",
+        )
+        _contract(
+            type(self.min_render_dpi) is int and 72 <= self.min_render_dpi <= 600,
+            "minimum render DPI must be an integer in [72, 600]",
+        )
         _contract(0 < self.max_tex_bytes <= 16 * 1024 * 1024, "TeX scan limit is invalid")
         _contract(
             0 < self.max_graphics_commands <= 10_000,
@@ -136,6 +154,7 @@ class QualityProfile:
         return {
             "name": self.name,
             "dpi": self.dpi,
+            "min_render_dpi": self.min_render_dpi,
             "max_tex_bytes": self.max_tex_bytes,
             "max_graphics_commands": self.max_graphics_commands,
             "max_source_bytes": self.max_source_bytes,
@@ -437,6 +456,8 @@ class ImageCacheKey:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedImage:
+    """Verified cache result; ``dpi`` is the effective rendered DPI."""
+
     cache_key_sha256: str
     request_sha256: str
     png_path: str
@@ -869,13 +890,26 @@ def _reject_definitely_unsafe_path(value: str) -> None:
         raise ContractError(ErrorCode.PATH_TRAVERSAL, "image paths must not traverse parents")
 
 
+def _strip_exact_current_directory_prefix(value: str) -> str:
+    """Remove only exact, consecutive TeX ``./`` prefixes."""
+
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
 def _normalize_graphics_directory(value: str) -> str:
     _reject_definitely_unsafe_path(value)
     stripped = value.strip()
     if _contains_dynamic(stripped):
         raise ContractError(ErrorCode.PATH_TRAVERSAL, "dynamic graphicspath is not resolvable")
-    if stripped in {".", "./"}:
+    had_current_directory_prefix = stripped.startswith("./")
+    stripped = _strip_exact_current_directory_prefix(stripped)
+    if stripped == "." or (had_current_directory_prefix and not stripped):
         return ""
+    if not stripped:
+        raise ContractError(ErrorCode.PATH_ABSOLUTE, "root graphicspath is not allowed")
+    _reject_definitely_unsafe_path(stripped)
     normalized = stripped.rstrip("/")
     if not normalized:
         raise ContractError(ErrorCode.PATH_ABSOLUTE, "root graphicspath is not allowed")
@@ -888,15 +922,9 @@ def _join_portable(*parts: str) -> str:
 
 
 def _candidate_names(occurrence: IncludeGraphics) -> tuple[str, ...]:
-    target = occurrence.target.strip()
-    _reject_definitely_unsafe_path(target)
-    if _contains_dynamic(target):
-        raise ContractError(ErrorCode.PATH_TRAVERSAL, "dynamic image target is not resolvable")
-    normalized_target = validate_relative_path(target)
+    normalized_target = normalize_static_graphic_target(occurrence.target)
     suffix = PurePosixPath(normalized_target).suffix.casefold()
-    if suffix:
-        if suffix not in _KNOWN_FORMATS:
-            raise ContractError(ErrorCode.BACKEND_CAPABILITY_MISSING, "image format is unsupported")
+    if suffix in _KNOWN_FORMATS:
         return (normalized_target,)
 
     extensions: list[str] = []
@@ -911,7 +939,15 @@ def _candidate_names(occurrence: IncludeGraphics) -> tuple[str, ...]:
             extensions.append(normalized_extension)
     if not extensions:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "graphics extension list is empty")
-    return tuple(f"{normalized_target}{extension}" for extension in extensions)
+    candidates = [normalized_target] if suffix else []
+    candidates.extend(f"{normalized_target}{extension}" for extension in extensions)
+    return tuple(candidates)
+
+
+def _target_has_known_suffix(target: str) -> bool:
+    normalized = normalize_static_graphic_target(target)
+    suffix = PurePosixPath(normalized).suffix.casefold()
+    return suffix in _KNOWN_FORMATS
 
 
 def resolve_graphic(
@@ -928,8 +964,8 @@ def resolve_graphic(
 
     if occurrence.graphic_paths_dynamic:
         raise ContractError(ErrorCode.PATH_TRAVERSAL, "dynamic graphicspath is not resolvable")
-    target_has_suffix = bool(PurePosixPath(occurrence.target.strip()).suffix)
-    if occurrence.extensions_dynamic and not target_has_suffix:
+    target_has_known_suffix = _target_has_known_suffix(occurrence.target)
+    if occurrence.extensions_dynamic and not target_has_known_suffix:
         raise ContractError(ErrorCode.PATH_TRAVERSAL, "dynamic extension list is not resolvable")
 
     try:
@@ -1279,14 +1315,21 @@ def plan_image_request(
 ) -> ImagePlan:
     """Resolve a static PDF request or return explicit manual diagnostics."""
 
-    _reject_definitely_unsafe_path(occurrence.target)
+    try:
+        normalized_target: str | None = normalize_static_graphic_target(occurrence.target)
+    except ContractError as error:
+        if not is_dynamic_graphic_target_error(error):
+            raise
+        normalized_target = None
     for directory in occurrence.graphic_paths:
         _reject_definitely_unsafe_path(directory)
-    target_has_suffix = bool(PurePosixPath(occurrence.target.strip()).suffix)
+    target_has_known_suffix = (
+        False if normalized_target is None else _target_has_known_suffix(normalized_target)
+    )
     if (
-        occurrence.graphic_paths_dynamic
-        or (occurrence.extensions_dynamic and not target_has_suffix)
-        or _contains_dynamic(occurrence.target)
+        normalized_target is None
+        or occurrence.graphic_paths_dynamic
+        or (occurrence.extensions_dynamic and not target_has_known_suffix)
     ):
         return ImagePlan(
             None,
@@ -1510,15 +1553,96 @@ def _check_pixel_bounds(width: int, height: int, quality: QualityProfile) -> Non
         raise ContractError(ErrorCode.BACKEND_FAILED, "rendered image exceeds the pixel limit")
 
 
+def _pixel_bounds_satisfied(width: int, height: int, quality: QualityProfile) -> bool:
+    return (
+        1 <= width <= quality.max_dimension_px
+        and 1 <= height <= quality.max_dimension_px
+        and width * height <= quality.max_render_pixels
+    )
+
+
+def _effective_dpi_is_valid(effective_dpi: object, quality: QualityProfile) -> bool:
+    minimum = min(quality.dpi, quality.min_render_dpi)
+    return type(effective_dpi) is int and minimum <= effective_dpi <= quality.dpi
+
+
 def _rotated_bounds(width: int, height: int, angle_millidegrees: int) -> tuple[int, int]:
     if angle_millidegrees in {0, 180_000}:
         return width, height
     if angle_millidegrees in {90_000, 270_000}:
         return height, width
-    radians = math.radians(angle_millidegrees / 1000)
-    rotated_width = math.ceil(abs(width * math.cos(radians)) + abs(height * math.sin(radians))) + 2
-    rotated_height = math.ceil(abs(width * math.sin(radians)) + abs(height * math.cos(radians))) + 2
-    return rotated_width, rotated_height
+    # Match Pillow 12's centered ``rotate(..., expand=True)`` canvas
+    # calculation exactly so the selector chooses the highest DPI whose real
+    # output fits, rather than a lower conservative approximation.
+    radians = -math.radians(angle_millidegrees / 1000)
+    cosine = round(math.cos(radians), 15)
+    sine = round(math.sin(radians), 15)
+    center_x = width / 2
+    center_y = height / 2
+    translate_x = cosine * -center_x + sine * -center_y + center_x
+    translate_y = -sine * -center_x + cosine * -center_y + center_y
+    transformed = tuple(
+        (
+            cosine * x + sine * y + translate_x,
+            -sine * x + cosine * y + translate_y,
+        )
+        for x, y in ((0, 0), (width, 0), (width, height), (0, height))
+    )
+    horizontal = tuple(point[0] for point in transformed)
+    vertical = tuple(point[1] for point in transformed)
+    return (
+        math.ceil(max(horizontal)) - math.floor(min(horizontal)),
+        math.ceil(max(vertical)) - math.floor(min(vertical)),
+    )
+
+
+def _dimensions_at_dpi(
+    page_width: float,
+    page_height: float,
+    crop: tuple[float, float, float, float],
+    angle_millidegrees: int,
+    dpi: int,
+) -> tuple[int, int, int, int]:
+    scale = dpi / 72
+    left, bottom, right, top = crop
+    width_px = math.ceil(page_width * scale) - math.ceil(left * scale) - math.ceil(right * scale)
+    height_px = math.ceil(page_height * scale) - math.ceil(bottom * scale) - math.ceil(top * scale)
+    rotated_width, rotated_height = _rotated_bounds(
+        width_px,
+        height_px,
+        angle_millidegrees,
+    )
+    return width_px, height_px, rotated_width, rotated_height
+
+
+def _select_effective_dpi(
+    page_width: float,
+    page_height: float,
+    crop: tuple[float, float, float, float],
+    angle_millidegrees: int,
+    quality: QualityProfile,
+) -> tuple[int, int, int]:
+    """Choose the highest bounded integer DPI without exceeding the request."""
+
+    minimum = min(quality.dpi, quality.min_render_dpi)
+    for effective_dpi in range(quality.dpi, minimum - 1, -1):
+        width_px, height_px, rotated_width, rotated_height = _dimensions_at_dpi(
+            page_width,
+            page_height,
+            crop,
+            angle_millidegrees,
+            effective_dpi,
+        )
+        if _pixel_bounds_satisfied(
+            width_px,
+            height_px,
+            quality,
+        ) and _pixel_bounds_satisfied(rotated_width, rotated_height, quality):
+            return effective_dpi, width_px, height_px
+    raise ContractError(
+        ErrorCode.BACKEND_FAILED,
+        "PDF page cannot fit render limits at the minimum permitted DPI",
+    )
 
 
 def _rotate_image(image: Any, angle_millidegrees: int, image_module: Any) -> Any:
@@ -1545,14 +1669,22 @@ def _pixel_sha256(image: Any) -> str:
     return sha256_bytes(header + image.tobytes())
 
 
-def _encode_canonical_png(image: Any, quality: QualityProfile) -> bytes:
+def _encode_canonical_png(
+    image: Any,
+    quality: QualityProfile,
+    effective_dpi: int,
+) -> bytes:
+    _contract(
+        _effective_dpi_is_valid(effective_dpi, quality),
+        "effective render DPI is outside the quality profile",
+    )
     output = io.BytesIO()
     image.save(
         output,
         format="PNG",
         compress_level=9,
         optimize=False,
-        dpi=(quality.dpi, quality.dpi),
+        dpi=(effective_dpi, effective_dpi),
     )
     data = output.getvalue()
     if len(data) > quality.max_png_bytes:
@@ -1560,15 +1692,37 @@ def _encode_canonical_png(image: Any, quality: QualityProfile) -> bytes:
     return data
 
 
-def _decode_png(data: bytes, quality: QualityProfile, image_module: Any) -> Any:
+def _decode_png(
+    data: bytes,
+    quality: QualityProfile,
+    image_module: Any,
+    effective_dpi: int,
+) -> Any:
     if not data or len(data) > quality.max_png_bytes:
         raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "cached PNG size is invalid")
+    if not _effective_dpi_is_valid(effective_dpi, quality):
+        raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "PNG DPI is outside the request")
     try:
         with image_module.open(io.BytesIO(data)) as opened:
             if opened.format != "PNG":
                 raise ContractError(
                     ErrorCode.HASH_INTEGRITY_MISMATCH,
                     "cache entry is not a PNG",
+                )
+            metadata_dpi = opened.info.get("dpi")
+            if (
+                not isinstance(metadata_dpi, tuple)
+                or len(metadata_dpi) != 2
+                or any(
+                    not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or abs(float(value) - effective_dpi) > 0.05
+                    for value in metadata_dpi
+                )
+            ):
+                raise ContractError(
+                    ErrorCode.HASH_INTEGRITY_MISMATCH,
+                    "PNG resolution metadata does not match the effective DPI",
                 )
             width, height = opened.size
             _check_pixel_bounds(int(width), int(height), quality)
@@ -1586,7 +1740,7 @@ def _decode_png(data: bytes, quality: QualityProfile, image_module: Any) -> Any:
 
 def _render_pdf(
     source_bytes: bytes, request: ImageRequest, runtime: _PdfRuntime
-) -> tuple[bytes, int, int, str]:
+) -> tuple[bytes, int, int, str, int]:
     try:
         document = runtime.pdfium.PdfDocument(source_bytes, password=None)
     except Exception as exc:
@@ -1624,17 +1778,21 @@ def _render_pdf(
         ):
             raise ContractError(ErrorCode.BACKEND_FAILED, "PDF page geometry is invalid")
 
-        crop = tuple(value / _MICRO_BP for value in request.trim_micro_bp)
+        crop = cast(
+            tuple[float, float, float, float],
+            tuple(value / _MICRO_BP for value in request.trim_micro_bp),
+        )
         left, bottom, right, top = crop
         if left + right >= page_width or bottom + top >= page_height:
             raise ContractError(ErrorCode.BACKEND_FAILED, "trim removes the entire PDF page")
-        scale = request.quality.dpi / 72
-        width_px = (
-            math.ceil(page_width * scale) - math.ceil(left * scale) - math.ceil(right * scale)
+        effective_dpi, width_px, height_px = _select_effective_dpi(
+            page_width,
+            page_height,
+            crop,
+            request.angle_millidegrees,
+            request.quality,
         )
-        height_px = (
-            math.ceil(page_height * scale) - math.ceil(bottom * scale) - math.ceil(top * scale)
-        )
+        scale = effective_dpi / 72
         _check_pixel_bounds(width_px, height_px, request.quality)
         rotated_width, rotated_height = _rotated_bounds(
             width_px,
@@ -1669,8 +1827,13 @@ def _render_pdf(
         final_width, final_height = (int(value) for value in final_image.size)
         _check_pixel_bounds(final_width, final_height, request.quality)
         pixel_sha256 = _pixel_sha256(final_image)
-        png_bytes = _encode_canonical_png(final_image, request.quality)
-        decoded = _decode_png(png_bytes, request.quality, runtime.image_module)
+        png_bytes = _encode_canonical_png(final_image, request.quality, effective_dpi)
+        decoded = _decode_png(
+            png_bytes,
+            request.quality,
+            runtime.image_module,
+            effective_dpi,
+        )
         try:
             if decoded.size != final_image.size or _pixel_sha256(decoded) != pixel_sha256:
                 raise ContractError(
@@ -1679,7 +1842,7 @@ def _render_pdf(
                 )
         finally:
             decoded.close()
-        return png_bytes, final_width, final_height, pixel_sha256
+        return png_bytes, final_width, final_height, pixel_sha256, effective_dpi
     except ContractError:
         raise
     except Exception as exc:
@@ -1792,6 +1955,7 @@ def _quality_from_dict(value: object) -> QualityProfile:
     expected = {
         "name",
         "dpi",
+        "min_render_dpi",
         "max_tex_bytes",
         "max_graphics_commands",
         "max_source_bytes",
@@ -1802,6 +1966,11 @@ def _quality_from_dict(value: object) -> QualityProfile:
         "max_png_bytes",
         "render_timeout_s",
     }
+    if isinstance(value, dict) and set(value) == expected - {"min_render_dpi"}:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "legacy image cache requests are unsupported; regenerate the image overlay",
+        )
     if not isinstance(value, dict) or set(value) != expected:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "worker quality profile is invalid")
     name = value["name"]
@@ -1810,6 +1979,10 @@ def _quality_from_dict(value: object) -> QualityProfile:
     return QualityProfile(
         name=name,
         dpi=_strict_int(value["dpi"], label="worker DPI"),
+        min_render_dpi=_strict_int(
+            value["min_render_dpi"],
+            label="worker minimum render DPI",
+        ),
         max_tex_bytes=_strict_int(value["max_tex_bytes"], label="worker TeX limit"),
         max_graphics_commands=_strict_int(
             value["max_graphics_commands"],
@@ -1991,7 +2164,7 @@ def _verify_worker_output(
     request: ImageRequest,
     renderer: RendererIdentity,
     image_module: Any,
-) -> tuple[bytes, int, int, str]:
+) -> tuple[bytes, int, int, str, int]:
     report_path = resolve_within(worker_root, _WORKER_REPORT_NAME)
     png_path = resolve_within(worker_root, _WORKER_PNG_NAME)
     report = _read_canonical_object(
@@ -2033,7 +2206,7 @@ def _verify_worker_output(
         output.get("path") != _WORKER_PNG_NAME
         or output.get("media_type") != "image/png"
         or output.get("mode") != "RGB"
-        or output.get("dpi") != request.quality.dpi
+        or not _effective_dpi_is_valid(output.get("dpi"), request.quality)
         or type(output.get("size_bytes")) is not int
         or type(output.get("width_px")) is not int
         or type(output.get("height_px")) is not int
@@ -2046,6 +2219,7 @@ def _verify_worker_output(
             ErrorCode.HASH_INTEGRITY_MISMATCH,
             "image worker output values are invalid",
         )
+    effective_dpi = cast(int, output["dpi"])
     png_bytes = read_stable_bytes(png_path, max_bytes=request.quality.max_png_bytes)
     png_digest = digest_bytes(png_bytes)
     if png_digest.size_bytes != output["size_bytes"] or png_digest.sha256 != output["sha256"]:
@@ -2053,7 +2227,12 @@ def _verify_worker_output(
             ErrorCode.HASH_INTEGRITY_MISMATCH,
             "image worker PNG digest does not match",
         )
-    decoded = _decode_png(png_bytes, request.quality, image_module)
+    decoded = _decode_png(
+        png_bytes,
+        request.quality,
+        image_module,
+        effective_dpi,
+    )
     try:
         width_px, height_px = (int(value) for value in decoded.size)
         pixel_sha256 = _pixel_sha256(decoded)
@@ -2061,7 +2240,7 @@ def _verify_worker_output(
             width_px != output["width_px"]
             or height_px != output["height_px"]
             or pixel_sha256 != output["pixel_sha256"]
-            or _encode_canonical_png(decoded, request.quality) != png_bytes
+            or _encode_canonical_png(decoded, request.quality, effective_dpi) != png_bytes
         ):
             raise ContractError(
                 ErrorCode.HASH_INTEGRITY_MISMATCH,
@@ -2069,7 +2248,7 @@ def _verify_worker_output(
             )
     finally:
         decoded.close()
-    return png_bytes, width_px, height_px, pixel_sha256
+    return png_bytes, width_px, height_px, pixel_sha256, effective_dpi
 
 
 def _run_pdf_worker(
@@ -2078,7 +2257,7 @@ def _run_pdf_worker(
     renderer: RendererIdentity,
     image_module: Any,
     cache_root: Path,
-) -> tuple[bytes, int, int, str]:
+) -> tuple[bytes, int, int, str, int]:
     prefix = ".pdf-render-worker-"
     try:
         worker_root = Path(tempfile.mkdtemp(prefix=prefix, dir=cache_root))
@@ -2091,11 +2270,9 @@ def _run_pdf_worker(
         _write_exclusive(worker_root / _WORKER_SOURCE_NAME, source_bytes)
         request_bytes = canonical_json(_worker_request_document(request, renderer)) + b"\n"
         _write_exclusive(worker_root / _WORKER_REQUEST_NAME, request_bytes)
-        result = run_command(
-            sys.executable,
+        worker = internal_worker_command(
+            "image-render",
             (
-                "-m",
-                "latex_word_review._image_worker",
                 "--source",
                 _WORKER_SOURCE_NAME,
                 "--request",
@@ -2105,6 +2282,10 @@ def _run_pdf_worker(
                 "--report",
                 _WORKER_REPORT_NAME,
             ),
+        )
+        result = run_command(
+            worker.executable,
+            worker.arguments,
             cwd=worker_root,
             timeout_s=float(request.quality.render_timeout_s),
             max_output_bytes=64 * 1024,
@@ -2143,7 +2324,12 @@ def _cache_manifest(
     pixel_sha256: str,
     width_px: int,
     height_px: int,
+    effective_dpi: int,
 ) -> dict[str, object]:
+    _contract(
+        _effective_dpi_is_valid(effective_dpi, request.quality),
+        "effective render DPI is outside the cache request",
+    )
     return {
         "format": _CACHE_FORMAT,
         "cache_key": key.as_dict(),
@@ -2159,7 +2345,7 @@ def _cache_manifest(
             "pixel_sha256": pixel_sha256,
             "width_px": width_px,
             "height_px": height_px,
-            "dpi": request.quality.dpi,
+            "dpi": effective_dpi,
         },
     }
 
@@ -2169,9 +2355,10 @@ def _verify_cache_entry(
     request: ImageRequest,
     key: ImageCacheKey,
     renderer: RendererIdentity,
-    image_module: Any,
+    image_module: Any | None,
     *,
     reused: bool,
+    verify_pixels: bool = True,
 ) -> MaterializedImage:
     try:
         if _is_link_or_junction(entry) or not entry.is_dir():
@@ -2229,7 +2416,7 @@ def _verify_cache_entry(
         output.get("path") != _CACHE_PNG_NAME
         or output.get("media_type") != "image/png"
         or output.get("mode") != "RGB"
-        or output.get("dpi") != request.quality.dpi
+        or not _effective_dpi_is_valid(output.get("dpi"), request.quality)
         or type(output.get("size_bytes")) is not int
         or type(output.get("width_px")) is not int
         or type(output.get("height_px")) is not int
@@ -2239,24 +2426,59 @@ def _verify_cache_entry(
         or not _HASH_RE.fullmatch(str(output.get("pixel_sha256")))
     ):
         raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "cache output values are invalid")
+    width_px = cast(int, output["width_px"])
+    height_px = cast(int, output["height_px"])
+    size_bytes = cast(int, output["size_bytes"])
+    if (
+        size_bytes <= 0
+        or size_bytes > request.quality.max_png_bytes
+        or width_px <= 0
+        or height_px <= 0
+        or width_px > request.quality.max_dimension_px
+        or height_px > request.quality.max_dimension_px
+        or width_px * height_px > request.quality.max_render_pixels
+    ):
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            "cache output dimensions are invalid",
+        )
+    effective_dpi = cast(int, output["dpi"])
     png_bytes = read_stable_bytes(png_path, max_bytes=request.quality.max_png_bytes)
     png_digest = digest_bytes(png_bytes)
-    if png_digest.size_bytes != output["size_bytes"] or png_digest.sha256 != output["sha256"]:
+    if png_digest.size_bytes != size_bytes or png_digest.sha256 != output["sha256"]:
         raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "cached PNG bytes were modified")
-    decoded = _decode_png(png_bytes, request.quality, image_module)
-    try:
-        width_px, height_px = (int(value) for value in decoded.size)
-        pixel_sha256 = _pixel_sha256(decoded)
-        if (
-            width_px != output["width_px"]
-            or height_px != output["height_px"]
-            or pixel_sha256 != output["pixel_sha256"]
-        ):
-            raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "cached pixels were modified")
-        if _encode_canonical_png(decoded, request.quality) != png_bytes:
-            raise ContractError(ErrorCode.HASH_INTEGRITY_MISMATCH, "cached PNG is not canonical")
-    finally:
-        decoded.close()
+    pixel_sha256 = cast(str, output["pixel_sha256"])
+    if verify_pixels:
+        if image_module is None:  # pragma: no cover - internal call invariant
+            raise ContractError(
+                ErrorCode.INTERNAL_INVARIANT,
+                "strong cache verification requires the image runtime",
+            )
+        decoded = _decode_png(
+            png_bytes,
+            request.quality,
+            image_module,
+            effective_dpi,
+        )
+        try:
+            decoded_width, decoded_height = (int(value) for value in decoded.size)
+            decoded_pixel_sha256 = _pixel_sha256(decoded)
+            if (
+                decoded_width != width_px
+                or decoded_height != height_px
+                or decoded_pixel_sha256 != pixel_sha256
+            ):
+                raise ContractError(
+                    ErrorCode.HASH_INTEGRITY_MISMATCH,
+                    "cached pixels were modified",
+                )
+            if _encode_canonical_png(decoded, request.quality, effective_dpi) != png_bytes:
+                raise ContractError(
+                    ErrorCode.HASH_INTEGRITY_MISMATCH,
+                    "cached PNG is not canonical",
+                )
+        finally:
+            decoded.close()
 
     entry_name = key.sha256.removeprefix("sha256:")
     return MaterializedImage(
@@ -2268,9 +2490,86 @@ def _verify_cache_entry(
         pixel_sha256=pixel_sha256,
         width_px=width_px,
         height_px=height_px,
-        dpi=request.quality.dpi,
+        dpi=effective_dpi,
         renderer=renderer,
         reused=reused,
+    )
+
+
+class SealedImageCacheVerifier:
+    """Fast verifier for cache entries already bound into sealed export evidence.
+
+    Cache creation and reuse always use :func:`verify_image_cache_entry`'s
+    strong pixel/canonical-PNG verification. Once an overlay manifest has
+    bound those verified pixel properties and the exact PNG SHA-256, workflow
+    reloads only need to re-check the installed renderer, the complete cache
+    manifest/request/key bindings, the exact directory contents, and the PNG
+    byte size/SHA-256. Matching bytes necessarily retain the pixel evidence
+    established at publication, so decoding and re-encoding on every status
+    read adds no integrity signal.
+
+    One instance validates the installed renderer once for one workflow
+    inspection. It does not cache file evidence: every ``verify`` call re-reads
+    the manifest and PNG bytes, so later mutations remain detectable.
+    """
+
+    __slots__ = ("_renderer",)
+
+    def __init__(self, renderer: Mapping[str, Any]) -> None:
+        declared_renderer = _renderer_identity_from_dict(dict(renderer))
+        current_renderer = _load_renderer_identity()
+        if declared_renderer != current_renderer:
+            raise ContractError(
+                ErrorCode.HASH_INTEGRITY_MISMATCH,
+                "cached renderer identity differs from the installed runtime",
+            )
+        self._renderer = current_renderer
+
+    def verify(
+        self,
+        entry: Path,
+        *,
+        request: Mapping[str, Any],
+        renderer: Mapping[str, Any],
+    ) -> MaterializedImage:
+        """Verify one sealed entry without decoding or re-encoding its PNG."""
+
+        parsed_request = _image_request_from_dict(dict(request))
+        declared_renderer = _renderer_identity_from_dict(dict(renderer))
+        if declared_renderer != self._renderer:
+            raise ContractError(
+                ErrorCode.HASH_INTEGRITY_MISMATCH,
+                "cached renderer identity differs within sealed evidence",
+            )
+        key = image_cache_key(parsed_request, self._renderer)
+        if entry.name != key.sha256.removeprefix("sha256:"):
+            raise ContractError(
+                ErrorCode.HASH_INTEGRITY_MISMATCH,
+                "cache entry path does not match its content-addressed key",
+            )
+        return _verify_cache_entry(
+            entry,
+            parsed_request,
+            key,
+            self._renderer,
+            None,
+            reused=True,
+            verify_pixels=False,
+        )
+
+
+def verify_sealed_image_cache_entry(
+    entry: Path,
+    *,
+    request: Mapping[str, Any],
+    renderer: Mapping[str, Any],
+) -> MaterializedImage:
+    """One-shot fast verification of an entry bound into sealed evidence."""
+
+    return SealedImageCacheVerifier(renderer).verify(
+        entry,
+        request=request,
+        renderer=renderer,
     )
 
 
@@ -2280,12 +2579,12 @@ def verify_image_cache_entry(
     request: Mapping[str, Any],
     renderer: Mapping[str, Any],
 ) -> MaterializedImage:
-    """Strictly re-verify one published cache entry from sealed evidence.
+    """Strongly re-verify one published cache entry, including pixels.
 
-    This is the shared read-only verification boundary for higher-level
-    workflows.  It reconstructs the exact request and renderer identities,
-    binds the content-addressed directory name, and then applies the same
-    canonical manifest and PNG/pixel checks used when the cache is created.
+    Cache creation and reuse call this equivalent boundary. Higher-level
+    sealed workflow reloads use :class:`SealedImageCacheVerifier` only after
+    the strong result and its exact PNG SHA-256 have been bound into the
+    immutable overlay evidence.
     """
 
     parsed_request = _image_request_from_dict(dict(request))
@@ -2356,7 +2655,7 @@ def materialize_image(
             reused=True,
         )
 
-    png_bytes, width_px, height_px, pixel_sha256 = _run_pdf_worker(
+    png_bytes, width_px, height_px, pixel_sha256, effective_dpi = _run_pdf_worker(
         source_bytes,
         request,
         renderer,
@@ -2370,6 +2669,7 @@ def materialize_image(
         pixel_sha256=pixel_sha256,
         width_px=width_px,
         height_px=height_px,
+        effective_dpi=effective_dpi,
     )
     # Keep the owned stage name short enough for deeply nested Windows workflow
     # roots; the final cache entry still carries the full content-addressed key.
@@ -2382,7 +2682,7 @@ def materialize_image(
         _write_exclusive(stage / _CACHE_PNG_NAME, png_bytes)
         _write_exclusive(stage / _CACHE_MANIFEST_NAME, canonical_json(manifest) + b"\n")
         try:
-            stage.rename(entry)
+            publish_new_directory(stage, entry)
         except OSError as exc:
             if entry.exists() and entry.is_dir():
                 _remove_owned_stage(stage, cache, prefix)
@@ -2426,6 +2726,7 @@ __all__ = [
     "QualityProfile",
     "RendererIdentity",
     "ResolvedGraphic",
+    "SealedImageCacheVerifier",
     "image_cache_key",
     "materialize_image",
     "plan_image_request",
@@ -2433,4 +2734,5 @@ __all__ = [
     "scan_graphics_source",
     "scan_graphics_text",
     "verify_image_cache_entry",
+    "verify_sealed_image_cache_entry",
 ]

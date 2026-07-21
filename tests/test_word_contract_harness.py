@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "run_word_contract_qa.ps1"
+FIELD_SCRIPT = REPO_ROOT / "src" / "latex_word_review" / "assets" / "finalize_review_fields.ps1"
 PUBLIC_BASELINE = (
     REPO_ROOT / "tests" / "fixtures" / "e0-minimal-paper" / "base" / "review-base.docx"
 )
@@ -97,10 +98,47 @@ def test_script_has_explicit_copy_only_and_com_cleanup_contract() -> None:
     assert "$MsoAutomationSecurityForceDisable = 3" in text
     assert "$word.AutomationSecurity = $MsoAutomationSecurityForceDisable" in text
     assert "$word.DisplayAlerts = $WdAlertsNone" in text
-    assert "$word.Quit($WdDoNotSaveChanges)" in text
     assert ".Close($WdDoNotSaveChanges)" in text
-    assert ".SaveAs2(" in text
+    save_as_call = (
+        "$Document.SaveAs2(\n"
+        "        $Destination,\n"
+        "        $WdFormatXmlDocument,\n"
+        "        [System.Type]::Missing,\n"
+        "        [System.Type]::Missing,\n"
+        "        $false\n"
+        "    )"
+    )
+    assert save_as_call in text
     assert ".Save(" not in text
+
+    snapshot_index = text.index("$winWordBefore = @(Get-WinWordProcessSnapshot)")
+    create_index = text.index("$word = New-Object -ComObject Word.Application")
+    identity_index = text.index(
+        "$wordIdentity = Wait-ForOwnedWinWordIdentity -BeforeSnapshot $winWordBefore"
+    )
+    confirmed_index = text.index("$wordOwnershipConfirmed = $true")
+    automation_security_index = text.index(
+        "$word.AutomationSecurity = $MsoAutomationSecurityForceDisable"
+    )
+    assert snapshot_index < create_index < identity_index < confirmed_index
+    assert confirmed_index < automation_security_index
+    assert "started_filetime_utc" in text
+    assert "StartTime.ToUniversalTime().ToFileTimeUtc()" in text
+    assert "More than one new WINWORD process appeared; ownership is ambiguous." in text
+
+    owned_close = text[
+        text.index("function Close-OwnedWordApplication") : text.index(
+            "function Close-WordDocument"
+        )
+    ]
+    assert "if (-not $OwnershipConfirmed -or $null -eq $Identity)" in owned_close
+    assert "Open-ExactWinWordProcess -Identity $Identity" in owned_close
+    assert "$Word.Quit($WdDoNotSaveChanges)" in owned_close
+    assert text.count(".Quit($WdDoNotSaveChanges)") == 1
+    assert "Stop-ExactOwnedWinWordProcess -Identity $Identity" in owned_close
+    assert "taskkill" not in text.casefold()
+    assert "Stop-Process" not in text
+
     assert "$baselineHashAfter -cne $baselineHashBefore" in text
     assert "New-Object System.Text.UTF8Encoding($false)" in text
     assert "[System.IO.File]::WriteAllText" in text
@@ -108,6 +146,21 @@ def test_script_has_explicit_copy_only_and_com_cleanup_contract() -> None:
     assert "for ($attempt = 1; $attempt -le 30; $attempt++)" in text
     assert "Start-Sleep -Milliseconds 100" in text
     assert not re.search(r"(?m)^\s*Move-Item\b", text)
+
+    assert '$ExtendedPathPrefix = "\\\\?\\"' in text
+    assert '$DevicePathPrefix = "\\\\.\\"' in text
+    assert '$NtPathPrefix = "\\??\\"' in text
+    assert "Get-NormalWin32FullPath" in text
+    assert "ordinary Win32 path" in text
+    assert "$documents = $Word.Documents" in text
+    assert "Release-ComObject -ComObject $documents" in text
+    assert "function Get-WordCollectionCount" in text
+    assert "Release-ComObject -ComObject $collection" in text
+    assert "$comments = $Document.Comments" in text
+    assert "Release-ComObject -ComObject $comments" in text
+    assert "$bookmarks = $Document.Bookmarks" in text
+    assert text.count(".ShowHidden = $true") == 2
+    assert "Release-ComObject -ComObject $bookmarks" in text
 
     for case_id in (
         "roundtrip_unchanged",
@@ -137,13 +190,18 @@ def test_script_has_explicit_copy_only_and_com_cleanup_contract() -> None:
     assert "samples/private" not in text
 
 
-def test_script_parses_in_powershell() -> None:
+@pytest.mark.parametrize(
+    "script",
+    (SCRIPT, FIELD_SCRIPT),
+    ids=("contract-harness", "field-finalizer"),
+)
+def test_script_parses_in_powershell(script: Path) -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell 5.1 or 7 is not available")
 
     environment = os.environ.copy()
-    environment["LWR_SCRIPT_TO_PARSE"] = str(SCRIPT)
+    environment["LWR_SCRIPT_TO_PARSE"] = str(script)
     command = (
         "$tokens = $null; $errors = $null; "
         "[void] [System.Management.Automation.Language.Parser]::ParseFile("
@@ -174,6 +232,28 @@ def test_existing_output_is_rejected_without_launching_word(tmp_path: Path) -> N
     assert result.returncode != 0
     assert marker.read_text(encoding="utf-8") == "preserve"
     assert sorted(output.iterdir()) == [marker]
+    assert not list(tmp_path.glob(".lwr-word-contract-*.stage"))
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        r"\\?\C:\lwr-does-not-exist\baseline.docx",
+        r"\\.\C:\lwr-does-not-exist\baseline.docx",
+        r"\??\C:\lwr-does-not-exist\baseline.docx",
+    ),
+)
+def test_device_paths_are_rejected_without_launching_word(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    output = tmp_path / "must-not-be-created"
+
+    result = _run_harness(Path(unsafe_path), output, timeout=30)
+
+    assert result.returncode != 0
+    assert "ordinary Win32 path" in result.stderr
+    assert not output.exists()
     assert not list(tmp_path.glob(".lwr-word-contract-*.stage"))
 
 

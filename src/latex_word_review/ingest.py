@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import canonical_json, sha256_bytes
 from latex_word_review.contracts import load_contract_json
 from latex_word_review.errors import ContractError, ErrorCode
@@ -336,7 +337,7 @@ def archive_returned_docx(
         _make_read_only(staged / ARCHIVE_DOCX_NAME)
         _make_read_only(staged / ARCHIVE_MANIFEST_NAME)
         try:
-            staged.rename(destination)
+            publish_new_directory(staged, destination)
         except OSError as exc:
             raise ContractError(
                 ErrorCode.HASH_RETURNED_ORIGINAL_MISMATCH,

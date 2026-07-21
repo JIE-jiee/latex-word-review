@@ -13,15 +13,17 @@ import difflib
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, cast
 
 from latex_word_review.__about__ import __version__
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import (
     canonical_json,
     sha256_bytes,
@@ -46,6 +48,9 @@ _SHELL_ESCAPE_PATTERNS: Final = (
     re.compile(rb"\\(?:usepackage|RequirePackage)(?:\[[^]]*\])?\{minted\}", re.IGNORECASE),
     re.compile(rb"\\begin\{minted\}", re.IGNORECASE),
 )
+_INPUT_COMMAND_RE: Final = re.compile(r"\\(input|include)\s*\{([^{}]+)\}")
+_LATEXDIFF_USE_RE: Final = re.compile(r"(?:\\DIF(?:add|del)(?:FL)?(?:begin|end)?\b|%DIF\s+[<>])")
+_MAX_LATEXDIFF_INCLUDE_DEPTH: Final = 256
 _WINDOWS_ABSOLUTE_RE: Final = re.compile(r"(?<![\w.])[A-Za-z]:[\\/][^\s\"'<>]*")
 _POSIX_ABSOLUTE_RE: Final = re.compile(r"(?<![\w.])/(?:[^\s\"'<>]+)")
 _MIKTEX_ROOT_ENVIRONMENT: Final = (
@@ -53,6 +58,8 @@ _MIKTEX_ROOT_ENVIRONMENT: Final = (
     "MIKTEX_USERDATA",
     "MIKTEX_USERINSTALL",
 )
+_MIKTEX_CONFIG_RELATIVE: Final = Path("miktex") / "config"
+_MIKTEX_INSTALL_PROBE_LIMIT: Final = 64 * 1024 * 1024
 
 VerificationStatus = Literal["pass", "fail", "blocked"]
 CommandStatus = Literal["pass", "fail", "blocked", "not_run"]
@@ -127,6 +134,31 @@ class _ToolRun:
             "output_sha256": None if result is None else result.output_sha256,
             "error_code": self.error_code,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedExternalTool:
+    executable: str | Path
+    path: Path | None
+    miktex_install_root: Path | None
+    miktex_bin_root: Path | None
+
+
+@dataclass(frozen=True, slots=True)
+class _InstallationFileState:
+    path: Path
+    digest: FileDigest | None
+    mtime_ns: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TexToolchain:
+    latexmk_executable: str | Path
+    latexdiff_executable: str | Path
+    temp_root: Path
+    environment_additions: Mapping[str, str]
+    latexmk_arguments: tuple[str, ...]
+    installation_state: tuple[_InstallationFileState, ...]
 
 
 def _utc_now() -> str:
@@ -574,6 +606,174 @@ def _reconcile(
     }
 
 
+def _mask_tex_comments(text: str) -> str:
+    """Mask ordinary TeX line comments without changing string offsets."""
+
+    masked = list(text)
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        comment_at: int | None = None
+        for index, character in enumerate(line):
+            if character != "%":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                comment_at = index
+                break
+        if comment_at is not None:
+            for index in range(comment_at, len(line)):
+                if line[index] not in "\r\n":
+                    masked[offset + index] = " "
+        offset += len(line)
+    return "".join(masked)
+
+
+def _input_reference_candidates(reference: str) -> tuple[str, ...]:
+    raw = reference.strip()
+    if not raw or any(token in raw for token in ("\\", "#", "$", "~", "{", "}")):
+        return ()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if not raw:
+        return ()
+    try:
+        normalized = validate_relative_path(raw)
+        if PurePosixPath(normalized).suffix:
+            return (normalized,)
+        return (validate_relative_path(f"{normalized}.tex"),)
+    except ContractError:
+        return ()
+
+
+def _flatten_latexdiff_source(
+    tree: _SourceTree,
+    source_manifest: Mapping[str, Any],
+    main_document: str,
+    *,
+    max_bytes: int,
+) -> bytes:
+    """Expand sealed static ``input/include`` edges before invoking latexdiff.
+
+    MiKTeX's Perl-based ``latexdiff --flatten`` cannot reliably resolve files
+    when its Windows working directory contains non-ASCII characters.  The
+    verifier already owns a bounded, immutable source tree and a sealed static
+    dependency graph, so expanding only those proven edges in memory avoids
+    handing path discovery back to Perl.  Dynamic or unresolved commands stay
+    untouched and therefore cannot escape the verified source closure.
+    """
+
+    if max_bytes <= 0:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "latexdiff input limit is invalid")
+    selected_main = validate_relative_path(main_document)
+    if selected_main not in tree.files:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "latexdiff main document is missing")
+
+    payload = cast("Mapping[str, Any]", source_manifest["payload"])
+    dependency_edges = cast("Sequence[Mapping[str, Any]]", payload["dependency_edges"])
+    outgoing: dict[tuple[str, str], set[str]] = {}
+    for edge in dependency_edges:
+        kind = cast("str", edge["kind"])
+        if kind not in {"input", "include"}:
+            continue
+        source = validate_relative_path(cast("str", edge["from"]))
+        target = validate_relative_path(cast("str", edge["to"]))
+        if source not in tree.files or target not in tree.files:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "latexdiff dependency edge is outside the sealed source tree",
+            )
+        outgoing.setdefault((source, kind), set()).add(target)
+
+    cache: dict[str, tuple[str, int]] = {}
+
+    def expand(path: str, stack: tuple[str, ...]) -> tuple[str, int]:
+        cached = cache.get(path)
+        if cached is not None:
+            return cached
+        if path in stack or len(stack) >= _MAX_LATEXDIFF_INCLUDE_DEPTH:
+            raise ContractError(
+                ErrorCode.VERIFY_COMPILE_FAILED,
+                "latexdiff static include graph is cyclic or too deep",
+            )
+        try:
+            text = tree.files[path].decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ContractError(
+                ErrorCode.VERIFY_COMPILE_FAILED,
+                "latexdiff source input is not valid UTF-8",
+            ) from exc
+
+        visible = _mask_tex_comments(text)
+        parts: list[str] = []
+        byte_count = 0
+        cursor = 0
+
+        def append(piece: str, piece_bytes: int | None = None) -> None:
+            nonlocal byte_count
+            encoded_size = len(piece.encode("utf-8")) if piece_bytes is None else piece_bytes
+            if byte_count + encoded_size > max_bytes:
+                raise ContractError(
+                    ErrorCode.VERIFY_COMPILE_FAILED,
+                    "flattened latexdiff input exceeds the configured output limit",
+                )
+            parts.append(piece)
+            byte_count += encoded_size
+
+        for match in _INPUT_COMMAND_RE.finditer(visible):
+            preceding_backslashes = 0
+            preceding_at = match.start() - 1
+            while preceding_at >= 0 and visible[preceding_at] == "\\":
+                preceding_backslashes += 1
+                preceding_at -= 1
+            if preceding_backslashes % 2 == 1:
+                continue
+
+            kind = match.group(1)
+            candidates = {item.casefold() for item in _input_reference_candidates(match.group(2))}
+            targets = {
+                target
+                for target in outgoing.get((path, kind), set())
+                if target.casefold() in candidates
+            }
+            if not targets:
+                continue
+            if len(targets) != 1:
+                raise ContractError(
+                    ErrorCode.SCHEMA_INVALID,
+                    "latexdiff input command maps to multiple sealed dependencies",
+                )
+            target = next(iter(targets))
+            expanded, expanded_bytes = expand(target, (*stack, path))
+            append(text[cursor : match.start()])
+            append(expanded, expanded_bytes)
+            cursor = match.end()
+        append(text[cursor:])
+        flattened = "".join(parts)
+        result = (flattened, byte_count)
+        cache[path] = result
+        return result
+
+    flattened, _ = expand(selected_main, ())
+    return flattened.encode("utf-8")
+
+
+def _latexdiff_has_change_markers(data: bytes) -> bool:
+    """Return true only for actual latexdiff uses, not its macro definitions."""
+
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    return any(
+        "%DIF PREAMBLE" not in line and _LATEXDIFF_USE_RE.search(line) is not None
+        for line in text.splitlines()
+    )
+
+
 def _reject_shell_escape_sources(tree: _SourceTree) -> None:
     for path, data in tree.files.items():
         if tree.roles[path] != "tex":
@@ -606,6 +806,490 @@ def _miktex_latexmk_arguments(environment: Mapping[str, str]) -> tuple[str, ...]
     if all(environment.get(name) for name in _MIKTEX_ROOT_ENVIRONMENT):
         return ("-disable-installer",)
     return ()
+
+
+def _safe_windows_search_path(value: str) -> str:
+    """Drop empty and relative PATH entries before resolving a top-level tool."""
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    for raw_entry in value.split(os.pathsep):
+        raw_entry = raw_entry.strip().strip('"')
+        if not raw_entry:
+            continue
+        candidate = Path(raw_entry)
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_dir():
+            continue
+        key = os.path.normcase(os.fspath(resolved))
+        if key not in seen:
+            seen.add(key)
+            entries.append(os.fspath(resolved))
+    return os.pathsep.join(entries)
+
+
+def _common_miktex_candidates(tool_name: str) -> tuple[Path, ...]:
+    """Return exact per-user MiKTeX locations without scanning the host."""
+
+    if os.name != "nt":
+        return ()
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return ()
+    root = Path(local_app_data)
+    if not root.is_absolute():
+        return ()
+    base = root / "Programs" / "MiKTeX" / "miktex" / "bin"
+    return tuple(base / architecture / f"{tool_name}.exe" for architecture in ("x64", "x86"))
+
+
+def _find_on_windows_path(command: str, search_path: str) -> Path | None:
+    suffixes: tuple[str, ...] = ("",)
+    if not Path(command).suffix:
+        configured = tuple(
+            item
+            for item in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+            if item and item.startswith(".")
+        )
+        suffixes = configured or (".COM", ".EXE", ".BAT", ".CMD")
+    for raw_directory in search_path.split(os.pathsep):
+        if not raw_directory:
+            continue
+        directory = Path(raw_directory)
+        for suffix in suffixes:
+            candidate = directory / f"{command}{suffix}"
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+    return None
+
+
+def _resolve_regular_tool(path: Path) -> Path | None:
+    try:
+        if _is_link_or_junction(path):
+            raise ContractError(ErrorCode.PATH_LINK_ESCAPE, "tool executable must not be a link")
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ContractError(ErrorCode.TOOL_MISSING, "tool executable is unavailable") from exc
+    if not resolved.is_file() or _is_link_or_junction(resolved):
+        raise ContractError(ErrorCode.TOOL_MISSING, "tool executable is not a regular file")
+    return resolved
+
+
+def _miktex_identity(path: Path, expected_name: str) -> tuple[Path, Path] | None:
+    """Validate an exact MiKTeX bin layout and its installed script registry."""
+
+    architecture_root = path.parent
+    if architecture_root.name.casefold() in {"x64", "x86"}:
+        bin_root = architecture_root.parent
+        executable_root = architecture_root
+    else:
+        bin_root = architecture_root
+        executable_root = architecture_root
+    is_layout = bin_root.name.casefold() == "bin" and bin_root.parent.name.casefold() == "miktex"
+    looks_like_miktex = any(part.casefold() == "miktex" for part in path.parts)
+    if not is_layout:
+        if looks_like_miktex:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX executable layout is not recognized",
+            )
+        return None
+    if path.stem.casefold() != expected_name.casefold():
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX tool identity does not match the requested command",
+        )
+    install_root = bin_root.parent.parent
+    scripts_registry = install_root / _MIKTEX_CONFIG_RELATIVE / "scripts.ini"
+    initexmf = executable_root / "initexmf.exe"
+    if _resolve_regular_tool(scripts_registry) is None or _resolve_regular_tool(initexmf) is None:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX installation root is incomplete",
+        )
+    return install_root.resolve(strict=True), executable_root.resolve(strict=True)
+
+
+def _resolve_external_tool(executable: str | Path, expected_name: str) -> _ResolvedExternalTool:
+    """Resolve defaults from PATH or the standard per-user MiKTeX installation."""
+
+    if os.name != "nt":
+        return _ResolvedExternalTool(executable, None, None, None)
+    requested = os.fspath(executable)
+    requested_path = Path(requested)
+    has_path_component = (
+        requested_path.is_absolute()
+        or requested_path.parent != Path(".")
+        or "/" in requested
+        or "\\" in requested
+    )
+    located: Path | None = None
+    if has_path_component:
+        if not requested_path.is_absolute():
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "tool executable must be a bare name or an absolute path",
+            )
+        located = _resolve_regular_tool(requested_path)
+    else:
+        safe_path = _safe_windows_search_path(os.environ.get("PATH", ""))
+        path_result = _find_on_windows_path(requested, safe_path)
+        if path_result is not None:
+            located = _resolve_regular_tool(path_result)
+        canonical_names = {expected_name.casefold(), f"{expected_name}.exe".casefold()}
+        if located is None and requested.casefold() in canonical_names:
+            for candidate in _common_miktex_candidates(expected_name):
+                located = _resolve_regular_tool(candidate)
+                if located is not None:
+                    break
+    if located is None:
+        return _ResolvedExternalTool(executable, None, None, None)
+    identity = _miktex_identity(located, expected_name)
+    if identity is None:
+        return _ResolvedExternalTool(located, located, None, None)
+    install_root, bin_root = identity
+    return _ResolvedExternalTool(located, located, install_root, bin_root)
+
+
+def _same_windows_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.fspath(left)) == os.path.normcase(os.fspath(right))
+
+
+def _installation_file_state(path: Path) -> _InstallationFileState:
+    try:
+        exists = path.exists()
+    except OSError as exc:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX installation identity is unavailable",
+        ) from exc
+    if not exists:
+        return _InstallationFileState(path, None, None)
+    resolved = _resolve_regular_tool(path)
+    if resolved is None:  # pragma: no cover - guarded by exists
+        return _InstallationFileState(path, None, None)
+    try:
+        metadata = resolved.stat()
+        digest = digest_file(resolved, max_bytes=_MIKTEX_INSTALL_PROBE_LIMIT)
+    except OSError as exc:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX installation identity cannot be read",
+        ) from exc
+    return _InstallationFileState(resolved, digest, metadata.st_mtime_ns)
+
+
+def _capture_miktex_installation_state(
+    install_root: Path,
+    bin_root: Path,
+    latexmk_mode: str,
+    *,
+    companion_tools: Sequence[Path] = (),
+) -> tuple[_InstallationFileState, ...]:
+    helper_names = {
+        "-pdf": "pdflatex.exe",
+        "-xelatex": "xelatex.exe",
+        "-lualatex": "lualatex.exe",
+    }
+    engine_name = helper_names[latexmk_mode]
+    config_root = install_root / _MIKTEX_CONFIG_RELATIVE
+    paths = (
+        config_root / "scripts.ini",
+        config_root / "packages.ini",
+        config_root / "mpm.ini",
+        config_root / "package-manifests.ini",
+        bin_root / "initexmf.exe",
+        bin_root / "latexmk.exe",
+        bin_root / "latexdiff.exe",
+        bin_root / engine_name,
+        bin_root / "bibtex.exe",
+        bin_root / "biber.exe",
+        bin_root / "makeindex.exe",
+        *companion_tools,
+    )
+    return tuple(_installation_file_state(path) for path in paths)
+
+
+def _perl_command_assignment(variable: str, executable: Path) -> str:
+    command = f'"{executable.as_posix()}" %O %S'
+    escaped = command.replace("\\", "\\\\").replace("'", "\\'")
+    return f"${variable} = '{escaped}';"
+
+
+def _miktex_bound_latexmk_arguments(bin_root: Path, latexmk_mode: str) -> tuple[str, ...]:
+    engine_name = {
+        "-pdf": "pdflatex.exe",
+        "-xelatex": "xelatex.exe",
+        "-lualatex": "lualatex.exe",
+    }[latexmk_mode]
+    engine_option = {
+        "-pdf": "-pdflatex=",
+        "-xelatex": "-xelatex=",
+        "-lualatex": "-lualatex=",
+    }[latexmk_mode]
+    engine = bin_root / engine_name
+    helpers = {
+        "bibtex": bin_root / "bibtex.exe",
+        "biber": bin_root / "biber.exe",
+        "makeindex": bin_root / "makeindex.exe",
+    }
+    for executable in (engine, *helpers.values()):
+        if _resolve_regular_tool(executable) is None:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX verification helper is missing",
+            )
+    engine_command = f'"{engine.as_posix()}" %O %S'
+    return (
+        "-disable-installer",
+        f"{engine_option}{engine_command}",
+        "-e",
+        _perl_command_assignment("bibtex", helpers["bibtex"]),
+        "-e",
+        _perl_command_assignment("biber", helpers["biber"]),
+        "-e",
+        _perl_command_assignment("makeindex", helpers["makeindex"]),
+    )
+
+
+def _verify_miktex_installation_state(toolchain: _TexToolchain) -> None:
+    for expected in toolchain.installation_state:
+        observed = _installation_file_state(expected.path)
+        if observed.digest != expected.digest or observed.mtime_ns != expected.mtime_ns:
+            raise ContractError(
+                ErrorCode.VERIFY_COMPILE_FAILED,
+                "MiKTeX installation changed during verification",
+            )
+
+
+def _isolated_miktex_path(
+    bin_root: Path,
+    *,
+    companion_bins: Sequence[Path] = (),
+) -> str:
+    entries = [os.fspath(bin_root)]
+    for companion in companion_bins:
+        companion_value = os.fspath(companion)
+        if companion_value not in entries:
+            entries.append(companion_value)
+    system_root_value = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
+    if system_root_value:
+        system_root = Path(system_root_value)
+        if system_root.is_absolute():
+            for candidate in (system_root / "System32", system_root):
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    continue
+                if resolved.is_dir() and os.fspath(resolved) not in entries:
+                    entries.append(os.fspath(resolved))
+    return os.pathsep.join(entries)
+
+
+def _prepare_tex_toolchain(
+    work: Path,
+    latexmk_executable: str | Path,
+    latexdiff_executable: str | Path,
+    latexmk_mode: str,
+) -> _TexToolchain:
+    """Prepare one private runtime and a coherent Windows TeX toolchain."""
+
+    resolved_latexmk = _resolve_external_tool(latexmk_executable, "latexmk")
+    resolved_latexdiff = _resolve_external_tool(latexdiff_executable, "latexdiff")
+    runtime_root = work / "tool-runtime"
+    runtime_root.mkdir(parents=False, exist_ok=False)
+    temp_root = runtime_root / "temp"
+    temp_root.mkdir(parents=False, exist_ok=False)
+    home_root = runtime_root / "home"
+    home_root.mkdir(parents=False, exist_ok=False)
+    runtime_identity = {
+        "HOME": os.fspath(home_root),
+        "USERPROFILE": os.fspath(home_root),
+    }
+    if os.name == "nt":
+        home_drive, home_path = os.path.splitdrive(os.fspath(home_root))
+        if home_drive:
+            runtime_identity["HOMEDRIVE"] = home_drive
+            runtime_identity["HOMEPATH"] = home_path
+
+    identified = tuple(
+        tool
+        for tool in (resolved_latexmk, resolved_latexdiff)
+        if tool.miktex_install_root is not None and tool.miktex_bin_root is not None
+    )
+    if not identified:
+        if os.name == "nt" and (
+            resolved_latexmk.path is not None or resolved_latexdiff.path is not None
+        ):
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "Windows PDF verification requires a recognized MiKTeX installation",
+            )
+        return _TexToolchain(
+            resolved_latexmk.executable,
+            resolved_latexdiff.executable,
+            temp_root,
+            runtime_identity,
+            (),
+            (),
+        )
+
+    install_root = cast("Path", identified[0].miktex_install_root)
+    bin_root = cast("Path", identified[0].miktex_bin_root)
+    for tool in identified[1:]:
+        other_install = cast("Path", tool.miktex_install_root)
+        other_bin = cast("Path", tool.miktex_bin_root)
+        if not _same_windows_path(install_root, other_install) or not _same_windows_path(
+            bin_root, other_bin
+        ):
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX tools belong to different installations",
+            )
+    for tool in (resolved_latexmk, resolved_latexdiff):
+        if tool.path is not None and tool.miktex_install_root is None:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX and non-MiKTeX verification tools cannot be mixed",
+            )
+
+    def bind_miktex_tool(tool: _ResolvedExternalTool, name: str) -> str | Path:
+        if tool.path is not None:
+            return tool.executable
+        requested = os.fspath(tool.executable)
+        if requested.casefold() not in {name.casefold(), f"{name}.exe".casefold()}:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "an unresolved custom tool cannot be mixed with MiKTeX",
+            )
+        # Keep an absent companion absolute as well.  run_command will report
+        # it as E_TOOL_MISSING without consulting cwd or another distribution.
+        return bin_root / f"{name}.exe"
+
+    bound_latexmk = bind_miktex_tool(resolved_latexmk, "latexmk")
+    bound_latexdiff = bind_miktex_tool(resolved_latexdiff, "latexdiff")
+    resolved_perl = _resolve_external_tool("perl", "perl")
+    if resolved_perl.path is None:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX latexmk and latexdiff require a verified Perl executable",
+        )
+    perl_path = resolved_perl.path
+
+    config_root = runtime_root / "miktex-config"
+    data_root = runtime_root / "miktex-data"
+    config_root.mkdir(parents=False, exist_ok=False)
+    data_root.mkdir(parents=False, exist_ok=False)
+    additions = {
+        **runtime_identity,
+        "MIKTEX_USERCONFIG": os.fspath(config_root),
+        "MIKTEX_USERDATA": os.fspath(data_root),
+        "MIKTEX_USERINSTALL": os.fspath(install_root),
+        "PATH": _isolated_miktex_path(bin_root, companion_bins=(perl_path.parent,)),
+    }
+    installer_arguments = _miktex_latexmk_arguments(additions)
+    if installer_arguments != ("-disable-installer",):
+        raise ContractError(
+            ErrorCode.INTERNAL_INVARIANT,
+            "MiKTeX verification did not disable the package installer",
+        )
+    return _TexToolchain(
+        bound_latexmk,
+        bound_latexdiff,
+        temp_root,
+        additions,
+        _miktex_bound_latexmk_arguments(bin_root, latexmk_mode),
+        _capture_miktex_installation_state(
+            install_root,
+            bin_root,
+            latexmk_mode,
+            companion_tools=(perl_path,),
+        ),
+    )
+
+
+def _miktex_preflight(
+    toolchain: _TexToolchain,
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    policy: VerificationPolicy,
+) -> _ToolRun | None:
+    additions = toolchain.environment_additions
+    if "MIKTEX_USERINSTALL" not in additions:
+        return None
+    latexmk_path = Path(toolchain.latexmk_executable)
+    initexmf = latexmk_path.parent / "initexmf.exe"
+    run = _tool_run(
+        "miktex-root-preflight",
+        initexmf,
+        ("--report", "--disable-installer"),
+        cwd=cwd,
+        environment=environment,
+        policy=policy,
+    )
+    if run.status != "pass" or run.result is None:
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX root report could not be verified",
+        )
+    fields: dict[str, str] = {}
+    for line in run.result.stdout.splitlines():
+        name, separator, value = line.partition(":")
+        if not separator:
+            continue
+        name = name.strip()
+        if name in fields:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX root report contains duplicate fields",
+            )
+        fields[name] = value.strip()
+    if (
+        fields.get("SharedSetup", "").casefold() != "no"
+        or fields.get("PathOkay", "").casefold() != "yes"
+    ):
+        raise ContractError(
+            ErrorCode.TOOL_VERSION_UNSUPPORTED,
+            "MiKTeX root report is not a regular non-shared setup",
+        )
+    expected_paths = {
+        "UserInstall": additions["MIKTEX_USERINSTALL"],
+        "UserConfig": additions["MIKTEX_USERCONFIG"],
+        "UserData": additions["MIKTEX_USERDATA"],
+        "LinkTargetDirectory": os.fspath(latexmk_path.parent),
+    }
+    for name, expected_value in expected_paths.items():
+        observed_value = fields.get(name)
+        if observed_value is None:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX root report is incomplete",
+            )
+        try:
+            observed = Path(observed_value).resolve(strict=True)
+            expected = Path(expected_value).resolve(strict=True)
+        except OSError as exc:
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX root report path is unavailable",
+            ) from exc
+        if not _same_windows_path(observed, expected):
+            raise ContractError(
+                ErrorCode.TOOL_VERSION_UNSUPPORTED,
+                "MiKTeX root report differs from the isolated profile",
+            )
+    return run
 
 
 def _write_output_file(path: Path, data: bytes) -> None:
@@ -778,8 +1462,22 @@ def _remove_owned_tree(path: Path, parent: Path, prefix: str) -> None:
         raise ContractError(ErrorCode.INTERNAL_INVARIANT, "refusing to clean an unowned tree")
     if path.resolve(strict=False).parent != parent.resolve(strict=True):
         raise ContractError(ErrorCode.PATH_LINK_ESCAPE, "verification stage escaped its parent")
+
+    def clear_owned_readonly_and_retry(
+        function: Any,
+        candidate: str,
+        error: BaseException,
+    ) -> None:
+        if not isinstance(error, PermissionError):
+            raise error
+        try:
+            os.chmod(candidate, stat.S_IREAD | stat.S_IWRITE)
+            function(candidate)
+        except OSError as retry_error:
+            raise error from retry_error
+
     with suppress(FileNotFoundError):
-        shutil.rmtree(path)
+        shutil.rmtree(path, onexc=clear_owned_readonly_and_retry)
 
 
 def verify_latex_project(
@@ -846,6 +1544,7 @@ def verify_latex_project(
 
     prefix = f".{target.name}.verify-"
     temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=target.parent))
+    toolchain: _TexToolchain | None = None
     try:
         work = temporary / "_work"
         original_work = work / "original"
@@ -871,26 +1570,59 @@ def verify_latex_project(
         source_payload = cast("Mapping[str, Any]", source_manifest["payload"])
         main_document = validate_relative_path(cast("str", source_payload["main_document"]))
         safe_main_argument = f"./{main_document}"
+        latexdiff_input = work / "latexdiff-input"
+        _write_output_file(
+            latexdiff_input / "original.tex",
+            _flatten_latexdiff_source(
+                original_pre,
+                source_manifest,
+                main_document,
+                max_bytes=policy.max_output_bytes,
+            ),
+        )
+        _write_output_file(
+            latexdiff_input / "revised.tex",
+            _flatten_latexdiff_source(
+                revised_pre,
+                source_manifest,
+                main_document,
+                max_bytes=policy.max_output_bytes,
+            ),
+        )
         latexmk_mode = _latexmk_mode(source_manifest)
+        toolchain = _prepare_tex_toolchain(
+            work,
+            latexmk_executable,
+            latexdiff_executable,
+            latexmk_mode,
+        )
         build_root = work / "build"
         build_root.mkdir(parents=True, exist_ok=False)
         revised_build = build_root / "revised"
         diff_build = build_root / "latexdiff"
         revised_build.mkdir()
         diff_build.mkdir()
-        tex_environment = {"openin_any": "p", "openout_any": "p", "shell_escape": "0"}
-        tex_environment.update(
-            {name: value for name in _MIKTEX_ROOT_ENVIRONMENT if (value := os.environ.get(name))}
+        tex_environment = {
+            "openin_any": "p",
+            "openout_any": "p",
+            "shell_escape": "0",
+            **toolchain.environment_additions,
+        }
+        environment = minimal_environment(temp_root=toolchain.temp_root, additions=tex_environment)
+        miktex_preflight_run = _miktex_preflight(
+            toolchain,
+            cwd=work,
+            environment=environment,
+            policy=policy,
         )
-        environment = minimal_environment(temp_root=work, additions=tex_environment)
-        miktex_latexmk_arguments = _miktex_latexmk_arguments(environment)
 
         revised_run = _tool_run(
             "latexmk-revised",
-            latexmk_executable,
+            toolchain.latexmk_executable,
             (
+                "-norc",
                 latexmk_mode,
-                *miktex_latexmk_arguments,
+                *toolchain.latexmk_arguments,
                 "-interaction=nonstopmode",
                 "-halt-on-error",
                 "-file-line-error",
@@ -905,12 +1637,11 @@ def verify_latex_project(
 
         latexdiff_run = _tool_run(
             "latexdiff-generate",
-            latexdiff_executable,
+            toolchain.latexdiff_executable,
             (
-                "--flatten",
                 "--encoding=utf8",
-                f"original/{main_document}",
-                f"revised/{main_document}",
+                "latexdiff-input/original.tex",
+                "latexdiff-input/revised.tex",
             ),
             cwd=work,
             environment=environment,
@@ -919,8 +1650,15 @@ def verify_latex_project(
         latexdiff_data: bytes | None = None
         if latexdiff_run.status == "pass" and latexdiff_run.result is not None:
             candidate_diff = latexdiff_run.result.stdout.encode("utf-8")
-            if not candidate_diff or any(
-                pattern.search(candidate_diff) is not None for pattern in _SHELL_ESCAPE_PATTERNS
+            missing_required_markers = bool(actual_diff) and not _latexdiff_has_change_markers(
+                candidate_diff
+            )
+            if (
+                not candidate_diff
+                or missing_required_markers
+                or any(
+                    pattern.search(candidate_diff) is not None for pattern in _SHELL_ESCAPE_PATTERNS
+                )
             ):
                 latexdiff_run = _ToolRun("latexdiff-generate", "fail", latexdiff_run.result, None)
                 diff_compile_run = _ToolRun("latexmk-latexdiff", "not_run", None, None)
@@ -929,10 +1667,11 @@ def verify_latex_project(
                 _write_output_file(diff_compile / "latexdiff.tex", latexdiff_data)
                 diff_compile_run = _tool_run(
                     "latexmk-latexdiff",
-                    latexmk_executable,
+                    toolchain.latexmk_executable,
                     (
+                        "-norc",
                         latexmk_mode,
-                        *miktex_latexmk_arguments,
+                        *toolchain.latexmk_arguments,
                         "-interaction=nonstopmode",
                         "-halt-on-error",
                         "-file-line-error",
@@ -947,6 +1686,8 @@ def verify_latex_project(
         else:
             diff_compile_run = _ToolRun("latexmk-latexdiff", "not_run", None, None)
 
+        _verify_miktex_installation_state(toolchain)
+
         revised_pdf = revised_build / f"{Path(main_document).stem}.pdf"
         if revised_run.status == "pass" and not revised_pdf.is_file():
             revised_run = _ToolRun("latexmk-revised", "fail", revised_run.result, None)
@@ -954,6 +1695,7 @@ def verify_latex_project(
         if diff_compile_run.status == "pass" and not diff_pdf.is_file():
             diff_compile_run = _ToolRun("latexmk-latexdiff", "fail", diff_compile_run.result, None)
         runs = (revised_run, latexdiff_run, diff_compile_run)
+        command_runs = (miktex_preflight_run, *runs) if miktex_preflight_run is not None else runs
         status = _overall_status(runs, require_latexdiff=policy.require_latexdiff)
         sensitive_roots = (
             original_root,
@@ -1081,7 +1823,7 @@ def verify_latex_project(
                 "applied_source_tree_sha256": revised_pre.tree_sha256,
                 "policy_sha256": cast("Mapping[str, Any]", patch_plan["payload"])["policy_sha256"],
                 "verification_policy_sha256": policy.payload_sha256,
-                "commands": [run.extension_record() for run in runs],
+                "commands": [run.extension_record() for run in command_runs],
             }
         }
         report = make_envelope(
@@ -1110,9 +1852,9 @@ def verify_latex_project(
         if revised_post.tree_sha256 != revised_pre.tree_sha256:
             raise ContractError(ErrorCode.PATCH_SOURCE_DRIFT, "revised input changed during verify")
 
-        shutil.rmtree(work)
+        _remove_owned_tree(work, temporary, "_work")
         try:
-            temporary.rename(target)
+            publish_new_directory(temporary, target)
         except OSError as exc:
             raise ContractError(
                 ErrorCode.APPLY_PARTIAL_WRITE,
@@ -1125,6 +1867,13 @@ def verify_latex_project(
             status=status,
         )
     except Exception:
+        if toolchain is not None:
+            try:
+                _verify_miktex_installation_state(toolchain)
+            except ContractError:
+                if temporary.exists():
+                    _remove_owned_tree(temporary, target.parent, prefix)
+                raise
         if temporary.exists():
             _remove_owned_tree(temporary, target.parent, prefix)
         raise

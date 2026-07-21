@@ -33,7 +33,12 @@ def _write_source(root: Path, text: str) -> str:
     return discover_project(root).source_tree_sha256
 
 
-def _changeset(text: str, changes: list[tuple[str, int, int, str]]) -> dict[str, Any]:
+def _changeset(
+    text: str,
+    changes: list[tuple[str, int, int, str]],
+    *,
+    path: str = "main.tex",
+) -> dict[str, Any]:
     document = copy.deepcopy(_golden_contracts()["ChangeSet"])
     raw_id = cast("str", document["payload"]["raw_events"][0]["raw_event_id"])
     data = text.encode("utf-8")
@@ -42,7 +47,7 @@ def _changeset(text: str, changes: list[tuple[str, int, int, str]]) -> dict[str,
         before_bytes = data[start:end]
         before = before_bytes.decode("utf-8")
         change_id = stable_id("chg_", [kind, start, end, after, ordinal])
-        unit_id = stable_id("unit_", ["main.tex", start, end, ordinal])
+        unit_id = stable_id("unit_", [path, start, end, ordinal])
         fingerprint = sha256_canonical([kind, start, end, before, after, ordinal])
         normalized.append(
             {
@@ -59,7 +64,7 @@ def _changeset(text: str, changes: list[tuple[str, int, int, str]]) -> dict[str,
                 "comment": None,
                 "unit_id": unit_id,
                 "source_location": {
-                    "path": "main.tex",
+                    "path": path,
                     "start_byte": start,
                     "end_byte": end,
                     "slice_sha256": sha256_bytes(before_bytes),
@@ -182,6 +187,44 @@ def test_rejected_change_produces_schema_valid_noop(tmp_path: Path) -> None:
     assert result.document["payload"]["excluded_changes"][0]["reason"] == "rejected"
     assert result.unified_diff == b""
     validate_contract(result.document)
+
+
+def test_project_local_runtime_file_is_never_a_patch_target(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n\\usepackage{local}\n\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    runtime = source / "local.sty"
+    runtime.write_text("Hello\n", encoding="utf-8")
+    source_tree = discover_project(source).source_tree_sha256
+    changeset = _changeset(
+        "Hello\n",
+        [("replacement", 0, 5, "Welcome")],
+        path="local.sty",
+    )
+    approval = _final_approval(changeset, [("accepted", None)])
+    before = runtime.read_bytes()
+
+    result = plan_patch(
+        source,
+        source_tree_sha256=source_tree,
+        changeset=changeset,
+        approval=approval,
+        generated_at=TIME,
+    )
+
+    assert result.document["payload"]["status"] == "blocked"
+    assert result.document["payload"]["operations"] == []
+    assert result.document["payload"]["accepted_but_blocked"] == [
+        {
+            "change_id": changeset["payload"]["changes"][0]["change_id"],
+            "code": ErrorCode.PATCH_UNSAFE_KIND.value,
+        }
+    ]
+    assert result.unified_diff == b""
+    assert runtime.read_bytes() == before
 
 
 @pytest.mark.parametrize("unsafe_text", [r"\\section{Injected}", "new\nparagraph", "50%"])

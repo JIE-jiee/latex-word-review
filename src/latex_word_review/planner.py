@@ -391,6 +391,8 @@ def _make_operation(
         raise ContractError(
             ErrorCode.HASH_SOURCE_MISMATCH, "patch target is absent from source tree"
         )
+    if source_file.role != "tex":
+        return None, ErrorCode.PATCH_UNSAFE_KIND
     target_path = resolve_within(source_root, path)
     data = read_stable_bytes(target_path, max_bytes=limits.max_file_bytes)
     file_digest = digest_bytes(data)

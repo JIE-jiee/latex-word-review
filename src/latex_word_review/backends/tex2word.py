@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from importlib import metadata
 from pathlib import Path
@@ -12,7 +11,13 @@ from latex_word_review.canonical import sha256_canonical
 from latex_word_review.contracts import load_contract_json
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export_models import ExportFinding
+from latex_word_review.frozen_runtime import internal_worker_command
 from latex_word_review.hashing import read_stable_bytes
+from latex_word_review.review_reference import (
+    PROFILE_ID,
+    REFERENCE_CONFIG_SHA256,
+    REFERENCE_DOCX_SHA256,
+)
 from latex_word_review.runtime import minimal_environment, run_command
 
 from .base import (
@@ -31,6 +36,8 @@ from .base import (
 )
 
 SUPPORTED_TEX2WORD_VERSION = "1.0.5"
+TEX2WORD_INTERFACE_VERSION = "python-api-convert-source-v2-review-profile"
+_REPORT_PREFIX = ".lwr-t2w-report-"
 
 
 def _evidence(label: str) -> str:
@@ -48,7 +55,7 @@ def _capabilities(version: str | None) -> BackendCapabilities:
         backend_id="tex2word-public-api",
         tool_name="tex2word",
         tool_version=version,
-        interface_version="python-api-convert-source-v1",
+        interface_version=TEX2WORD_INTERFACE_VERSION,
         distribution="PyPI tex2word==1.0.5",
         configuration_sha256=runtime_configuration_sha256(
             "tex2word",
@@ -56,6 +63,9 @@ def _capabilities(version: str | None) -> BackendCapabilities:
                 "embed_manifest": False,
                 "frontend": "pure",
                 "citation_mode": "static",
+                "reference_config_sha256": REFERENCE_CONFIG_SHA256,
+                "reference_docx_sha256": REFERENCE_DOCX_SHA256,
+                "reference_profile": PROFILE_ID,
             },
         ),
         features=(
@@ -123,9 +133,12 @@ class Tex2WordBackend:
         return _capabilities(self._version)
 
     @staticmethod
-    def _prepare_report_path(output_parent: Path, output_name: str) -> Path:
+    def _prepare_report_path(output_parent: Path) -> Path:
         descriptor, name = tempfile.mkstemp(
-            prefix=f".{output_name}.tex2word-report-",
+            # Do not repeat the pipeline's already-random output name here.
+            # Nested product runs can otherwise cross legacy Windows MAX_PATH
+            # even though the final public ``review.docx`` path is valid.
+            prefix=_REPORT_PREFIX,
             suffix=".json",
             dir=output_parent,
         )
@@ -135,10 +148,10 @@ class Tex2WordBackend:
         return path
 
     @staticmethod
-    def _cleanup_report_path(path: Path, output_parent: Path, output_name: str) -> None:
+    def _cleanup_report_path(path: Path, output_parent: Path) -> None:
         if path.parent.resolve(strict=True) != output_parent.resolve(strict=True):
             raise ContractError(ErrorCode.INTERNAL_INVARIANT, "worker report escaped its parent")
-        if not path.name.startswith(f".{output_name}.tex2word-report-") or path.suffix != ".json":
+        if not path.name.startswith(_REPORT_PREFIX) or path.suffix != ".json":
             raise ContractError(ErrorCode.INTERNAL_INVARIANT, "refusing to clean unowned report")
         try:
             path.unlink()
@@ -160,7 +173,14 @@ class Tex2WordBackend:
             "math_image",
             "math_raw",
         )
-        if set(report) != {*integer_fields, "constructs", "warning_constructs"}:
+        if set(report) != {
+            *integer_fields,
+            "constructs",
+            "reference_loaded",
+            "reference_profile",
+            "reference_sha256",
+            "warning_constructs",
+        }:
             raise ContractError(ErrorCode.BACKEND_FAILED, "worker report has unknown fields")
         if any(not isinstance(report[field], int) or report[field] < 0 for field in integer_fields):
             raise ContractError(ErrorCode.BACKEND_FAILED, "worker report has invalid counters")
@@ -174,6 +194,15 @@ class Tex2WordBackend:
                 raise ContractError(
                     ErrorCode.BACKEND_FAILED, "worker report has invalid constructs"
                 )
+        if (
+            not isinstance(report["reference_loaded"], bool)
+            or report["reference_profile"] != PROFILE_ID
+            or report["reference_sha256"] != REFERENCE_DOCX_SHA256
+        ):
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "worker report has invalid reference data",
+            )
         return report
 
     def export(self, request: BackendRequest) -> BackendResult:
@@ -185,17 +214,12 @@ class Tex2WordBackend:
                 message="the locked tex2word 1.0.5 backend is unavailable",
             )
         prepared = prepare_export(request, owner="tex2word")
-        report_path = self._prepare_report_path(
-            prepared.output_path.parent,
-            prepared.output_path.name,
-        )
+        report_path = self._prepare_report_path(prepared.output_path.parent)
         native_report: dict[str, object] = {}
         try:
-            result = run_command(
-                sys.executable,
+            worker = internal_worker_command(
+                "tex2word",
                 (
-                    "-m",
-                    "latex_word_review.backends._tex2word_worker",
                     "--source",
                     prepared.main_document,
                     "--output",
@@ -203,6 +227,10 @@ class Tex2WordBackend:
                     "--report",
                     os.fspath(report_path),
                 ),
+            )
+            result = run_command(
+                worker.executable,
+                worker.arguments,
                 cwd=prepared.source_root,
                 timeout_s=request.timeout_s,
                 max_output_bytes=request.max_output_bytes,
@@ -218,11 +246,18 @@ class Tex2WordBackend:
             if result.timed_out or result.output_truncated or result.returncode != 0:
                 error_count = native_report.get("error_count", 0)
                 silent_loss = isinstance(error_count, int) and error_count > 0
+                code = ErrorCode.EXPORT_SILENT_LOSS if silent_loss else ErrorCode.BACKEND_FAILED
+                native_report["failure_kind"] = (
+                    "timeout"
+                    if result.timed_out
+                    else "output_truncated"
+                    if result.output_truncated
+                    else "nonzero_exit"
+                )
+                native_report["failure_code"] = code.value
                 return failed_result(
                     capabilities,
-                    code=(
-                        ErrorCode.EXPORT_SILENT_LOSS if silent_loss else ErrorCode.BACKEND_FAILED
-                    ),
+                    code=code,
                     message=(
                         "tex2word conversion timed out"
                         if result.timed_out
@@ -233,6 +268,8 @@ class Tex2WordBackend:
                     native_report=native_report,
                 )
             if not prepared.temporary_path.is_file() or not report_path.is_file():
+                native_report["failure_kind"] = "missing_artifact"
+                native_report["failure_code"] = ErrorCode.BACKEND_FAILED.value
                 return failed_result(
                     capabilities,
                     message="tex2word returned success without its DOCX and report artifacts",
@@ -289,6 +326,11 @@ class Tex2WordBackend:
             ValueError,
         ) as exc:
             code = exc.code if isinstance(exc, ContractError) else ErrorCode.BACKEND_FAILED
+            native_report["failure_kind"] = (
+                "adapter_contract" if isinstance(exc, ContractError) else "adapter_exception"
+            )
+            native_report["failure_code"] = code.value
+            native_report["exception_type"] = type(exc).__name__
             return failed_result(
                 capabilities,
                 code=code,
@@ -300,8 +342,11 @@ class Tex2WordBackend:
             self._cleanup_report_path(
                 report_path,
                 prepared.output_path.parent,
-                prepared.output_path.name,
             )
 
 
-__all__ = ["SUPPORTED_TEX2WORD_VERSION", "Tex2WordBackend"]
+__all__ = [
+    "SUPPORTED_TEX2WORD_VERSION",
+    "TEX2WORD_INTERFACE_VERSION",
+    "Tex2WordBackend",
+]

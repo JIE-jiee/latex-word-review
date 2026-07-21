@@ -26,12 +26,14 @@ from latex_word_review.image_materializer import (
     IncludeGraphics,
     QualityProfile,
     RendererIdentity,
+    SealedImageCacheVerifier,
     image_cache_key,
     materialize_image,
     plan_image_request,
     resolve_graphic,
     scan_graphics_source,
     scan_graphics_text,
+    verify_image_cache_entry,
 )
 
 
@@ -222,6 +224,7 @@ def test_plan_normalizes_supported_page_trim_clip_and_angle(tmp_path: Path) -> N
             "IMAGE_DYNAMIC_INPUT",
         ),
         (r"\includegraphics{figures/\jobname.pdf}", "IMAGE_DYNAMIC_INPUT"),
+        (r"\includegraphics{./figures/\jobname.pdf}", "IMAGE_DYNAMIC_INPUT"),
         (
             r"\includegraphics[angle=90,trim=1 2 3 4,clip]{plot.pdf}",
             "IMAGE_UNSUPPORTED_OPTION",
@@ -251,6 +254,8 @@ def test_dynamic_and_layout_dependent_semantics_stay_manual(
         ("//server/share/plot.pdf", ErrorCode.PATH_ABSOLUTE),
         ("C:/private/plot.pdf", ErrorCode.PATH_ABSOLUTE),
         ("../plot.pdf", ErrorCode.PATH_TRAVERSAL),
+        ("./../plot.pdf", ErrorCode.PATH_TRAVERSAL),
+        (".//plot.pdf", ErrorCode.PATH_ABSOLUTE),
         ("figures/plot.pdf:secret", ErrorCode.PATH_TRAVERSAL),
     ],
 )
@@ -302,6 +307,81 @@ def test_resolver_handles_explicit_and_extensionless_and_rejects_ambiguity(
     assert "ambiguous" in str(raised.value)
 
 
+def test_resolver_accepts_exact_current_directory_prefixes_in_graphicspath(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    (root / "Figure").mkdir(parents=True)
+    (root / "Figure/plot.pdf").write_bytes(b"figure")
+    occurrence = scan_graphics_text(
+        "\\graphicspath{{././Figure/}}\n\\includegraphics{plot.pdf}",
+        source_path="main.tex",
+    ).includes[0]
+    direct = scan_graphics_text(
+        "\\includegraphics{././Figure/plot.pdf}",
+        source_path="main.tex",
+    ).includes[0]
+
+    assert resolve_graphic(root, occurrence).source_path == "Figure/plot.pdf"
+    assert resolve_graphic(root, direct).source_path == "Figure/plot.pdf"
+    assert materializer_module._normalize_graphics_directory("./Figure/") == "Figure"
+
+
+def test_resolver_searches_extensions_after_an_unknown_dotted_suffix(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "3.RCJB-0_hc.pdf").write_bytes(b"pdf")
+    occurrence = scan_graphics_text(
+        "\\DeclareGraphicsExtensions{.pdf}\n\\includegraphics{3.RCJB-0_hc}",
+        source_path="main.tex",
+    ).includes[0]
+
+    assert resolve_graphic(root, occurrence).source_path == "3.RCJB-0_hc.pdf"
+
+    (root / "3.RCJB-0_hc").write_bytes(b"exact")
+    error = _assert_error(ErrorCode.SCHEMA_INVALID, lambda: resolve_graphic(root, occurrence))
+    assert "ambiguous" in str(error)
+
+
+def test_known_suffix_remains_exact_and_unknown_suffix_needs_static_extensions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "known.pdf.png").write_bytes(b"not the explicit target")
+    known = scan_graphics_text("\\includegraphics{known.pdf}", source_path="main.tex").includes[0]
+    _assert_error(ErrorCode.BACKEND_FAILED, lambda: resolve_graphic(root, known))
+
+    (root / "known.pdf").write_bytes(b"exact")
+    assert resolve_graphic(root, replace(known, extensions_dynamic=True)).source_path == "known.pdf"
+
+    unknown = replace(known, target="3.RCJB-0_hc", extensions_dynamic=True)
+    _assert_error(ErrorCode.PATH_TRAVERSAL, lambda: resolve_graphic(root, unknown))
+    plan = plan_image_request(root, unknown)
+    assert plan.request is None
+    assert {item.code for item in plan.diagnostics} == {"IMAGE_DYNAMIC_INPUT"}
+
+
+@pytest.mark.parametrize(
+    ("directory", "code"),
+    [
+        ("../Figure/", ErrorCode.PATH_TRAVERSAL),
+        ("./../Figure/", ErrorCode.PATH_TRAVERSAL),
+        ("/Figure/", ErrorCode.PATH_ABSOLUTE),
+        (".//Figure/", ErrorCode.PATH_ABSOLUTE),
+        (r"Figure\nested/", ErrorCode.PATH_TRAVERSAL),
+        (r"./\jobname/", ErrorCode.PATH_TRAVERSAL),
+    ],
+)
+def test_graphicspath_prefix_normalization_remains_fail_closed(
+    directory: str,
+    code: ErrorCode,
+) -> None:
+    _assert_error(code, lambda: materializer_module._normalize_graphics_directory(directory))
+
+
 def test_resolver_rejects_symlink_escape_when_windows_allows_symlinks(tmp_path: Path) -> None:
     root = tmp_path / "source"
     outside = tmp_path / "outside"
@@ -326,6 +406,8 @@ def test_request_quality_and_cache_key_are_bounded_and_deterministic() -> None:
     with pytest.raises(ContractError):
         QualityProfile(dpi=601)
     with pytest.raises(ContractError):
+        QualityProfile(min_render_dpi=71)
+    with pytest.raises(ContractError):
         QualityProfile(render_timeout_s=0)
     with pytest.raises(ContractError):
         QualityProfile(render_timeout_s=61)
@@ -347,6 +429,10 @@ def test_request_quality_and_cache_key_are_bounded_and_deterministic() -> None:
         pdfium_binary_sha256="sha256:" + "b" * 64,
         pillow_version="12.3.0",
     )
+    assert materializer_module._MATERIALIZER_POLICY_VERSION == "pdf-png-v3"
+    assert materializer_module._CACHE_FORMAT == "latex-word-review-image-cache-v2"
+    assert materializer_module._WORKER_REQUEST_FORMAT.endswith("-v2")
+    assert materializer_module._WORKER_REPORT_FORMAT.endswith("-v2")
     assert image_cache_key(request, renderer).sha256 == image_cache_key(request, renderer).sha256
     with pytest.raises(ContractError):
         replace(request, page=2)
@@ -514,6 +600,149 @@ def test_pdf_page_selection_rotation_trim_and_determinism(tmp_path: Path) -> Non
         assert image.convert("RGB").getpixel((100, 50))[2] > 240
 
 
+def test_large_pdf_uses_highest_bounded_dpi_and_audits_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_pdf_runtime()
+    root = tmp_path / "source"
+    (root / "figures").mkdir(parents=True)
+    (root / "figures/large.pdf").write_bytes(
+        _minimal_pdf(((0.2, 0.4, 0.6),), width=1800, height=1000)
+    )
+    request = _plan_pdf(
+        root,
+        pdf_name="large.pdf",
+        quality=replace(REVIEW_QUALITY, max_render_pixels=3_500_000),
+    )
+    runtime = materializer_module._load_pdf_runtime()
+
+    def render_in_contained_worker_shape(
+        source_bytes: bytes,
+        selected_request: ImageRequest,
+        renderer: RendererIdentity,
+        image_module: Any,
+        cache_root: Path,
+    ) -> tuple[bytes, int, int, str, int]:
+        assert renderer == runtime.identity
+        assert image_module is runtime.image_module
+        assert cache_root.is_dir()
+        return materializer_module._render_pdf(source_bytes, selected_request, runtime)
+
+    monkeypatch.setattr(materializer_module, "_run_pdf_worker", render_in_contained_worker_shape)
+    cache = tmp_path / "cache"
+    first = materialize_image(request, source_root=root, cache_root=cache)
+    original_decode = materializer_module._decode_png
+    original_encode = materializer_module._encode_canonical_png
+    verification_calls = {"decode": 0, "encode": 0}
+
+    def tracked_decode(*args: Any, **kwargs: Any) -> Any:
+        verification_calls["decode"] += 1
+        return original_decode(*args, **kwargs)
+
+    def tracked_encode(*args: Any, **kwargs: Any) -> bytes:
+        verification_calls["encode"] += 1
+        return original_encode(*args, **kwargs)
+
+    monkeypatch.setattr(materializer_module, "_decode_png", tracked_decode)
+    monkeypatch.setattr(materializer_module, "_encode_canonical_png", tracked_encode)
+    repeated = materialize_image(request, source_root=root, cache_root=cache)
+    entry = (cache / first.png_path).parent
+    verified = verify_image_cache_entry(
+        entry,
+        request=request.as_cache_input(),
+        renderer=runtime.identity.as_dict(),
+    )
+    strong_calls = dict(verification_calls)
+    sealed_verifier = SealedImageCacheVerifier(runtime.identity.as_dict())
+    sealed = sealed_verifier.verify(
+        entry,
+        request=request.as_cache_input(),
+        renderer=runtime.identity.as_dict(),
+    )
+    manifest = json.loads((entry / "manifest.json").read_bytes())
+
+    assert request.quality.dpi == 200
+    assert request.quality.min_render_dpi == 96
+    assert first.dpi == repeated.dpi == verified.dpi == 100
+    assert sealed == replace(verified, reused=True)
+    assert strong_calls["decode"] >= 2
+    assert strong_calls["encode"] >= 2
+    assert verification_calls == strong_calls
+    assert (first.width_px, first.height_px) == (2500, 1389)
+    assert first.width_px * first.height_px <= request.quality.max_render_pixels
+    assert repeated.reused is True
+    assert manifest["request"]["quality"]["dpi"] == 200
+    assert manifest["output"]["dpi"] == 100
+    with runtime.image_module.open(cache / first.png_path) as image:
+        horizontal_dpi, vertical_dpi = image.info["dpi"]
+        assert horizontal_dpi == pytest.approx(100, abs=0.05)
+        assert vertical_dpi == pytest.approx(100, abs=0.05)
+
+    changed_renderer = runtime.identity.as_dict()
+    changed_renderer["pdfium_version"] = "0.0.0.0"
+    _assert_error(
+        ErrorCode.HASH_INTEGRITY_MISMATCH,
+        lambda: SealedImageCacheVerifier(changed_renderer),
+    )
+    png_path = entry / "preview.png"
+    original_png = png_path.read_bytes()
+    png_path.write_bytes(original_png[:-1] + bytes([original_png[-1] ^ 1]))
+    _assert_error(
+        ErrorCode.HASH_INTEGRITY_MISMATCH,
+        lambda: sealed_verifier.verify(
+            entry,
+            request=request.as_cache_input(),
+            renderer=runtime.identity.as_dict(),
+        ),
+    )
+
+
+def test_adaptive_dpi_never_upscales_and_fails_below_its_floor() -> None:
+    assert materializer_module._select_effective_dpi(
+        1500,
+        1500,
+        (0, 0, 0, 0),
+        0,
+        REVIEW_QUALITY,
+    ) == (166, 3459, 3459)
+
+    low_request = replace(REVIEW_QUALITY, dpi=72, min_render_dpi=96)
+    assert materializer_module._select_effective_dpi(
+        72,
+        72,
+        (0, 0, 0, 0),
+        0,
+        low_request,
+    ) == (72, 72, 72)
+
+    dimension_limited = replace(
+        REVIEW_QUALITY,
+        max_dimension_px=1000,
+        max_render_pixels=100_000_000,
+    )
+    assert materializer_module._select_effective_dpi(
+        720,
+        360,
+        (0, 0, 0, 0),
+        0,
+        dimension_limited,
+    ) == (100, 1000, 500)
+
+    too_large = replace(REVIEW_QUALITY, dpi=200, min_render_dpi=96)
+    error = _assert_error(
+        ErrorCode.BACKEND_FAILED,
+        lambda: materializer_module._select_effective_dpi(
+            3000,
+            3000,
+            (0, 0, 0, 0),
+            0,
+            too_large,
+        ),
+    )
+    assert "minimum permitted DPI" in str(error)
+
+
 def test_graphics_in_included_files_resolve_from_backend_project_root(tmp_path: Path) -> None:
     root = tmp_path / "source"
     (root / "sections").mkdir(parents=True)
@@ -547,7 +776,7 @@ def test_pdf_page_corruption_encryption_limits_and_source_drift(
 
     limited = _plan_pdf(
         root,
-        quality=replace(REVIEW_QUALITY, max_render_pixels=10_000),
+        quality=replace(REVIEW_QUALITY, max_render_pixels=9_000),
     )
     with pytest.raises(ContractError) as raised:
         materialize_image(limited, source_root=root, cache_root=tmp_path / "limit-cache")
@@ -620,6 +849,9 @@ def test_cache_must_be_disjoint_from_source(tmp_path: Path) -> None:
     [
         {"name": "Bad Name"},
         {"dpi": 71},
+        {"dpi": 200.0},
+        {"min_render_dpi": 71},
+        {"min_render_dpi": True},
         {"max_tex_bytes": 0},
         {"max_graphics_commands": 0},
         {"max_source_bytes": 0},
@@ -835,9 +1067,15 @@ def test_resolver_rejects_dynamic_missing_unknown_and_directory_candidates(
     extensionless = replace(base, target="figure", extensions_dynamic=True)
     _assert_error(ErrorCode.PATH_TRAVERSAL, lambda: resolve_graphic(root, extensionless))
     _assert_error(
+        ErrorCode.BACKEND_FAILED,
+        lambda: resolve_graphic(root, replace(base, target="figure.gif")),
+    )
+    (root / "figure.gif").write_bytes(b"unsupported exact match")
+    _assert_error(
         ErrorCode.BACKEND_CAPABILITY_MISSING,
         lambda: resolve_graphic(root, replace(base, target="figure.gif")),
     )
+    (root / "figure.gif").unlink()
     _assert_error(
         ErrorCode.BACKEND_CAPABILITY_MISSING,
         lambda: resolve_graphic(root, replace(base, target="figure", extensions=(".gif",))),
@@ -919,14 +1157,17 @@ def test_pixel_rotation_png_and_decode_limits() -> None:
         assert materializer_module._rotated_bounds(10, 5, 180_000) == (10, 5)
         assert materializer_module._rotated_bounds(10, 5, 270_000) == (5, 10)
         assert materializer_module._rotated_bounds(10, 5, 37_000)[0] > 10
-        for angle, expected in ((180_000, (10, 5)), (270_000, (5, 10)), (37_000, None)):
+        for angle in (180_000, 270_000, 37_000):
             rotated = materializer_module._rotate_image(image, angle, image_api)
             try:
-                if expected is not None:
-                    assert rotated.size == expected
+                assert rotated.size == materializer_module._rotated_bounds(10, 5, angle)
             finally:
                 rotated.close()
-        png = materializer_module._encode_canonical_png(image, REVIEW_QUALITY)
+        png = materializer_module._encode_canonical_png(
+            image,
+            REVIEW_QUALITY,
+            REVIEW_QUALITY.dpi,
+        )
     finally:
         image.close()
     _assert_error(
@@ -950,18 +1191,30 @@ def test_pixel_rotation_png_and_decode_limits() -> None:
         _assert_error(
             ErrorCode.BACKEND_FAILED,
             lambda: materializer_module._encode_canonical_png(
-                small_image, replace(REVIEW_QUALITY, max_png_bytes=1)
+                small_image,
+                replace(REVIEW_QUALITY, max_png_bytes=1),
+                REVIEW_QUALITY.dpi,
             ),
         )
     finally:
         small_image.close()
     _assert_error(
         ErrorCode.HASH_INTEGRITY_MISMATCH,
-        lambda: materializer_module._decode_png(b"", REVIEW_QUALITY, image_api),
+        lambda: materializer_module._decode_png(
+            b"",
+            REVIEW_QUALITY,
+            image_api,
+            REVIEW_QUALITY.dpi,
+        ),
     )
     _assert_error(
         ErrorCode.HASH_INTEGRITY_MISMATCH,
-        lambda: materializer_module._decode_png(b"not-png", REVIEW_QUALITY, image_api),
+        lambda: materializer_module._decode_png(
+            b"not-png",
+            REVIEW_QUALITY,
+            image_api,
+            REVIEW_QUALITY.dpi,
+        ),
     )
     jpeg_buffer = io.BytesIO()
     jpeg = image_api.new("RGB", (2, 2), (1, 2, 3))
@@ -971,9 +1224,19 @@ def test_pixel_rotation_png_and_decode_limits() -> None:
         jpeg.close()
     _assert_error(
         ErrorCode.HASH_INTEGRITY_MISMATCH,
-        lambda: materializer_module._decode_png(jpeg_buffer.getvalue(), REVIEW_QUALITY, image_api),
+        lambda: materializer_module._decode_png(
+            jpeg_buffer.getvalue(),
+            REVIEW_QUALITY,
+            image_api,
+            REVIEW_QUALITY.dpi,
+        ),
     )
-    decoded = materializer_module._decode_png(png, REVIEW_QUALITY, image_api)
+    decoded = materializer_module._decode_png(
+        png,
+        REVIEW_QUALITY,
+        image_api,
+        REVIEW_QUALITY.dpi,
+    )
     decoded.close()
 
 
@@ -1067,3 +1330,75 @@ def test_cache_manifest_shape_and_atomic_publication_race(
         lambda: materialize_image(request, source_root=root, cache_root=broken_cache),
     )
     assert not list(broken_cache.glob(".stage-*"))
+
+
+def test_one_redundant_graphic_group_resolves_and_preserves_source_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    (root / "figures").mkdir(parents=True)
+    figure_name = "Review \N{EN DASH} plot.pdf"
+    (root / "figures" / figure_name).write_bytes(_minimal_pdf(((0.1, 0.2, 0.3),)))
+    command = r"\includegraphics[width=.5\textwidth]{{" + figure_name + "}}"
+    latex = "\\graphicspath{{figures/}}\n" + command + "\n"
+
+    occurrence = _scan_one(root, latex)
+    resolved = resolve_graphic(root, occurrence)
+    plan = plan_image_request(root, occurrence)
+
+    assert occurrence.target == f"{{{figure_name}}}"
+    assert occurrence.source_text == command
+    assert latex[occurrence.start_char : occurrence.end_char] == command
+    assert resolved.source_path == f"figures/{figure_name}"
+    assert plan.diagnostics == ()
+    assert plan.request is not None
+    assert plan.request.source_path == f"figures/{figure_name}"
+    assert plan.passthrough_option_text == r"width=.5\textwidth"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"\includegraphics{{{plot.pdf}}}",
+        r"\includegraphics{{plot.pdf}suffix}",
+        r"\includegraphics{prefix{plot.pdf}}",
+        r"\includegraphics{\jobname.pdf}",
+    ],
+)
+def test_nested_partial_and_macro_graphic_targets_remain_manual(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    root = tmp_path / "source"
+    occurrence = _scan_one(root, command)
+
+    plan = plan_image_request(root, occurrence)
+
+    assert plan.request is None
+    assert {item.code for item in plan.diagnostics} == {"IMAGE_DYNAMIC_INPUT"}
+    with pytest.raises(ContractError) as raised:
+        resolve_graphic(root, occurrence)
+    assert raised.value.code is ErrorCode.PATH_TRAVERSAL
+
+
+@pytest.mark.parametrize(
+    ("target", "code"),
+    [
+        ("/absolute/plot.pdf", ErrorCode.PATH_ABSOLUTE),
+        (r"\\server\share\plot.pdf", ErrorCode.PATH_ABSOLUTE),
+        ("C:/private/plot.pdf", ErrorCode.PATH_ABSOLUTE),
+        ("../plot.pdf", ErrorCode.PATH_TRAVERSAL),
+    ],
+)
+def test_redundant_group_does_not_relax_unsafe_graphic_paths(
+    tmp_path: Path,
+    target: str,
+    code: ErrorCode,
+) -> None:
+    root = tmp_path / "source"
+    occurrence = _scan_one(root, "\\includegraphics{{" + target + "}}")
+
+    with pytest.raises(ContractError) as raised:
+        plan_image_request(root, occurrence)
+
+    assert raised.value.code is code

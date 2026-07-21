@@ -23,6 +23,22 @@ public entry points are:
 the pure frontend, and disables tex2word's timestamped embedded manifest. The
 adapter consumes only returned DOCX bytes and public report counters. It does
 not copy or import tex2word parser, IR, writer, or OMML internals.
+
+The worker also uses tex2word 1.0.5's public `reference_doc` parameter. The
+`academic-review-v1` DOCX is generated from five fixed OPC/XML members with
+fixed ZIP metadata, verified against a pinned SHA-256, materialized only in the
+owned conversion stage, and removed in `finally`. It is not a wheel asset. The
+profile supplies A4 single-column geometry, Times New Roman/SimSun defaults,
+heading/caption/bibliography styles, and review-oriented paragraph rhythm.
+`reference-doc/info` evidence is mandatory; an upstream warning or silent
+fallback blocks publication. The profile ID, package hash, and generator-config
+hash are included in `BackendCapabilities.configuration_sha256`.
+
+Microsoft Word may rewrite style IDs and localized font names while refreshing
+live fields. Before sealing the reviewer-facing copy, the field finalizer
+reapplies deterministic table/image geometry and restores only trusted
+paragraph/run/table properties by stable style name. Word's IDs and document
+references are retained, while the pre-refresh style defaults are restored.
 tex2word 1.0.5 can expose a report entry's severity either as its enum object
 or as the enum's string value, depending on the construct. The isolated worker
 normalizes both documented runtime shapes before counting warnings and errors;
@@ -66,7 +82,23 @@ code into a canonical RGB PNG. Page selection, `trim`/`viewport`/`clip`, and
 rotation are baked into the pixels. The safe layout-only options `width`,
 `height`, `totalheight`, `scale`, and `keepaspectratio` remain on the derived
 command. Existing PNG/JPEG images pass through unchanged when they use only
-those layout options.
+those layout options. When a raster target was found through `\graphicspath`,
+the derived command records and uses the verified root-relative path instead
+of leaving an unresolved shorthand for the backend.
+
+Materialization uses at most two workers. Requests with the same cache-key
+input share one future, while manifest entries remain in original LaTeX order
+regardless of completion order. This bounds Windows memory use and avoids
+rendering the same PDF page twice without weakening per-occurrence evidence.
+
+tex2word 1.0.5 has one narrowly version-gated compatibility profile for a
+known parser loss: several direct `minipage` children of `figure` can otherwise
+collapse to the final image. In the derived tree only, a `minipage` is renamed
+to `subfigure` only when it is a direct `figure`/`figure*` child, contains
+exactly one `\includegraphics` and one `\caption`, and contains no existing
+subfigure/subfloat construct. Every transformation records its source span and
+original/derived block hashes in the overlay manifest. Other shapes remain
+untouched and fail the normal image-count gate if the backend loses them.
 
 SVG, EPS/PostScript, dynamic or ambiguous paths/options, malformed commands,
 out-of-range pages, rendering failures, and unsupported pixel operations
@@ -94,9 +126,12 @@ status, and instance counts are embedded in the versioned `SourceMap` and
 sealed contract objects. On `workflow status` and `workflow receive`, it
 requires the SourceMap/ExportReport bindings to be identical, re-hashes the
 fixed-path manifest ArtifactRef, rediscovers the original and derived trees,
-reconciles counts, and revalidates each materialized PNG/cache binding. A
-changed manifest, derived dependency/PNG, count, path, or re-sealed binding
-therefore fails closed.
+reconciles counts, and revalidates each materialized cache's exact member set,
+request, content-addressed key, renderer identity, manifest shape, and PNG byte
+size/SHA-256. Pixel decoding and canonical re-encoding already passed during
+cache creation; repeating them cannot add evidence once the exact PNG bytes
+and pixel hash are sealed. A changed manifest, derived dependency/PNG, count,
+path, request, renderer, or re-sealed binding therefore still fails closed.
 
 The shared `ImageOverlayBinding` Schema is closed to unknown fields and
 requires exactly this security-relevant shape: `status`, `manifest` (`ArtifactRef`),
@@ -139,8 +174,16 @@ to a low-risk source unit.
 After conversion, visible `w:t` paragraph text is normalized with the same
 whitespace-only profile. A bookmark is inserted only when the normalized text
 occurs exactly once in the source-unit set and exactly once in
-`word/document.xml`. Bookmark names are deterministic `lwr_*` names derived
-from the stable unit ID and remain within Word's 40-character limit.
+`word/document.xml`. The Word occurrence may be a whole paragraph or one
+contiguous substring of a longer paragraph. A substring is exact only when its
+grapheme and word boundaries are safe, its selected raw Word text already
+equals the normalized source text character-for-character, and all endpoints
+and intervening content are direct plain `w:r` text runs. The exporter splits
+only those safe runs and surrounds precisely the matched text. Collapsed Word
+whitespace, fields, hyperlinks, content controls, nested runs, overlapping
+source ranges, or any ambiguous occurrence remain unanchored. Bookmark names
+are deterministic `lwr_*` names derived from the stable unit ID and remain
+within Word's 40-character limit.
 
 No fuzzy match, positional guess, or tie-breaker is used:
 
@@ -170,6 +213,11 @@ returned reject/original semantic view. Accept All, untracked visible drift,
 and missing/changed export bookmarks fail before a `ChangeSet` is accepted.
 That comparison is deliberately scoped: formatting, paragraph-mark revisions,
 OMML, and images still require manual integrity review.
+The beta protection summary also does not bind bookmark span endpoints, every
+DrawingML layout attribute, every OMML property, or the semantic use of each
+relationship ID by a specific drawing element. Those structures are preserved
+and checked at the currently documented semantic/count level, but they remain
+an explicit manual-review boundary rather than an automatic-patch guarantee.
 
 ## Read-only DOCX acceptance
 

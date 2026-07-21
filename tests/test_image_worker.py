@@ -55,11 +55,18 @@ def _request(source_bytes: bytes, *, page: int = 1) -> ImageRequest:
     )
 
 
-def _canonical_png() -> tuple[Any, bytes, int, int, str]:
+def _canonical_png(
+    *,
+    effective_dpi: int = REVIEW_QUALITY.dpi,
+) -> tuple[Any, bytes, int, int, str]:
     image_module = importlib.import_module("PIL.Image")
     image = image_module.new("RGB", (3, 2), (10, 20, 30))
     try:
-        png_bytes = materializer._encode_canonical_png(image, REVIEW_QUALITY)
+        png_bytes = materializer._encode_canonical_png(
+            image,
+            REVIEW_QUALITY,
+            effective_dpi,
+        )
         pixel_sha256 = materializer._pixel_sha256(image)
     finally:
         image.close()
@@ -114,7 +121,10 @@ def _write_worker_output(
     width_px: int,
     height_px: int,
     pixel_sha256: str,
+    *,
+    effective_dpi: int | None = None,
 ) -> dict[str, object]:
+    actual_dpi = request.quality.dpi if effective_dpi is None else effective_dpi
     png_digest = digest_bytes(png_bytes)
     report: dict[str, object] = {
         "format": materializer._WORKER_REPORT_FORMAT,
@@ -129,7 +139,7 @@ def _write_worker_output(
             "pixel_sha256": pixel_sha256,
             "width_px": width_px,
             "height_px": height_px,
-            "dpi": request.quality.dpi,
+            "dpi": actual_dpi,
         },
     }
     (root / materializer._WORKER_PNG_NAME).write_bytes(png_bytes)
@@ -151,7 +161,10 @@ def test_worker_main_writes_bound_report_and_parent_reverifies_it(
     source_bytes = b"synthetic-pdf-evidence"
     request = _request(source_bytes)
     renderer = _renderer()
-    image_module, png_bytes, width_px, height_px, pixel_sha256 = _canonical_png()
+    effective_dpi = 144
+    image_module, png_bytes, width_px, height_px, pixel_sha256 = _canonical_png(
+        effective_dpi=effective_dpi
+    )
     _write_worker_request(tmp_path, source_bytes, request, renderer)
     runtime = SimpleNamespace(identity=renderer)
     monkeypatch.setattr(worker, "_load_pdf_runtime", lambda: runtime)
@@ -163,6 +176,7 @@ def test_worker_main_writes_bound_report_and_parent_reverifies_it(
             width_px,
             height_px,
             pixel_sha256,
+            effective_dpi,
         ),
     )
     monkeypatch.chdir(tmp_path)
@@ -188,9 +202,10 @@ def test_worker_main_writes_bound_report_and_parent_reverifies_it(
         renderer,
         image_module,
     )
-    assert verified == (png_bytes, width_px, height_px, pixel_sha256)
+    assert verified == (png_bytes, width_px, height_px, pixel_sha256, effective_dpi)
     report = json.loads((tmp_path / materializer._WORKER_REPORT_NAME).read_bytes())
     assert report["request_sha256"] == request.request_sha256
+    assert report["output"]["dpi"] == effective_dpi
 
     _assert_error(
         ErrorCode.PATH_TRAVERSAL,
@@ -234,7 +249,11 @@ def test_worker_rejects_each_untrusted_binding(
         "_load_pdf_runtime",
         lambda: SimpleNamespace(identity=runtime_identity),
     )
-    monkeypatch.setattr(worker, "_render_pdf", lambda *args: (b"png", 1, 1, "sha256:" + "c" * 64))
+    monkeypatch.setattr(
+        worker,
+        "_render_pdf",
+        lambda *args: (b"png", 1, 1, "sha256:" + "c" * 64, REVIEW_QUALITY.dpi),
+    )
 
     _assert_error(
         expected,
@@ -262,6 +281,9 @@ def test_worker_serializers_reject_noncanonical_shapes(tmp_path: Path) -> None:
     wrong_integer = copy.deepcopy(request.quality.as_dict())
     wrong_integer["dpi"] = True
     invalid_quality_values.append(wrong_integer)
+    wrong_minimum = copy.deepcopy(request.quality.as_dict())
+    wrong_minimum["min_render_dpi"] = True
+    invalid_quality_values.append(wrong_minimum)
     for value in invalid_quality_values:
         _assert_error(
             ErrorCode.SCHEMA_INVALID,
@@ -337,9 +359,39 @@ def test_worker_serializers_reject_noncanonical_shapes(tmp_path: Path) -> None:
     assert existing.read_bytes() == b"first"
 
 
+def test_legacy_v2_cache_request_fails_closed_with_regeneration_guidance(
+    tmp_path: Path,
+) -> None:
+    request = _request(b"legacy-source")
+    legacy_request = copy.deepcopy(request.as_cache_input())
+    legacy_quality = legacy_request["quality"]
+    assert isinstance(legacy_quality, dict)
+    legacy_quality.pop("min_render_dpi")
+
+    error = _assert_error(
+        ErrorCode.TOOL_VERSION_UNSUPPORTED,
+        lambda: materializer.verify_image_cache_entry(
+            tmp_path / "legacy-v2-entry",
+            request=legacy_request,
+            renderer=_renderer().as_dict(),
+        ),
+    )
+    assert "regenerate the image overlay" in str(error)
+
+
 @pytest.mark.parametrize(
     "case",
-    ["shape", "binding", "output_shape", "output_values", "digest", "pixels"],
+    [
+        "shape",
+        "binding",
+        "output_shape",
+        "output_values",
+        "dpi_type",
+        "dpi_range",
+        "dpi_metadata",
+        "digest",
+        "pixels",
+    ],
 )
 def test_parent_rejects_tampered_worker_artifacts(tmp_path: Path, case: str) -> None:
     source_bytes = b"source"
@@ -365,6 +417,12 @@ def test_parent_rejects_tampered_worker_artifacts(tmp_path: Path, case: str) -> 
         output.pop("dpi")
     elif case == "output_values":
         output["mode"] = "RGBA"
+    elif case == "dpi_type":
+        output["dpi"] = True
+    elif case == "dpi_range":
+        output["dpi"] = request.quality.min_render_dpi - 1
+    elif case == "dpi_metadata":
+        output["dpi"] = 144
     elif case == "digest":
         output["size_bytes"] = len(png_bytes) + 1
     elif case == "pixels":
@@ -391,6 +449,7 @@ def test_parent_rejects_tampered_worker_artifacts(tmp_path: Path, case: str) -> 
         "binding",
         "output_shape",
         "output_values",
+        "dpi_metadata",
         "pixels",
         "noncanonical_png",
     ],
@@ -429,6 +488,7 @@ def test_cache_verifier_rejects_structural_and_pixel_tampering(
             pixel_sha256=pixel_sha256,
             width_px=width_px,
             height_px=height_px,
+            effective_dpi=request.quality.dpi,
         )
         manifest_output = manifest["output"]
         assert isinstance(manifest_output, dict)
@@ -440,6 +500,8 @@ def test_cache_verifier_rejects_structural_and_pixel_tampering(
             manifest_output.pop("dpi")
         elif case == "output_values":
             manifest_output["path"] = "other.png"
+        elif case == "dpi_metadata":
+            manifest_output["dpi"] = 144
         elif case == "pixels":
             manifest_output["height_px"] = height_px + 1
         (entry / materializer._CACHE_PNG_NAME).write_bytes(png_bytes)
@@ -550,15 +612,21 @@ def test_render_pdf_directly_covers_native_success_and_resource_cleanup() -> Non
     request = _request(source_bytes)
     runtime = materializer._load_pdf_runtime()
 
-    png_bytes, width_px, height_px, pixel_sha256 = materializer._render_pdf(
+    png_bytes, width_px, height_px, pixel_sha256, effective_dpi = materializer._render_pdf(
         source_bytes,
         request,
         runtime,
     )
 
     assert (width_px, height_px) == (200, 200)
+    assert effective_dpi == request.quality.dpi
     assert digest_bytes(png_bytes).size_bytes <= request.quality.max_png_bytes
-    decoded = materializer._decode_png(png_bytes, request.quality, runtime.image_module)
+    decoded = materializer._decode_png(
+        png_bytes,
+        request.quality,
+        runtime.image_module,
+        effective_dpi,
+    )
     try:
         assert decoded.size == (width_px, height_px)
         assert materializer._pixel_sha256(decoded) == pixel_sha256

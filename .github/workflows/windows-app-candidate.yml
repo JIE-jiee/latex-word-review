@@ -1,0 +1,376 @@
+name: Windows app candidate (no publish)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-app-candidate.yml"
+      - ".github/scripts/release_checks.py"
+      - "installer/**"
+      - "packaging/**"
+      - "scripts/build-windows.ps1"
+      - "scripts/test-windows-installer.ps1"
+      - "scripts/verify-windows-release.ps1"
+      - "src/**"
+      - "tests/test_app_browser_e2e.py"
+      - "tests/test_windows_packaging.py"
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
+      - "third_party/cpython-3.12.13-license.rst"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.16"
+  UV_NO_PROGRESS: "1"
+  PYINSTALLER_VERSION: "6.21.0"
+  INNO_SETUP_VERSION: "7.0.2"
+  INNO_SETUP_URL: >-
+    https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe
+  INNO_SETUP_SHA256: "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
+
+jobs:
+  browser-e2e:
+    name: Real Microsoft Edge four-step product journey
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      LATEX_WORD_REVIEW_BROWSER_E2E: "1"
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up exact Python 3.12.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12.13"
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install only the locked browser test boundary
+        run: >-
+          uv sync --frozen --no-default-groups --group browser-e2e
+          --python 3.12.13
+      - name: Run the installed-Edge four-step gate and reject skips
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidenceRoot = "build\browser-e2e"
+          $null = New-Item -ItemType Directory -Force -Path $evidenceRoot
+          uv run --frozen --no-default-groups --group browser-e2e --python 3.12.13 pytest tests/test_app_browser_e2e.py --basetemp "$evidenceRoot\pytest" --junitxml "$evidenceRoot\junit.xml"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Real Microsoft Edge four-step product journey failed"
+          }
+          [xml]$junit = Get-Content -Raw -Encoding utf8 -LiteralPath "$evidenceRoot\junit.xml"
+          $tests = 0
+          $skipped = 0
+          foreach ($suite in @($junit.testsuites.testsuite)) {
+              $tests += [int]$suite.tests
+              $skipped += [int]$suite.skipped
+          }
+          if ($tests -ne 1 -or $skipped -ne 0) {
+              throw "Real Microsoft Edge four-step product journey must run exactly once without skips"
+          }
+
+  candidate:
+    name: Build verified Windows installer and portable ZIP
+    needs: browser-e2e
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up exact Python 3.12.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12.13"
+      - name: Reject private paths, secrets, runtime material, and unapproved binaries
+        run: >-
+          python .github/scripts/release_checks.py repo --root .
+          --include-untracked
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Verify the lockfile is current
+        run: uv lock --check
+      - name: Install only the locked frozen-app dependency boundary
+        run: >-
+          uv sync --frozen --no-default-groups --group release
+          --extra pdf-figures --python 3.12.13
+      - name: Derive reproducible build timestamp from the source commit
+        run: >-
+          .venv\Scripts\python.exe .github/scripts/release_checks.py
+          source-date-epoch --github-env "$env:GITHUB_ENV"
+      - name: Fetch and verify official immutable Inno Setup
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $toolsRoot = Join-Path $PWD "build\tools"
+          $installer = Join-Path $toolsRoot "innosetup-$env:INNO_SETUP_VERSION-x64.exe"
+          $innoRoot = Join-Path $toolsRoot "inno-setup-$env:INNO_SETUP_VERSION"
+          $null = New-Item -ItemType Directory -Force -Path $toolsRoot
+          Invoke-WebRequest -Uri $env:INNO_SETUP_URL -OutFile $installer
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:INNO_SETUP_SHA256) {
+              throw "Inno Setup download hash mismatch"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+              $null -eq $signature.SignerCertificate -or
+              $signature.SignerCertificate.Subject -notmatch "CN=Pyrsys B\.V\.") {
+              throw "Inno Setup Authenticode signature is not the expected valid publisher"
+          }
+          & $installer "/VERYSILENT" "/SUPPRESSMSGBOXES" "/NORESTART" "/SP-" `
+              "/PORTABLE=1" "/DIR=$innoRoot"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Inno Setup portable tool installation failed with exit code $LASTEXITCODE"
+          }
+          $iscc = Join-Path $innoRoot "ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+              throw "Pinned Inno Setup compiler was not installed"
+          }
+          $banner = ((& $iscc "/?" 2>&1) | Out-String)
+          if ($banner -notmatch "(?m)^Inno Setup 7 Command-Line Compiler\r?$") {
+              throw "Pinned Inno Setup compiler banner could not be verified"
+          }
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV,
+              "ISCC_PATH=$iscc" + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
+      - name: Build and internally verify the Windows app candidate
+        shell: powershell
+        run: >-
+          .\scripts\build-windows.ps1
+          -Python .venv\Scripts\python.exe
+          -Iscc "$env:ISCC_PATH"
+          -OutputRoot build\windows-release
+          -SourceDateEpoch "$env:SOURCE_DATE_EPOCH"
+          -ExpectedPyInstallerVersion "$env:PYINSTALLER_VERSION"
+      - name: Reject optional non-release dependency families from the frozen bundle
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $internal = "build\windows-release\dist\latex-word-review\_internal"
+          $forbidden = "^(citeproc|citeproc_py|latex2mathml|matplotlib|numpy)([-_.]|$)"
+          $unexpected = Get-ChildItem -Force -Recurse -LiteralPath $internal | Where-Object {
+              $_.Name -match $forbidden
+          } | Select-Object -First 1
+          if ($null -ne $unexpected) {
+              throw "Optional dependency entered the frozen bundle: $($unexpected.Name)"
+          }
+      - name: Prove the upload directory contains only verified candidate files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifactRoot = "build\windows-release\artifacts"
+          $entries = @(Get-ChildItem -Force -LiteralPath $artifactRoot)
+          if ($entries.Count -ne 3 -or @($entries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+              throw "Windows candidate artifact directory must contain exactly three files"
+          }
+          $names = @($entries.Name)
+          foreach ($pattern in @(
+              "^latex-word-review-[0-9A-Za-z.+-]+-windows-x64-portable[.]zip$",
+              "^latex-word-review-[0-9A-Za-z.+-]+-windows-x64-setup[.]exe$",
+              "^SHA256SUMS[.]txt$"
+          )) {
+              if (@($names | Where-Object { $_ -match $pattern }).Count -ne 1) {
+                  throw "Windows candidate artifact whitelist mismatch"
+              }
+          }
+      - name: Re-run the standalone release verifier
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $verificationLines = @(
+              .\scripts\verify-windows-release.ps1 -ReleaseRoot build\windows-release
+          )
+          if ($verificationLines.Count -eq 0) {
+              throw "Standalone Windows release verification failed"
+          }
+          $verificationLines | ForEach-Object { Write-Output $_ }
+          try {
+              $verification = $verificationLines[-1] | ConvertFrom-Json
+          }
+          catch {
+              throw "Standalone Windows release verification did not emit valid JSON"
+          }
+          if ($verification.status -ne "verified" -or
+              $verification.executable_smoke_test -ne $true) {
+              throw "Standalone Windows release verification summary is incomplete"
+          }
+          [IO.File]::WriteAllText(
+              "build\windows-release-verification-summary.json",
+              ($verification | ConvertTo-Json -Depth 4 -Compress) + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
+      - name: Install, compare, smoke-test, and uninstall the candidate locally
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smokeLines = @(
+              .\scripts\test-windows-installer.ps1 -ReleaseRoot build\windows-release
+          )
+          if ($smokeLines.Count -eq 0) {
+              throw "Windows installer smoke test did not emit a result"
+          }
+          $smokeLines | ForEach-Object { Write-Output $_ }
+          try {
+              $smoke = $smokeLines[-1] | ConvertFrom-Json
+          }
+          catch {
+              throw "Windows installer smoke test did not emit valid JSON"
+          }
+          if ($smoke.status -ne "verified" -or
+              $smoke.install_directory_removed -ne $true -or
+              $smoke.uninstall_registration_removed -ne $true) {
+              throw "Windows installer smoke test summary is incomplete"
+          }
+          [IO.File]::WriteAllText(
+              "build\windows-installer-smoke-summary.json",
+              ($smoke | ConvertTo-Json -Depth 4 -Compress) + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
+      - name: Prepare non-executable build evidence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $verificationPath = "build\windows-release-verification-summary.json"
+          $verification = Get-Content -Raw -Encoding utf8 -LiteralPath $verificationPath |
+              ConvertFrom-Json
+          if ($verification.status -ne "verified" -or
+              $verification.executable_smoke_test -ne $true) {
+              throw "Windows release verification evidence is incomplete"
+          }
+
+          $artifactRoot = "build\windows-release\artifacts"
+          $onedir = "build\windows-release\dist\latex-word-review"
+          $portable = @(
+              Get-ChildItem -File -LiteralPath $artifactRoot |
+                  Where-Object { $_.Name -match "-windows-x64-portable[.]zip$" }
+          )[0]
+          $setup = @(
+              Get-ChildItem -File -LiteralPath $artifactRoot |
+                  Where-Object { $_.Name -match "-windows-x64-setup[.]exe$" }
+          )[0]
+          $installerSmokePath = "build\windows-installer-smoke-summary.json"
+          $installerSmoke = Get-Content -Raw -Encoding utf8 -LiteralPath $installerSmokePath |
+              ConvertFrom-Json
+          if ($installerSmoke.status -ne "verified" -or
+              $installerSmoke.install_directory_removed -ne $true -or
+              $installerSmoke.uninstall_registration_removed -ne $true) {
+              throw "Windows installer smoke evidence is incomplete"
+          }
+          $evidenceRoot = "build\windows-app-build-evidence"
+          if (Test-Path -LiteralPath $evidenceRoot) {
+              throw "Windows app evidence directory already exists"
+          }
+          $null = New-Item -ItemType Directory -Path $evidenceRoot
+          Copy-Item -LiteralPath (Join-Path $artifactRoot "SHA256SUMS.txt") `
+              -Destination (Join-Path $evidenceRoot "SHA256SUMS.txt")
+          Copy-Item -LiteralPath (Join-Path $onedir "CONTENTS.sha256") `
+              -Destination (Join-Path $evidenceRoot "CONTENTS.sha256")
+          Copy-Item -LiteralPath $installerSmokePath `
+              -Destination (Join-Path $evidenceRoot "installer-smoke.json")
+
+          $summary = [ordered]@{
+              schema_version = "latex-word-review/windows-app-build-evidence/v1"
+              status = "verified_local_build"
+              distribution_gate = "blocked_pending_native_dependency_license_compliance"
+              distribution_blockers = @(
+                  "lxml_windows_wheel_native_license_and_relinking_evidence_incomplete"
+              )
+              binaries_uploaded = $false
+              version = [string]$verification.version
+              source = [ordered]@{
+                  ref = $env:GITHUB_REF
+                  sha = $env:GITHUB_SHA
+                  source_date_epoch = $env:SOURCE_DATE_EPOCH
+              }
+              tools = [ordered]@{
+                  python = "3.12"
+                  pyinstaller = $env:PYINSTALLER_VERSION
+                  inno_setup = $env:INNO_SETUP_VERSION
+              }
+              candidates = @(
+                  [ordered]@{
+                      name = $portable.Name
+                      size_bytes = $portable.Length
+                      sha256 = [string]$verification.portable_sha256
+                      uploaded = $false
+                  },
+                  [ordered]@{
+                      name = $setup.Name
+                      size_bytes = $setup.Length
+                      sha256 = [string]$verification.installer_sha256
+                      uploaded = $false
+                  }
+              )
+              verification = [ordered]@{
+                  onedir_file_count = $verification.onedir_file_count
+                  cli_executable_sha256 = [string]$verification.executable_sha256
+                  gui_executable_sha256 = [string]$verification.gui_executable_sha256
+                  executable_smoke_test = $verification.executable_smoke_test
+                  installer_smoke = [ordered]@{
+                      payload_file_count = $installerSmoke.payload_file_count
+                      installed_cli = [string]$installerSmoke.installed_cli
+                      install_directory_removed = $installerSmoke.install_directory_removed
+                      uninstall_registration_removed = (
+                          $installerSmoke.uninstall_registration_removed
+                      )
+                  }
+              }
+          }
+          $summaryPath = Join-Path $evidenceRoot "candidate-summary.json"
+          [IO.File]::WriteAllText(
+              $summaryPath,
+              ($summary | ConvertTo-Json -Depth 6 -Compress) + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
+
+          $expectedEvidence = @(
+              "candidate-summary.json",
+              "CONTENTS.sha256",
+              "installer-smoke.json",
+              "SHA256SUMS.txt"
+          )
+          $evidenceEntries = @(Get-ChildItem -Force -LiteralPath $evidenceRoot)
+          if ($evidenceEntries.Count -ne $expectedEvidence.Count -or
+              @($evidenceEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+              throw "Windows app build evidence must contain exactly four text files"
+          }
+          foreach ($name in $expectedEvidence) {
+              $file = Get-Item -Force -LiteralPath (Join-Path $evidenceRoot $name)
+              if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  $file.Length -le 0 -or $file.Length -gt 2MB) {
+                  throw "Windows app build evidence file is unsafe: $name"
+              }
+          }
+      - name: Upload non-executable Windows app build evidence only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-app-build-evidence-${{ github.sha }}
+          path: |
+            build/windows-app-build-evidence/candidate-summary.json
+            build/windows-app-build-evidence/CONTENTS.sha256
+            build/windows-app-build-evidence/installer-smoke.json
+            build/windows-app-build-evidence/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7

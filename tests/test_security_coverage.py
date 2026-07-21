@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -43,7 +44,9 @@ from latex_word_review.paths import (
     relative_path_from,
     resolve_within,
     validate_relative_path,
+    windows_extended_path,
 )
+from latex_word_review.review_reference import REFERENCE_DOCX_SHA256
 from latex_word_review.runtime import CommandResult, minimal_environment, run_command
 
 FIXTURE_DOCX = Path(__file__).parent / "fixtures/e0-minimal-paper/base/review-base.docx"
@@ -91,8 +94,9 @@ class _Result:
 
 
 class _FakeTex2Word:
-    def __init__(self, result: _Result) -> None:
+    def __init__(self, result: _Result, *, reference_severity: str = "info") -> None:
         self._result = result
+        self._reference_severity = reference_severity
 
     def convert_source(
         self,
@@ -102,6 +106,7 @@ class _FakeTex2Word:
         embed_manifest: bool = True,
         citation_mode: str = "static",
         frontend: str = "pure",
+        reference_doc: str | None = None,
     ) -> _Result:
         assert source == "source"
         assert (base_dir, embed_manifest, citation_mode, frontend) == (
@@ -109,6 +114,16 @@ class _FakeTex2Word:
             False,
             "static",
             "pure",
+        )
+        assert reference_doc is not None
+        reference_path = Path(reference_doc)
+        assert reference_path.is_file()
+        assert __import__("hashlib").sha256(reference_path.read_bytes()).hexdigest() == (
+            REFERENCE_DOCX_SHA256
+        )
+        self._result.report.entries.insert(
+            0,
+            _Entry(_Severity(self._reference_severity), "reference-doc"),
         )
         return self._result
 
@@ -125,6 +140,7 @@ def test_tex2word_worker_success_sanitizes_and_bounds_constructs(
     entries[0].construct = "unsafe\x00" + "x" * 200
     fake = _FakeTex2Word(_Result(_Report(entries), b"docx"))
     monkeypatch.setattr(importlib, "import_module", lambda name: fake)
+    monkeypatch.setattr(worker, "_windows_image_path_compat", lambda _: nullcontext())
 
     assert (
         worker.main(["--source", str(source), "--output", str(output), "--report", str(report)])
@@ -132,8 +148,9 @@ def test_tex2word_worker_success_sanitizes_and_bounds_constructs(
     )
     document = __import__("json").loads(report.read_text(encoding="utf-8"))
     assert output.read_bytes() == b"docx"
-    assert document["entry_count"] == 260
+    assert document["entry_count"] == 261
     assert document["warning_count"] == 260
+    assert document["reference_loaded"] is True
     assert len(document["constructs"]) == 256
     assert all("\x00" not in item and len(item) <= 128 for item in document["constructs"])
 
@@ -149,6 +166,7 @@ def test_tex2word_worker_errors_and_missing_output_fail_closed(
     error = _Entry(_Severity("error"), "unsupported")
     fake = _FakeTex2Word(_Result(_Report([error]), b"must-not-publish"))
     monkeypatch.setattr(importlib, "import_module", lambda name: fake)
+    monkeypatch.setattr(worker, "_windows_image_path_compat", lambda _: nullcontext())
 
     assert worker._run(source, output, report) == 20
     assert not output.exists()
@@ -165,6 +183,24 @@ def test_tex2word_worker_errors_and_missing_output_fail_closed(
     assert not report.exists()
 
 
+def test_tex2word_worker_rejects_silent_reference_fallback_and_cleans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "main.tex"
+    source.write_text("source", encoding="utf-8")
+    output = tmp_path / "review.docx"
+    report = tmp_path / "report.json"
+    fake = _FakeTex2Word(_Result(_Report([]), b"must-not-publish"), reference_severity="warning")
+    monkeypatch.setattr(importlib, "import_module", lambda name: fake)
+    monkeypatch.setattr(worker, "_windows_image_path_compat", lambda _: nullcontext())
+
+    assert worker._run(source, output, report) == 23
+    assert not output.exists()
+    assert '"reference_loaded":false' in report.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob(".lwr-review-reference-*.docx"))
+
+
 def test_tex2word_worker_accepts_string_warning_and_error_severities(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -176,6 +212,7 @@ def test_tex2word_worker_accepts_string_warning_and_error_severities(
     warning = _Entry("warning", "recoverable")
     fake = _FakeTex2Word(_Result(_Report([warning]), b"docx"))
     monkeypatch.setattr(importlib, "import_module", lambda name: fake)
+    monkeypatch.setattr(worker, "_windows_image_path_compat", lambda _: nullcontext())
 
     assert worker._run(source, output, report) == 0
     assert output.read_bytes() == b"docx"
@@ -193,6 +230,44 @@ def test_tex2word_worker_accepts_string_warning_and_error_severities(
     assert worker._run(source, output, report) == 20
     assert not output.exists()
     assert '"error_count":1' in report.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 extended-path compatibility")
+def test_tex2word_worker_compat_resolves_forward_slash_extended_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("tex2word")
+    document_module = importlib.import_module("tex2word.backend.document")
+    writer = document_module.DocumentWriter
+    original = writer._resolve_image_path
+    relative = "lwr-images/" + "a" * 64 + "/preview.png"
+    padding = max(16, 270 - len(str(tmp_path)) - len(relative) - 2)
+    root = tmp_path / ("r" * padding)
+    root.mkdir()
+    monkeypatch.chdir(root)
+    extended_root = windows_extended_path(root)
+    image = extended_root / Path(relative)
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"png-evidence")
+    legacy = root / Path(relative)
+    assert len(str(legacy)) > 260
+    probe = type("WriterProbe", (), {"base_dir": "."})()
+
+    with (
+        pytest.raises(RuntimeError, match="compat restoration sentinel"),
+        worker._windows_image_path_compat(module),
+    ):
+        assert writer._resolve_image_path is not original
+        resolved = writer._resolve_image_path(probe, relative)
+        assert resolved is not None
+        assert resolved.startswith("\\\\?\\")
+        assert Path(resolved).read_bytes() == b"png-evidence"
+        assert probe.base_dir == "."
+        raise RuntimeError("compat restoration sentinel")
+
+    assert writer._resolve_image_path is original
+    assert probe.base_dir == "."
 
 
 def test_tex2word_worker_exclusive_write_never_clobbers(tmp_path: Path) -> None:
@@ -353,13 +428,27 @@ def test_tex2word_report_and_cleanup_reject_untrusted_shapes(tmp_path: Path) -> 
     escaped = tmp_path / "foreign.json"
     _assert_error(
         ErrorCode.INTERNAL_INVARIANT,
-        lambda: backend._cleanup_report_path(escaped, parent, "review.docx"),
+        lambda: backend._cleanup_report_path(escaped, parent),
     )
     unowned = parent / "foreign.json"
     _assert_error(
         ErrorCode.INTERNAL_INVARIANT,
-        lambda: backend._cleanup_report_path(unowned, parent, "review.docx"),
+        lambda: backend._cleanup_report_path(unowned, parent),
     )
+
+
+def test_tex2word_report_uses_a_fixed_short_owned_leaf(tmp_path: Path) -> None:
+    parent = tmp_path / "out"
+    parent.mkdir()
+    backend = Tex2WordBackend()
+
+    report = backend._prepare_report_path(parent)
+
+    assert report.parent == parent
+    assert report.name.startswith(".lwr-t2w-report-")
+    assert report.suffix == ".json"
+    assert len(report.name) <= 32
+    backend._cleanup_report_path(report, parent)
 
 
 def test_pandoc_probe_failures_and_missing_artifact_are_bounded(

@@ -1,18 +1,20 @@
 # CLI 与运行目录契约
 
-`latex-word-review` 是 v0.1 的权威编排入口。Python API、本地审批页和 Codex
-Skill 复用同一套库逻辑；Skill 不另行实现转换、修订解析或补丁。
+`latex-word-review` 是 0.2.x 的权威机器编排入口。普通 Windows 用户应优先运行
+`latex-word-review app`（冻结版对应 `LatexWordReview.exe`），在本机中文四步应用中完成
+主流程；CLI 主要用于自动化、排障和精细恢复。Python API、应用和 Codex Skill 复用同一套
+库逻辑；Skill 不另行实现转换、修订解析或补丁。
 
 ## 稳定边界
 
-- 命令名、位置参数顺序、JSON Schema、`ErrorCode` 和 `ExitCode` 在 0.1.x 内按
+- 命令名、位置参数顺序、JSON Schema、`ErrorCode` 和 `ExitCode` 在 0.2.x 内按
   公开契约管理。
 - 成功执行的业务命令在 stdout 输出单行 UTF-8 canonical JSON 摘要；运行期契约错误
   以单行 JSON 写入 stderr。`--help`、`--version`、无参数调用和 argparse 在进入业务
   逻辑前发现的语法错误是面向人的纯文本例外。JSON 摘要不记录工作目录的绝对路径。
 - 安全关键输出坚持 no-clobber：输出已存在时不覆盖；只有部分明确定义的
   完全相同请求可幂等复用。
-- v0.1 不读取隐式的用户级配置文件，也不从项目文本执行配置。后端、超时、
+- 0.2.x 不读取隐式的用户级配置文件，也不从项目文本执行配置。后端、超时、
   隐私分类和外部工具均通过命令行明示给出，并被 sealed 对象或策略哈希绑定。
 - 相对路径存入契约；绝对本机路径只用于当前调用，不进入可分享对象。
 
@@ -20,6 +22,7 @@ Skill 复用同一套库逻辑；Skill 不另行实现转换、修订解析或�
 
 | 命令 | 主要产物 | 是否修改 LaTeX |
 |---|---|---:|
+| `app` | 本机中文四步应用与可恢复会话；第二道确认前只生成计划 | **是，仅确认后写入新目录** |
 | `new-run` | UUIDv7 `run_id` | 否 |
 | `doctor` | 路径脱敏的工具/包诊断 | 否 |
 | `snapshot` | 只读快照、`SourceManifest` | 否 |
@@ -51,10 +54,11 @@ Pandoc 适配器目前是显式选择的 baseline/degraded 后端，而不是与
 `tex2word==1.0.5` 同等级的持续验证默认值；缺少 Pandoc 或 pandoc-crossref 时必须由
 `doctor` 和能力对象报告，不能静默降级。
 
-## 首选高层工作流
+## 首选 CLI 高层工作流
 
-日常使用优先运行 `workflow init`、`workflow export`、`workflow receive` 与
-`workflow status`。它们只减少路径和对象传递的重复工作，不绕过任何底层合同：
+需要脚本化但不需要逐个底层命令时，优先运行 `workflow init`、`workflow export`、
+`workflow receive` 与 `workflow status`。普通交互使用仍优先选择 `app`。这些命令只减少
+路径和对象传递的重复工作，不绕过任何底层合同：
 
 - `init` 原子创建新 run root、只读 snapshot 与 sealed `SourceManifest`；
 - `export` 只使用 snapshot，保存启用 Track Changes 的不可变 Word baseline；
@@ -107,7 +111,7 @@ granular 命令。若不用高层命令，目录名可以改，但同一步的�
    `apply`；`apply` 再次重算计划，且只能发布到全新目录。
 
 `accepted` 不等于可自动应用。公式、引用、标签、命令、环境、格式修订、move、
-comment 和不精确定位在 v0.1 中即使被接受，也会进入 `accepted_but_blocked`。
+comment 和不精确定位在 0.2.x 中即使被接受，也会进入 `accepted_but_blocked`。
 
 ## 进程退出码
 

@@ -12,7 +12,26 @@ and private vulnerability reporting are public and enabled; tag creation and art
 remain explicit maintainer promotion steps. No GitHub or package-index release is implied by the
 source version below.
 
+The current source candidate is `0.2.0b1`, with user-facing compatibility documented as `0.2.x`.
+Frozen Windows candidates use exact 64-bit CPython 3.12.13. They remain unpublished until the
+native dependency license/relink evidence described below is complete.
+
 ### Added
+
+- Add a deterministic, code-generated `academic-review-v1` Word reference profile through
+  tex2word 1.0.5's public `reference_doc` API, with pinned hashes, fail-closed load evidence,
+  A4 single-column typography, compact tables, and bounded non-upscaled images.
+- Add a real system-Edge Playwright journey as a test-only Windows gate; browsers and Playwright
+  remain excluded from the user runtime.
+- Add a hash-bound exact Schema catalog consumed by runtime, wheel, sdist, and frozen release
+  verification so missing, extra, or modified Schema files fail closed.
+- Add a hash-verified, same-directory stage/rollback script for refreshing the workspace-local
+  Windows application without modifying `user-data`, launchers, or files outside the repository.
+- Add explicit recent-task deletion with a dedicated irreversible confirmation page, active-job
+  interlocks, owned-tree validation, and fail-closed rejection of links, reparse points, special
+  files, and escaped paths.
+- Add a native Windows Save As flow for creating an editable review-DOCX copy at a user-selected
+  path while preserving the sealed internal baseline and refusing overwrites.
 
 - Add a grouped documentation index that separates user workflows, public contracts, upstream
   decisions, security material, and maintainer evidence.
@@ -21,8 +40,24 @@ source version below.
 - Add a public development-provenance record that discloses the maintainer-driven Vibe Coding and
   OpenAI Codex collaboration, separates human and AI responsibilities, and states the evidence and
   limitations behind the project.
+- Add a loopback-only Chinese Windows application that turns the full lifecycle into four resumable
+  steps, uses native file pickers and background jobs, reconstructs sealed state after restart, and
+  keeps both approval gates under direct human control.
+- Add dual frozen Windows entry points, a per-user Inno Setup installer, a portable ZIP, isolated
+  launch verification, and candidate-size reporting for the shared PyInstaller onedir runtime.
 
 ### Changed
+
+- Bound Inno Setup compilation to 300 seconds by default, terminate only the verified compiler PID
+  on timeout, and retain bounded stdout/stderr diagnostics instead of allowing an indefinite build.
+- Reapply deterministic layout after Microsoft Word field refresh and restore trusted style
+  properties by style name, preventing Word-localized style IDs or font-name mojibake from
+  degrading the reviewer-facing document.
+- Make the recent-task home page bounded and lightweight: inspect at most 1000 candidate directories,
+  show the newest 20, validate only a size-limited sealed source summary there, and defer full sealed
+  evidence reconstruction until a task is opened or acted on.
+- Improve recent-task cards with explicit next-step text, separate continue/delete actions, and
+  responsive layouts for narrow Windows browser windows.
 
 - Ignore common Python, LaTeX, editor, and interrupted-tool artifacts without hiding legitimate
   PostScript figure sources.
@@ -40,6 +75,29 @@ source version below.
   vulnerability-reporting URLs for the public source repository.
 - Narrow the maintained platform scope to Windows with CPython 3.12/3.13. Linux and macOS are no
   longer CI, release, or support targets; historical upstream and security evidence remains intact.
+- Make the local application the ordinary-user path; retain CLI commands for automation,
+  diagnostics, and granular recovery, and make the thin Codex Skill open the same application by
+  default instead of proxying either human gate.
+- Advance the source candidate to `0.2.0b1` and document compatibility as `0.2.x` while preserving
+  the `v1alpha` sealed-domain contracts.
+- Limit safe bulk approval to still-undecided exact plain-text candidates without overwriting prior
+  decisions, and provide an explicit re-approval recovery path for blocked PatchPlans.
+
+### Security
+
+- Keep task deletion and review-copy publication inside the application lock and recheck active jobs
+  after native dialogs return; publish review copies atomically without clobbering existing files.
+
+- Bind the second in-application confirmation to the exact dry-run plan hash, and retain immutable
+  returned-Word archives, no-clobber revised trees, loopback Host/Origin/Cookie/CSRF controls,
+  restrictive CSP, bounded jobs, and bounded shutdown.
+
+### Known limitations
+
+- Public frozen Windows binaries are held back pending acceptable static-native `lxml`
+  license/relink evidence; source installation and non-binary project publication are not blocked.
+- Local Windows candidates are unsigned, so Windows SmartScreen may warn. Users must verify a
+  future official release's SHA-256 and stated signing status before running it.
 
 ### Removed
 

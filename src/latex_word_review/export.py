@@ -7,17 +7,19 @@ import io
 import os
 import tempfile
 import zipfile
-from collections import Counter, defaultdict
+from collections import Counter
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from lxml import etree  # type: ignore[import-untyped]
 
 from latex_word_review.backends.base import BackendRequest, BackendResult, ExportBackend
+from latex_word_review.backends.tex2word import TEX2WORD_INTERFACE_VERSION
 from latex_word_review.canonical import sha256_canonical
 from latex_word_review.discovery import ProjectDiscovery, discover_project
+from latex_word_review.docx_anchor import AnchorReason, insert_unique_source_bookmarks
 from latex_word_review.docx_reader import DocxPackage, read_docx_package
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export_models import (
@@ -30,22 +32,26 @@ from latex_word_review.export_models import (
 from latex_word_review.hashing import read_stable_bytes
 from latex_word_review.image_overlay import (
     IMAGE_OVERLAY_MANIFEST,
+    TEX2WORD_COMPATIBILITY_PROFILE,
     ImageOverlayResult,
     build_image_overlay,
     discard_image_overlay,
 )
 from latex_word_review.inspection import DocxInspection, inspect_docx
 from latex_word_review.paths import ensure_disjoint_roots, validate_relative_path
+from latex_word_review.review_layout import apply_review_layout
 from latex_word_review.source_units import (
     SourceUnit,
-    normalize_review_text,
     review_ir_payload,
     scan_source_units,
     text_provenance_profile,
 )
+from latex_word_review.word_fields import (
+    finalize_word_fields,
+    validate_frozen_field_state,
+)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
 CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 DOCUMENT_PART = "word/document.xml"
@@ -56,7 +62,7 @@ SETTINGS_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"
 )
 SETTINGS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"
-ANCHOR_PROFILE_VERSION = "1"
+ANCHOR_PROFILE_VERSION = "2"
 
 _SETTINGS_AFTER_TRACK_REVISIONS = frozenset(
     {
@@ -202,13 +208,14 @@ class AnchoringResult:
             "review_docx_sha256": self.docx_sha256,
             "image_overlay": dict(self.image_overlay),
             "anchor_profile": {
-                "name": "unique-normalized-text-bookmark",
+                "name": "unique-normalized-substring-bookmark",
                 "version": ANCHOR_PROFILE_VERSION,
                 "configuration_sha256": sha256_canonical(
                     {
-                        "name": "unique-normalized-text-bookmark",
+                        "name": "unique-normalized-substring-bookmark",
                         "version": ANCHOR_PROFILE_VERSION,
                         "ambiguity": "never-guess",
+                        "range": "plain-direct-word-runs",
                     }
                 ),
             },
@@ -239,37 +246,6 @@ class ExportOutcome:
     inspection: DocxInspection | None
     output_path: Path | None
     image_overlay: ImageOverlayResult | None = None
-
-
-def _paragraph_text(paragraph: etree._Element) -> str:
-    fragments: list[str] = []
-    for element in paragraph.iter():
-        if element.tag == f"{{{W_NS}}}t" and element.text:
-            fragments.append(element.text)
-        elif element.tag in {f"{{{W_NS}}}tab", f"{{{W_NS}}}br", f"{{{W_NS}}}cr"}:
-            fragments.append(" ")
-    return normalize_review_text("".join(fragments))
-
-
-def _bookmark_name(unit_id: str) -> str:
-    suffix = unit_id.removeprefix("unit_")
-    return f"lwr_{suffix[:32]}"
-
-
-def _insert_bookmark(
-    paragraph: etree._Element,
-    *,
-    name: str,
-    numeric_id: int,
-) -> None:
-    start = etree.Element(f"{{{W_NS}}}bookmarkStart")
-    start.set(f"{{{W_NS}}}id", str(numeric_id))
-    start.set(f"{{{W_NS}}}name", name)
-    end = etree.Element(f"{{{W_NS}}}bookmarkEnd")
-    end.set(f"{{{W_NS}}}id", str(numeric_id))
-    insert_at = 1 if len(paragraph) and paragraph[0].tag == f"{{{W_NS}}}pPr" else 0
-    paragraph.insert(insert_at, start)
-    paragraph.append(end)
 
 
 def _xml_bytes(root: etree._Element) -> bytes:
@@ -393,6 +369,7 @@ def _validate_tracking_enabled(package: DocxPackage) -> None:
             ErrorCode.REVIEW_TRACKING_DISABLED,
             "exported review DOCX does not have Track Changes enabled",
         )
+    validate_frozen_field_state(package)
     revision_locals = {
         "ins",
         "del",
@@ -418,13 +395,35 @@ def _validate_tracking_enabled(package: DocxPackage) -> None:
             )
 
 
+def _validate_anchor_destination(source: Path, destination: Path) -> None:
+    try:
+        source_identity = source.resolve(strict=True)
+        destination_identity = destination.resolve(strict=False)
+    except OSError as exc:
+        raise ContractError(
+            ErrorCode.BACKEND_FAILED,
+            "anchored DOCX paths could not be resolved",
+        ) from exc
+    if source_identity == destination_identity:
+        raise ContractError(
+            ErrorCode.BACKEND_FAILED,
+            "anchored DOCX destination must differ from its source",
+        )
+    if destination.exists() or destination.is_symlink():
+        raise ContractError(
+            ErrorCode.BACKEND_FAILED,
+            "anchored DOCX destination already exists",
+        )
+
+
 def _write_anchored_package(
     source: Path,
     destination: Path,
     replacements: dict[str, bytes],
     *,
     expected_sha256: str,
-) -> None:
+) -> str:
+    _validate_anchor_destination(source, destination)
     raw = read_stable_bytes(source, max_bytes=128 * 1024 * 1024)
     if "sha256:" + hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "DOCX changed before anchoring")
@@ -455,11 +454,26 @@ def _write_anchored_package(
             os.fsync(stream.fileno())
         package = read_docx_package(temporary)
         _validate_tracking_enabled(package)
-        os.replace(temporary, destination)
+        anchored_sha256 = package.file_sha256
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "anchored DOCX destination appeared during publication",
+            ) from exc
+        except OSError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "anchored DOCX could not be atomically published",
+            ) from exc
     except Exception:
-        with suppress(FileNotFoundError):
+        with suppress(OSError):
             temporary.unlink()
         raise
+    with suppress(OSError):
+        temporary.unlink()
+    return anchored_sha256
 
 
 def anchor_source_units(
@@ -467,43 +481,40 @@ def anchor_source_units(
     destination_docx: Path,
     units: tuple[SourceUnit, ...],
 ) -> AnchoringResult:
-    """Insert bookmarks only for one-to-one normalized paragraph matches."""
+    """Insert bookmarks only for globally unique, provable Word text ranges."""
 
+    _validate_anchor_destination(source_docx, destination_docx)
     package = read_docx_package(source_docx)
     root = package.xml_root(DOCUMENT_PART)
-    paragraphs_by_text: dict[str, list[etree._Element]] = defaultdict(list)
-    for paragraph in root.iter(f"{{{W_NS}}}p"):
-        normalized = _paragraph_text(paragraph)
-        if normalized:
-            paragraphs_by_text[normalized].append(paragraph)
-    source_counts = Counter(unit.normalized_text for unit in units)
     existing_ids = [
         int(value)
         for element in root.iter(f"{{{W_NS}}}bookmarkStart")
         if (value := element.get(f"{{{W_NS}}}id")) is not None and value.isdigit()
     ]
-    next_id = max(existing_ids, default=0) + 1
+    placements = insert_unique_source_bookmarks(
+        root,
+        units,
+        first_numeric_id=max(existing_ids, default=0) + 1,
+    )
+    if len(placements) != len(units):
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "anchor placement count differs")
     mappings: list[SourceMapping] = []
     findings: list[ExportFinding] = []
-    for unit in units:
-        candidates = paragraphs_by_text.get(unit.normalized_text, [])
-        if source_counts[unit.normalized_text] == 1 and len(candidates) == 1:
-            paragraph = candidates[0]
-            name = _bookmark_name(unit.unit_id)
-            bookmark_id = str(next_id)
-            _insert_bookmark(paragraph, name=name, numeric_id=next_id)
-            next_id += 1
+    for unit, placement in zip(units, placements, strict=True):
+        if placement.unit_id != unit.unit_id:
+            raise ContractError(ErrorCode.INTERNAL_INVARIANT, "anchor placement order differs")
+        if placement.status == "exact":
             mappings.append(
                 SourceMapping(
                     unit=unit,
                     status="exact",
-                    bookmark_name=name,
-                    bookmark_id=bookmark_id,
-                    paragraph_id=paragraph.get(f"{{{W14_NS}}}paraId"),
+                    bookmark_name=placement.bookmark_name,
+                    bookmark_id=placement.bookmark_id,
+                    paragraph_id=placement.paragraph_id,
                 )
             )
             continue
-        ambiguous = source_counts[unit.normalized_text] > 1 or len(candidates) > 1
+        ambiguous = placement.status == "conflict"
         code = ErrorCode.MAP_AMBIGUOUS if ambiguous else ErrorCode.MAP_UNMATCHED
         status: Literal["unmapped", "conflict"] = "conflict" if ambiguous else "unmapped"
         mappings.append(
@@ -521,15 +532,23 @@ def anchor_source_units(
                 severity="warning",
                 phase="export",
                 message=(
-                    "source text has multiple possible DOCX paragraphs; no anchor was chosen"
+                    "source text has multiple or overlapping DOCX ranges; no anchor was chosen"
                     if ambiguous
-                    else "source text has no exact DOCX paragraph; no anchor was chosen"
+                    else (
+                        "source text has no uniquely provable editable DOCX range; "
+                        "no anchor was chosen"
+                    )
                 ),
                 recoverable=True,
                 fingerprint=unit.normalized_text_sha256,
                 unit_id=unit.unit_id,
                 source_location=unit.source_location(),
-                remediation="map this unit manually before applying returned revisions",
+                remediation=(
+                    "map this unit manually before applying returned revisions"
+                    if placement.reason
+                    not in {AnchorReason.NON_NORMALIZED_RANGE, AnchorReason.UNSAFE_STRUCTURE}
+                    else "keep this unit manual because its Word range is not byte-exact plain text"
+                ),
             )
         )
     document_xml = etree.tostring(
@@ -539,18 +558,16 @@ def anchor_source_units(
         standalone=True,
     )
     replacements = _tracked_package_replacements(package, document_xml)
-    _write_anchored_package(
+    anchored_sha256 = _write_anchored_package(
         source_docx,
         destination_docx,
         replacements,
         expected_sha256=package.file_sha256,
     )
-    anchored_package = read_docx_package(destination_docx)
-    _validate_tracking_enabled(anchored_package)
     return AnchoringResult(
         mappings=tuple(mappings),
         findings=tuple(findings),
-        docx_sha256=anchored_package.file_sha256,
+        docx_sha256=anchored_sha256,
     )
 
 
@@ -593,7 +610,7 @@ def export_review_docx(
     discovery: ProjectDiscovery,
     bindings: ExportBindings,
 ) -> ExportOutcome:
-    """Convert, anchor, inspect, then atomically publish one review DOCX."""
+    """Convert, normalize layout, anchor, inspect, then publish one review DOCX."""
 
     source_root, final_output = ensure_disjoint_roots(request.source_root, request.output_path)
     if final_output.exists() or final_output.is_symlink():
@@ -617,10 +634,22 @@ def export_review_docx(
             },
         )
     overlay_destination = final_output.with_name(f"{final_output.name}.image-overlay")
+    backend_capabilities = backend.capabilities()
+    compatibility_profile = (
+        TEX2WORD_COMPATIBILITY_PROFILE
+        if (
+            backend_capabilities.backend_id == "tex2word-public-api"
+            and backend_capabilities.tool_name == "tex2word"
+            and backend_capabilities.tool_version == "1.0.5"
+            and backend_capabilities.interface_version == TEX2WORD_INTERFACE_VERSION
+        )
+        else None
+    )
     image_overlay = build_image_overlay(
         source_root,
         overlay_destination,
         discovery,
+        compatibility_profile=compatibility_profile,
     )
     if not image_overlay.ready:
         raise ContractError(
@@ -645,7 +674,9 @@ def export_review_docx(
     )
     review_ir_sha256 = sha256_canonical(review_payload)
     backend_stage = _pipeline_path(final_output, "backend")
+    layout_stage = _pipeline_path(final_output, "layout")
     anchored_stage = _pipeline_path(final_output, "anchored")
+    fields_stage = _pipeline_path(final_output, "fields")
     backend_result: BackendResult | None = None
     output_published = False
     try:
@@ -693,8 +724,37 @@ def export_review_docx(
                 None,
                 image_overlay,
             )
+        layout_report = apply_review_layout(backend_stage, layout_stage)
+        field_report = finalize_word_fields(layout_stage, fields_stage)
+        field_findings: tuple[ExportFinding, ...] = ()
+        if field_report.unresolved_fields:
+            field_findings = (
+                ExportFinding(
+                    code=ErrorCode.EXPORT_DEGRADED,
+                    severity="warning",
+                    phase="export",
+                    message=(
+                        "one or more source references have no exported Word bookmark; "
+                        "explicit unresolved-reference placeholders were retained"
+                    ),
+                    recoverable=True,
+                    fingerprint=sha256_canonical(
+                        {"unresolved_fields": field_report.unresolved_fields}
+                    ),
+                    remediation="repair the missing LaTeX label or review the marked reference",
+                ),
+            )
+        backend_result = replace(
+            backend_result,
+            findings=backend_result.findings + field_findings,
+            native_report={
+                **backend_result.native_report,
+                "review_layout": asdict(layout_report),
+                "word_field_finalization": asdict(field_report),
+            },
+        )
         anchoring = replace(
-            anchor_source_units(backend_stage, anchored_stage, units),
+            anchor_source_units(fields_stage, anchored_stage, units),
             image_overlay=image_overlay_binding,
         )
         inspection = inspect_docx(anchored_stage)
@@ -783,22 +843,8 @@ def export_review_docx(
             review_ir_sha256=review_ir_sha256,
         )
         source_map_sha256 = sha256_canonical(source_map_payload)
-        try:
-            os.link(anchored_stage, final_output, follow_symlinks=False)
-            anchored_stage.unlink()
-            output_published = True
-        except FileExistsError as exc:
-            raise ContractError(
-                ErrorCode.BACKEND_FAILED,
-                "review DOCX output appeared during publication",
-            ) from exc
-        except OSError as exc:
-            raise ContractError(
-                ErrorCode.BACKEND_FAILED,
-                "review DOCX could not be atomically published",
-            ) from exc
         artifact = ReviewDocxArtifact.from_file(
-            final_output,
+            anchored_stage,
             artifact_path=bindings.artifact_path,
             confidentiality=bindings.confidentiality,
         )
@@ -841,7 +887,7 @@ def export_review_docx(
             findings=findings,
             validation=inspection.validation,
         )
-        return ExportOutcome(
+        outcome = ExportOutcome(
             backend_result,
             report,
             units,
@@ -850,10 +896,31 @@ def export_review_docx(
             final_output,
             image_overlay,
         )
-    finally:
         _cleanup_pipeline_path(backend_stage, final_output)
-        _cleanup_pipeline_path(anchored_stage, final_output)
+        _cleanup_pipeline_path(layout_stage, final_output)
+        _cleanup_pipeline_path(fields_stage, final_output)
+        try:
+            os.link(anchored_stage, final_output, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "review DOCX output appeared during publication",
+            ) from exc
+        except OSError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "review DOCX could not be atomically published",
+            ) from exc
+        output_published = True
+        with suppress(OSError):
+            anchored_stage.unlink()
+        return outcome
+    finally:
         if not output_published:
+            _cleanup_pipeline_path(backend_stage, final_output)
+            _cleanup_pipeline_path(anchored_stage, final_output)
+            _cleanup_pipeline_path(layout_stage, final_output)
+            _cleanup_pipeline_path(fields_stage, final_output)
             discard_image_overlay(image_overlay)
 
 
