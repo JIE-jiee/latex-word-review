@@ -10,13 +10,20 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from scripts.run_public_e0_cli_demo import DemoError, _cli_command, _decision_for
+from scripts.run_public_e0_cli_demo import (
+    DemoError,
+    _cli_command,
+    _decision_for,
+    _validate_profile_field_counts,
+    build_parser,
+)
 
 from latex_word_review.jsonio import read_contract_file
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCRIPT = REPOSITORY / "scripts/run_public_e0_cli_demo.py"
-FIXTURE_SOURCE = REPOSITORY / "tests/fixtures/e0-minimal-paper/source"
+FULL_FIXTURE_SOURCE = REPOSITORY / "tests/fixtures/e0-minimal-paper/source"
+PORTABLE_FIXTURE_SOURCE = REPOSITORY / "tests/fixtures/e0-portable-smoke/source"
 
 
 def _tree_sha256(root: Path) -> str:
@@ -83,13 +90,61 @@ def test_public_demo_rejects_a_relative_frozen_cli(
         _cli_command("new-run")
 
 
+def test_public_demo_fixture_profiles_are_fixed() -> None:
+    parser = build_parser()
+    assert parser.parse_args([]).fixture_profile == "full"
+    assert parser.parse_args(["--fixture-profile", "portable"]).fixture_profile == "portable"
+    assert (FULL_FIXTURE_SOURCE / "main.tex").is_file()
+    assert (PORTABLE_FIXTURE_SOURCE / "main.tex").is_file()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--fixture-profile", "../private-paper"])
+
+
+def test_public_demo_profiles_enforce_field_boundaries() -> None:
+    portable = _validate_profile_field_counts(
+        "portable",
+        seq_fields=0,
+        ref_fields=0,
+        pageref_fields=0,
+    )
+    assert portable == {
+        "seq_fields": 0,
+        "ref_fields": 0,
+        "pageref_fields": 0,
+        "live_fields": 0,
+    }
+    full = _validate_profile_field_counts(
+        "full",
+        seq_fields=1,
+        ref_fields=0,
+        pageref_fields=0,
+    )
+    assert full["live_fields"] == 1
+    with pytest.raises(DemoError, match="portable.*unexpectedly produced"):
+        _validate_profile_field_counts(
+            "portable",
+            seq_fields=1,
+            ref_fields=0,
+            pageref_fields=0,
+        )
+    with pytest.raises(DemoError, match="full.*no live fields"):
+        _validate_profile_field_counts(
+            "full",
+            seq_fields=0,
+            ref_fields=0,
+            pageref_fields=0,
+        )
+
+
 def test_public_e0_demo_runs_snapshot_through_apply_via_cli(tmp_path: Path) -> None:
-    fixture_before = _tree_sha256(FIXTURE_SOURCE)
+    fixture_before = _tree_sha256(PORTABLE_FIXTURE_SOURCE)
     output = tmp_path / "中文-public-e0-demo"
     completed = subprocess.run(
         [
             sys.executable,
             str(SCRIPT),
+            "--fixture-profile",
+            "portable",
             "--output",
             str(output),
             "--skip-verification",
@@ -115,6 +170,13 @@ def test_public_e0_demo_runs_snapshot_through_apply_via_cli(tmp_path: Path) -> N
         "source_fixture_unchanged": True,
         "status": "pass",
     }
+    assert summary["fixture_profile"] == "portable"
+    assert summary["fixture"] == "tests/fixtures/e0-portable-smoke"
+    assert summary["export_contract"]["seq_fields"] == 0
+    assert summary["export_contract"]["ref_fields"] == 0
+    assert summary["export_contract"]["pageref_fields"] == 0
+    assert summary["export_contract"]["live_fields"] == 0
+    assert summary["export_contract"]["exact_mapping_count"] >= 1
     assert summary["verification"]["status"] == "skipped"
     assert summary["verification"]["reason"] == "user_requested"
 
@@ -132,12 +194,12 @@ def test_public_e0_demo_runs_snapshot_through_apply_via_cli(tmp_path: Path) -> N
     assert patch_plan["payload"]["summary"]["planned"] == 1
     assert (output / "plan/changes.patch").stat().st_size > 0
 
-    original = (output / "snapshot/sections/methods.tex").read_text(encoding="utf-8")
-    revised = (output / "revised-clean/sections/methods.tex").read_text(encoding="utf-8")
-    assert "kinetic energy is defined by" in original
-    assert "kinetic energy is evaluated by" in revised
-    assert "kinetic energy is evaluated by" not in original
-    assert _tree_sha256(FIXTURE_SOURCE) == fixture_before
+    original = (output / "snapshot/main.tex").read_text(encoding="utf-8")
+    revised = (output / "revised-clean/main.tex").read_text(encoding="utf-8")
+    assert "portable review statement is defined by" in original
+    assert "portable review statement is evaluated by" in revised
+    assert "portable review statement is evaluated by" not in original
+    assert _tree_sha256(PORTABLE_FIXTURE_SOURCE) == fixture_before
 
     archived = output / "returned/returned-original.docx"
     received = output / "received/returned-reviewed.docx"

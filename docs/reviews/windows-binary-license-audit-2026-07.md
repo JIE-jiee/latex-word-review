@@ -131,6 +131,17 @@ Therefore the `0.1.0b2` candidate has a second notice-completeness gap independe
 The source recipe for the next candidate now closes this specific gap conservatively:
 
 - the supported frozen build is fixed to exact 64-bit CPython `3.12.13`;
+- the GitHub no-publish candidate requests pinned `uv 0.11.16`, verifies the actual `uv --version`
+  identity, installs the exact interpreter below the uv-managed Python root, then verifies
+  `3.12.13|64|cpython` before dependency installation or packaging;
+- the text evidence records the actual uv identity, managed installation key, and SHA-256 of the
+  Python executable. It describes
+  [Astral `python-build-standalone`](https://github.com/astral-sh/python-build-standalone) only as
+  uv's documented default upstream provisioning policy: the workflow does not retain the downloaded
+  archive or its digest, so it does not claim byte-level archive provenance;
+- this is not a python.org Windows installer: Python 3.12.13 is a source-only security release, so
+  `actions/setup-python` has no corresponding hosted Windows asset;
+
 - the complete official CPython v3.12.13 `Doc/license.rst` is vendored as
   `third_party/cpython-3.12.13-license.rst`, with SHA-256
   `341832873fd316a37927e79385093fbbfd40a467428480835fe435a80cadf4e5`;
@@ -142,6 +153,10 @@ The source recipe for the next candidate now closes this specific gap conservati
 This source change does not retroactively repair the examined `0.1.0b2` bytes. It must be confirmed
 against the rebuilt `0.2.0b1` candidate before this sub-finding is marked closed. It also does not
 resolve the separate lxml/iconv source and relinking gap, so the public binary hold remains.
+The candidate workflow uploads only non-executable text evidence and explicitly records that the
+managed-Python download archive digest is unavailable; it does not publish the locally built ZIP,
+installer, or onedir.
+
 
 ### 5. Inno Setup commercial-license request is a separate consideration
 
@@ -193,5 +208,8 @@ may host the source repository and build instructions, but not the affected froz
 - [Inno Setup License](https://jrsoftware.org/files/is/license.txt)
 - [Inno Setup commercial-license request and Q&A](https://jrsoftware.org/isorder.php)
 - [CPython v3.12.13 complete license document](https://github.com/python/cpython/blob/v3.12.13/Doc/license.rst)
+- [Python 3.12.13 release (source-only; no Windows installers)](https://www.python.org/downloads/release/python-31213/)
+- [uv managed Python documentation](https://docs.astral.sh/uv/concepts/python-versions/)
+- [Astral python-build-standalone](https://github.com/astral-sh/python-build-standalone)
 - [OpenSSL 3.5.5 license](https://github.com/openssl/openssl/blob/openssl-3.5.5/LICENSE.txt)
 - [libffi 3.4.4 license](https://github.com/libffi/libffi/blob/v3.4.4/LICENSE)

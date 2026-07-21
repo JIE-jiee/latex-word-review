@@ -73,7 +73,27 @@ function Assert-NormalizedRelativePath {
 function Get-Sha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $digest = $sha256.ComputeHash($stream)
+        return [BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        if ($null -ne $sha256) {
+            $sha256.Dispose()
+        }
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
 }
 
 function Assert-ExactJsonProperties {

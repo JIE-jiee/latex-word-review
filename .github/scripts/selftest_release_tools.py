@@ -1148,7 +1148,7 @@ class CleanInstallBoundaryTests(unittest.TestCase):
                 )
             self.assertFalse((root / "build/run").exists())
 
-    def test_demo_failure_cleans_only_owned_output_and_venv(self) -> None:
+    def test_demo_failure_retains_fresh_roots_without_path_deletion(self) -> None:
         with self.temporary_repository() as temporary:
             root = Path(temporary)
             dist = root / "dist"
@@ -1256,6 +1256,10 @@ class CleanInstallBoundaryTests(unittest.TestCase):
             self.assertEqual(len(demo_commands), 1)
             command, environment = demo_commands[0]
             self.assertEqual(command[0], str(CLEAN_INSTALL.environment_python(venv_root)))
+            self.assertEqual(
+                command[1:4],
+                [str(demo_script), "--fixture-profile", "portable"],
+            )
             self.assertEqual(command[-1], "--skip-verification")
             self.assertNotIn("PYTHONHOME", environment)
             self.assertNotIn("PYTHONPATH", environment)
@@ -1264,8 +1268,13 @@ class CleanInstallBoundaryTests(unittest.TestCase):
             install_commands = [command for command in all_commands if "install" in command]
             self.assertEqual(len(install_commands), 2)
             self.assertTrue(all("--no-index" in command for command in install_commands))
-            self.assertFalse(venv_root.exists())
-            self.assertFalse(demo_output.exists())
+            self.assertTrue(venv_root.is_dir())
+            self.assertEqual(
+                (demo_output / "partial.txt").read_text(encoding="utf-8"),
+                "partial",
+            )
+            work_root = venv_root.parent / ".venv-clean-install-work"
+            self.assertTrue((work_root / "runtime-requirements.txt").is_file())
             self.assertEqual(artifact.read_bytes(), b"wheel")
 
 

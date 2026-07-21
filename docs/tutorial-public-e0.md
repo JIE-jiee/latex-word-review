@@ -1,8 +1,8 @@
 # Public E0 CLI tutorial
 
 This tutorial runs a complete, reviewable LaTeX–Word round trip from the repository's
-synthetic Apache-2.0 E0 fixture. It does not read a private paper and does not require
-Microsoft Word.
+synthetic Apache-2.0 portable E0 fixture. It does not read a private paper and does not
+require Microsoft Word.
 
 The demo uses the real `latex-word-review` CLI for every project operation. Between
 `export` and `archive`, the helper script performs the one action that normally happens
@@ -21,7 +21,7 @@ From a clean source checkout:
 
 ```console
 uv sync --frozen --group fixture --python 3.12
-uv run --frozen python scripts/run_public_e0_cli_demo.py
+uv run --frozen python scripts/run_public_e0_cli_demo.py --fixture-profile portable
 ```
 
 The default output is a fresh
@@ -29,11 +29,16 @@ The default output is a fresh
 it must not exist:
 
 ```powershell
-uv run --frozen python scripts/run_public_e0_cli_demo.py --output build/my-public-e0-run
+uv run --frozen python scripts/run_public_e0_cli_demo.py --fixture-profile portable --output build/my-public-e0-run
 ```
 
 The no-clobber rule is intentional. Re-run without `--output`, or choose another fresh
 directory, instead of deleting or overwriting audit evidence.
+
+The fixed `portable` profile deliberately produces zero `SEQ`, `REF`, and `PAGEREF`
+fields, so a clean Windows CI runner can prove the real core loop without Office. It is
+not a production bypass. The fixed `full` profile retains the field-rich E0 fixture and
+requires Microsoft Word to refresh those fields; without Word it fails closed.
 
 ## What actually runs
 
@@ -66,7 +71,7 @@ silently downgraded.
 For a fast core-only run even when TeX tools are installed:
 
 ```console
-uv run --frozen python scripts/run_public_e0_cli_demo.py --skip-verification
+uv run --frozen python scripts/run_public_e0_cli_demo.py --fixture-profile portable --skip-verification
 ```
 
 That explicit choice is recorded as `verification.status = "skipped"` with

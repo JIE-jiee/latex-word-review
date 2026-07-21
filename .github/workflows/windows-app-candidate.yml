@@ -30,6 +30,8 @@ concurrency:
 env:
   UV_VERSION: "0.11.16"
   UV_NO_PROGRESS: "1"
+  UV_MANAGED_PYTHON: "1"
+  EXACT_PYTHON_VERSION: "3.12.13"
   PYINSTALLER_VERSION: "6.21.0"
   INNO_SETUP_VERSION: "7.0.2"
   INNO_SETUP_URL: >-
@@ -49,27 +51,83 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Set up exact Python 3.12.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12.13"
       - name: Set up pinned uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Install and verify exact uv-managed CPython 3.12.13
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $uvIdentity = ((uv --version) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $uvIdentity -notmatch "^uv $([regex]::Escape($env:UV_VERSION))(?:\s|$)") {
+              throw "actual uv identity does not match the pinned version: $uvIdentity"
+          }
+          uv python install "$env:EXACT_PYTHON_VERSION"
+          if ($LASTEXITCODE -ne 0) {
+              throw "uv could not install exact CPython $env:EXACT_PYTHON_VERSION"
+          }
+          $managedRoot = ((uv python dir) | Out-String).Trim()
+          $pythonPath = ((uv python find --managed-python --no-project `
+              "$env:EXACT_PYTHON_VERSION") | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              -not (Test-Path -LiteralPath $managedRoot -PathType Container) -or
+              -not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+              throw "uv-managed CPython could not be resolved"
+          }
+          $managedRoot = [IO.Path]::GetFullPath($managedRoot)
+          $pythonPath = [IO.Path]::GetFullPath($pythonPath)
+          $managedPrefix = $managedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + `
+              [IO.Path]::DirectorySeparatorChar
+          if (-not $pythonPath.StartsWith(
+              $managedPrefix,
+              [StringComparison]::OrdinalIgnoreCase
+          )) {
+              throw "resolved Python is outside the uv-managed installation root"
+          }
+          $relativePython = $pythonPath.Substring($managedPrefix.Length)
+          $installKey = $relativePython.Split([IO.Path]::DirectorySeparatorChar)[0]
+          if ([string]::IsNullOrWhiteSpace($installKey)) {
+              throw "uv-managed Python install key is unavailable"
+          }
+          $identity = ((& $pythonPath -c `
+              'import struct, sys; print("{}.{}.{}|{}|{}".format(*sys.version_info[:3], struct.calcsize("P") * 8, sys.implementation.name))' `
+          ) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $identity -cne "$env:EXACT_PYTHON_VERSION|64|cpython") {
+              throw "uv-managed Python identity mismatch: $identity"
+          }
+          $pythonSha256 = ((& $pythonPath -c `
+              'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest())' `
+          ) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pythonSha256 -notmatch '^[0-9a-f]{64}$') {
+              throw "uv-managed Python executable hash is unavailable"
+          }
+          $environmentLines = @(
+              "EXACT_PYTHON=$pythonPath"
+              "ACTUAL_UV_IDENTITY=$uvIdentity"
+              "PYTHON_MANAGED_INSTALL_KEY=$installKey"
+              "PYTHON_EXECUTABLE_SHA256=$pythonSha256"
+          ) -join [Environment]::NewLine
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV,
+              $environmentLines + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
       - name: Install only the locked browser test boundary
         run: >-
           uv sync --frozen --no-default-groups --group browser-e2e
-          --python 3.12.13
+          --python "$env:EXACT_PYTHON"
       - name: Run the installed-Edge four-step gate and reject skips
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $evidenceRoot = "build\browser-e2e"
           $null = New-Item -ItemType Directory -Force -Path $evidenceRoot
-          uv run --frozen --no-default-groups --group browser-e2e --python 3.12.13 pytest tests/test_app_browser_e2e.py --basetemp "$evidenceRoot\pytest" --junitxml "$evidenceRoot\junit.xml"
+          uv run --frozen --no-default-groups --group browser-e2e --python "$env:EXACT_PYTHON" pytest tests/test_app_browser_e2e.py --basetemp "$evidenceRoot\pytest" --junitxml "$evidenceRoot\junit.xml"
           if ($LASTEXITCODE -ne 0) {
               throw "Real Microsoft Edge four-step product journey failed"
           }
@@ -94,26 +152,86 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Set up exact Python 3.12.13
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12.13"
-      - name: Reject private paths, secrets, runtime material, and unapproved binaries
-        run: >-
-          python .github/scripts/release_checks.py repo --root .
-          --include-untracked
       - name: Set up pinned uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Install and verify exact uv-managed CPython 3.12.13
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $uvIdentity = ((uv --version) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $uvIdentity -notmatch "^uv $([regex]::Escape($env:UV_VERSION))(?:\s|$)") {
+              throw "actual uv identity does not match the pinned version: $uvIdentity"
+          }
+          uv python install "$env:EXACT_PYTHON_VERSION"
+          if ($LASTEXITCODE -ne 0) {
+              throw "uv could not install exact CPython $env:EXACT_PYTHON_VERSION"
+          }
+          $managedRoot = ((uv python dir) | Out-String).Trim()
+          $pythonPath = ((uv python find --managed-python --no-project `
+              "$env:EXACT_PYTHON_VERSION") | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              -not (Test-Path -LiteralPath $managedRoot -PathType Container) -or
+              -not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+              throw "uv-managed CPython could not be resolved"
+          }
+          $managedRoot = [IO.Path]::GetFullPath($managedRoot)
+          $pythonPath = [IO.Path]::GetFullPath($pythonPath)
+          $managedPrefix = $managedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + `
+              [IO.Path]::DirectorySeparatorChar
+          if (-not $pythonPath.StartsWith(
+              $managedPrefix,
+              [StringComparison]::OrdinalIgnoreCase
+          )) {
+              throw "resolved Python is outside the uv-managed installation root"
+          }
+          $relativePython = $pythonPath.Substring($managedPrefix.Length)
+          $installKey = $relativePython.Split([IO.Path]::DirectorySeparatorChar)[0]
+          if ([string]::IsNullOrWhiteSpace($installKey)) {
+              throw "uv-managed Python install key is unavailable"
+          }
+          $identity = ((& $pythonPath -c `
+              'import struct, sys; print("{}.{}.{}|{}|{}".format(*sys.version_info[:3], struct.calcsize("P") * 8, sys.implementation.name))' `
+          ) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $identity -cne "$env:EXACT_PYTHON_VERSION|64|cpython") {
+              throw "uv-managed Python identity mismatch: $identity"
+          }
+          $pythonSha256 = ((& $pythonPath -c `
+              'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest())' `
+          ) | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pythonSha256 -notmatch '^[0-9a-f]{64}$') {
+              throw "uv-managed Python executable hash is unavailable"
+          }
+          $environmentLines = @(
+              "EXACT_PYTHON=$pythonPath"
+              "ACTUAL_UV_IDENTITY=$uvIdentity"
+              "PYTHON_MANAGED_INSTALL_KEY=$installKey"
+              "PYTHON_EXECUTABLE_SHA256=$pythonSha256"
+          ) -join [Environment]::NewLine
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV,
+              $environmentLines + [Environment]::NewLine,
+              (New-Object Text.UTF8Encoding($false))
+          )
+      - name: Reject private paths, secrets, runtime material, and unapproved binaries
+        shell: powershell
+        run: |
+          & "$env:EXACT_PYTHON" .github/scripts/release_checks.py repo --root . `
+              --include-untracked
+          if ($LASTEXITCODE -ne 0) {
+              throw "Repository release scan failed"
+          }
       - name: Verify the lockfile is current
         run: uv lock --check
       - name: Install only the locked frozen-app dependency boundary
         run: >-
           uv sync --frozen --no-default-groups --group release
-          --extra pdf-figures --python 3.12.13
+          --extra pdf-figures --python "$env:EXACT_PYTHON"
       - name: Derive reproducible build timestamp from the source commit
         run: >-
           .venv\Scripts\python.exe .github/scripts/release_checks.py
@@ -305,7 +423,27 @@ jobs:
                   source_date_epoch = $env:SOURCE_DATE_EPOCH
               }
               tools = [ordered]@{
-                  python = "3.12"
+                  python = [ordered]@{
+                      implementation = "CPython"
+                      version = $env:EXACT_PYTHON_VERSION
+                      architecture = "x64"
+                      provisioning_policy = (
+                          "uv-managed CPython; uv documents Astral " +
+                          "python-build-standalone as its default upstream"
+                      )
+                      provisioning_policy_source = (
+                          "https://docs.astral.sh/uv/concepts/python-versions/"
+                      )
+                      upstream_project = (
+                          "https://github.com/astral-sh/python-build-standalone"
+                      )
+                      provisioner = "uv"
+                      requested_uv_version = $env:UV_VERSION
+                      actual_uv_identity = $env:ACTUAL_UV_IDENTITY
+                      managed_install_key = $env:PYTHON_MANAGED_INSTALL_KEY
+                      executable_sha256 = "sha256:$env:PYTHON_EXECUTABLE_SHA256"
+                      download_archive_digest_recorded = $false
+                  }
                   pyinstaller = $env:PYINSTALLER_VERSION
                   inno_setup = $env:INNO_SETUP_VERSION
               }

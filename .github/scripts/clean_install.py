@@ -228,23 +228,6 @@ def _isolated_environment() -> dict[str, str]:
     return environment
 
 
-def _cleanup_owned_path(path: Path) -> None:
-    root = BUILD_ROOT.resolve()
-    absolute = Path(os.path.abspath(path))
-    try:
-        relative = absolute.relative_to(root)
-    except ValueError as exc:
-        raise CleanInstallError("refusing to clean a path outside build/") from exc
-    if not relative.parts:
-        raise CleanInstallError("refusing to clean build/ itself")
-    if absolute.is_symlink() or absolute.is_file():
-        absolute.unlink(missing_ok=True)
-    elif absolute.exists():
-        shutil.rmtree(absolute)
-    if absolute.exists() or absolute.is_symlink():
-        raise CleanInstallError("owned path remained after cleanup")
-
-
 def _locked_versions() -> dict[str, str]:
     try:
         value = tomllib.loads(LOCK_FILE.read_text(encoding="utf-8"))
@@ -845,13 +828,10 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         raise CleanInstallError("release wheel has an unexpected project name")
     builder_versions = require_locked_builder()
     isolated_environment = _isolated_environment()
-    owns_work = False
-    owns_venv = False
-    owns_demo_output = False
+
     BUILD_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         work_root.mkdir(parents=True, exist_ok=False)
-        owns_work = True
         runtime_requirements, runtime_requirement_count = export_runtime_requirements(
             work_root, isolated_environment
         )
@@ -873,7 +853,6 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             require_matching_wheel_payload(reference_wheel, project_wheel)
 
         venv_root.parent.mkdir(parents=True, exist_ok=True)
-        owns_venv = True
         venv.EnvBuilder(with_pip=True, clear=False, symlinks=False).create(venv_root)
         python = environment_python(venv_root)
         script = console_script(venv_root)
@@ -964,11 +943,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             env=isolated_environment,
         )
         if demo_output is not None:
-            owns_demo_output = True
             run(
                 [
                     str(python),
                     str(PUBLIC_E0_DEMO),
+                    "--fixture-profile",
+                    "portable",
                     "--output",
                     str(demo_output),
                     "--skip-verification",
@@ -982,9 +962,18 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 raise CleanInstallError("public E0 demo did not produce demo-summary.json")
             value = json.loads(summary.read_text(encoding="utf-8"))
             core_loop = value.get("core_loop") if isinstance(value, dict) else None
+            export_contract = value.get("export_contract") if isinstance(value, dict) else None
             if (
                 not isinstance(value, dict)
                 or value.get("demo_status") != "core_pass"
+                or value.get("fixture_profile") != "portable"
+                or not isinstance(export_contract, dict)
+                or export_contract.get("seq_fields") != 0
+                or export_contract.get("ref_fields") != 0
+                or export_contract.get("pageref_fields") != 0
+                or export_contract.get("live_fields") != 0
+                or not isinstance(export_contract.get("exact_mapping_count"), int)
+                or export_contract["exact_mapping_count"] < 1
                 or not isinstance(core_loop, dict)
                 or core_loop.get("status") != "pass"
                 or core_loop.get("source_fixture_unchanged") is not True
@@ -992,31 +981,22 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 or not isinstance(core_loop.get("accepted"), int)
                 or core_loop["accepted"] < 1
             ):
-                raise CleanInstallError("public E0 demo summary did not record core_pass")
+                raise CleanInstallError(
+                    "portable public E0 summary did not prove the core contract"
+                )
         if sha256_file(artifact) != original_artifact_hash:
             raise CleanInstallError(
                 "distribution artifact changed during clean-install verification"
             )
-        _cleanup_owned_path(work_root)
-        owns_work = False
+        # Retain all fresh build roots as diagnostic evidence. GitHub-hosted
+        # runner teardown, not attacker-influenced path deletion, disposes them.
     except BaseException as exc:
-        cleanup_failures: list[str] = []
-        for owned, path in (
-            (owns_demo_output, demo_output),
-            (owns_venv, venv_root),
-            (owns_work, work_root),
-        ):
-            if not owned or path is None:
-                continue
-            try:
-                _cleanup_owned_path(path)
-            except (OSError, CleanInstallError) as cleanup_exc:
-                cleanup_failures.append(str(cleanup_exc))
-        if cleanup_failures:
-            raise CleanInstallError(
-                "clean-install failed and owned-path cleanup also failed: "
-                + "; ".join(cleanup_failures)
-            ) from exc
+        # The same retention rule applies on failure. A pull-request process
+        # must not gain a path-deletion primitive through clean-install cleanup.
+        exc.add_note(
+            "fresh clean-install build roots were retained for diagnosis; "
+            "hosted-runner teardown is the disposal boundary"
+        )
         raise
 
     return {
@@ -1030,6 +1010,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "runtime_lock": "uv.lock-hashes-to-local-wheel-hashes",
         "runtime_requirements": runtime_requirement_count,
         "runtime_wheels": len(runtime_identities),
+        "fresh_build_roots": "retained_until_runner_teardown",
         "sdist_build_isolation": "disabled" if args.artifact == "sdist" else "not_applicable",
         "sdist_wheel_payload_match": args.artifact == "sdist",
     }

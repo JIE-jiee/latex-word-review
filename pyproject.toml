@@ -126,6 +126,7 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
+patch = ["subprocess"]
 source = ["latex_word_review"]
 
 [tool.coverage.report]

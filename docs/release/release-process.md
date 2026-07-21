@@ -86,11 +86,12 @@ the exact source SHA (the verification scripts are intentionally not copied into
 
 ```text
 uv sync --frozen --all-groups --extra pdf-figures --python 3.12
+$run = [guid]::NewGuid().ToString("N")
 uv run --frozen python .github/scripts/release_checks.py repo --root . --include-untracked
 uv run --frozen python .github/scripts/release_checks.py dist --dir dist --twine
 uv run --frozen python .github/scripts/release_checks.py evidence --dist-dir dist --evidence-dir release-evidence
-uv run --frozen python .github/scripts/clean_install.py --artifact wheel --dist-dir dist --venv build/manual-wheel-venv --public-e0-output build/manual-wheel-e0
-uv run --frozen python .github/scripts/clean_install.py --artifact sdist --dist-dir dist --venv build/manual-sdist-venv --public-e0-output build/manual-sdist-e0
+uv run --frozen python .github/scripts/clean_install.py --artifact wheel --dist-dir dist --venv build/manual-wheel-$run-venv --public-e0-output build/manual-wheel-$run-e0
+uv run --frozen python .github/scripts/clean_install.py --artifact sdist --dist-dir dist --venv build/manual-sdist-$run-venv --public-e0-output build/manual-sdist-$run-e0
 ```
 
 Compare `SHA256SUMS` with freshly calculated hashes, inspect the SBOM and unsigned provenance, and
@@ -101,15 +102,21 @@ prerelease or upload to a package index through a separately reviewed process. T
 intentionally not encoded in this repository yet.
 
 The clean-install helper requires distinct, initially absent venv, work, and demo roots below
-`build/`. Existing, symlinked, outside-build, traversal-containing, or overlapping roots are
-rejected without modification. Sdist traversal, links/devices, case collisions, multiple roots,
-oversized members, and decompression growth beyond fixed limits fail closed. The full decompressed
-tar stream is bounded, including PAX/GNU metadata and padding. Names must be canonical NFC portable
-paths; Windows device names, alternate-data-stream colons, trailing dots/spaces, case-folded or
-implicit-directory aliases, and file/directory prefix collisions are rejected. A failed installation
-or demo removes only roots newly owned by that invocation; successful venv/demo roots remain for
-inspection and the transient work root is removed.
+build/. Existing, symlinked, outside-build, traversal-containing, or overlapping explicit roots are
+rejected by preflight. This preflight is not a handle-bound defense against malicious same-account
+concurrent path substitution during later writes, so promotion must run in a fresh isolated checkout
+or hosted runner. Sdist traversal, links/devices, case collisions, multiple roots, oversized members,
+and decompression growth beyond fixed limits fail closed. The full decompressed tar stream is
+bounded, including PAX/GNU metadata and padding. Names must be canonical NFC portable paths; Windows
+device names, alternate-data-stream colons, trailing dots/spaces, case-folded or implicit-directory
+aliases, and file/directory prefix collisions are rejected.
 
+The helper deliberately performs no path-based delete, move, or recursive cleanup after creating a
+root. Success and failure retain the fresh venv, work, and demo roots for diagnosis, and the receipt
+records "fresh_build_roots = retained_until_runner_teardown". GitHub-hosted runner teardown is the
+disposal boundary. Manual verification must use a fresh checkout or a new unique suffix such as
+$run above. Only after all related processes have stopped and required evidence has been preserved
+may a trusted maintainer remove the whole selected build tree; do not reuse fixed root names.
 Before PEP 517 starts, the sdist `pyproject.toml` must be byte-identical to the reviewed checkout and
 must match the fixed declarative Hatchling contract. `backend-path`, custom build/metadata hooks,
 executable version sources, and any filename/root/PKG-INFO/source/reference-wheel identity mismatch

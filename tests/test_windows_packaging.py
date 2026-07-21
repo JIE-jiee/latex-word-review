@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ LOCAL_DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-local-windows.ps1"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify-windows-release.ps1"
 INSTALLER_SMOKE_SCRIPT = ROOT / "scripts" / "test-windows-installer.ps1"
 WINDOWS_CANDIDATE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-app-candidate.yml"
+CLEAN_INSTALL_SCRIPT = ROOT / ".github" / "scripts" / "clean_install.py"
 CPYTHON_LICENSE_BUNDLE = ROOT / "third_party" / "cpython-3.12.13-license.rst"
 SCHEMA_ROOT = ROOT / "src" / "latex_word_review" / "schemas" / "v1alpha"
 VERSION = "0.2.0b1"
@@ -358,8 +360,18 @@ def test_windows_app_candidate_workflow_is_pinned_minimal_and_never_publishes() 
     assert "permissions:\n  contents: read" in workflow
     assert "persist-credentials: false" in workflow
     assert "uv sync --frozen --no-default-groups --group release" in workflow
-    assert 'python-version: "3.12.13"' in workflow
-    assert "--extra pdf-figures --python 3.12.13" in workflow
+    assert "actions/setup-python@" not in workflow
+    assert 'UV_MANAGED_PYTHON: "1"' in workflow
+    assert 'EXACT_PYTHON_VERSION: "3.12.13"' in workflow
+    assert workflow.count('uv python install "$env:EXACT_PYTHON_VERSION"') == 2
+    assert workflow.count("uv python find --managed-python --no-project") == 2
+    assert workflow.count("$uvIdentity = ((uv --version) | Out-String).Trim()") == 2
+    assert workflow.count('"ACTUAL_UV_IDENTITY=$uvIdentity"') == 2
+    assert workflow.count('"PYTHON_MANAGED_INSTALL_KEY=$installKey"') == 2
+    assert workflow.count('"PYTHON_EXECUTABLE_SHA256=$pythonSha256"') == 2
+    assert workflow.count('$identity -cne "$env:EXACT_PYTHON_VERSION|64|cpython"') == 2
+    assert '--extra pdf-figures --python "$env:EXACT_PYTHON"' in workflow
+    assert '--python "$env:EXACT_PYTHON" pytest tests/test_app_browser_e2e.py' in workflow
     assert "third_party/cpython-3.12.13-license.rst" in workflow
     assert "--all-groups" not in workflow
     assert "--all-extras" not in workflow
@@ -390,6 +402,15 @@ def test_windows_app_candidate_workflow_is_pinned_minimal_and_never_publishes() 
     )
     assert "lxml_windows_wheel_native_license_and_relinking_evidence_incomplete" in workflow
     assert "binaries_uploaded = $false" in workflow
+    assert "provisioning_policy = (" in workflow
+    assert "uv documents Astral" in workflow
+    assert "https://docs.astral.sh/uv/concepts/python-versions/" in workflow
+    assert "https://github.com/astral-sh/python-build-standalone" in workflow
+    assert 'provisioner = "uv"' in workflow
+    assert "actual_uv_identity = $env:ACTUAL_UV_IDENTITY" in workflow
+    assert "managed_install_key = $env:PYTHON_MANAGED_INSTALL_KEY" in workflow
+    assert 'executable_sha256 = "sha256:$env:PYTHON_EXECUTABLE_SHA256"' in workflow
+    assert "download_archive_digest_recorded = $false" in workflow
     assert "if-no-files-found: error" in upload_block
     assert "name: windows-app-build-evidence-${{ github.sha }}" in upload_block
     assert "build/windows-app-build-evidence/candidate-summary.json" in upload_block
@@ -433,6 +454,61 @@ def test_pinned_cpython_license_bundle_is_exact_and_covers_native_runtime() -> N
         "libssl-3-x64.dll",
     ):
         assert required in verifier
+
+
+def test_clean_install_retains_fresh_roots_without_path_mutation() -> None:
+    script = _text(CLEAN_INSTALL_SCRIPT)
+    tree = ast.parse(script)
+    forbidden_by_module = {
+        "os": {"remove", "removedirs", "rename", "renames", "replace", "rmdir", "unlink"},
+        "shutil": {"move", "rmtree"},
+    }
+    module_aliases = {"os": "os", "shutil": "shutil"}
+    imported_calls: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name in forbidden_by_module:
+                    module_aliases[imported.asname or imported.name] = imported.name
+        elif isinstance(node, ast.ImportFrom) and node.module in forbidden_by_module:
+            for imported in node.names:
+                if imported.name in forbidden_by_module[node.module]:
+                    imported_calls.add(imported.asname or imported.name)
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Name) and function.id in imported_calls:
+            violations.append(function.id)
+        elif isinstance(function, ast.Attribute):
+            if function.attr in {"rename", "rmdir", "unlink"}:
+                violations.append(function.attr)
+            if isinstance(function.value, ast.Name):
+                module = module_aliases.get(function.value.id)
+                if module is not None and function.attr in forbidden_by_module[module]:
+                    violations.append(f"{module}.{function.attr}")
+
+    assert violations == []
+    assert script.count(".replace(") == 1
+    assert 'EXPECTED_PROJECT_NAME.replace("-", "_")' in script
+    for native_delete in ("DeleteFileW", "MoveFileExW", "RemoveDirectoryW", "Remove-Item"):
+        assert native_delete not in script
+    assert "_cleanup_owned_path" not in script
+    assert '"fresh_build_roots": "retained_until_runner_teardown"' in script
+    assert "must not gain a path-deletion primitive" in script
+
+
+def test_release_verifier_hashes_without_powershell_module_autoloading() -> None:
+    verifier = _text(VERIFY_SCRIPT)
+
+    assert "Get-FileHash" not in verifier
+    assert "[Security.Cryptography.SHA256]::Create()" in verifier
+    assert "[IO.File]::Open(" in verifier
+    assert "[IO.FileShare]::Read" in verifier
+    assert "$sha256.Dispose()" in verifier
+    assert "$stream.Dispose()" in verifier
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only release verifier")

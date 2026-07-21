@@ -113,8 +113,10 @@ uv run --frozen latex-word-review app
 每次构建的精确字节数与 SHA-256 以该次 `artifacts/SHA256SUMS.txt` 和程序目录内的
 `CONTENTS.sha256` 为准，不在 README 中固定易过期的构建哈希。
 
-本轮完整 Windows 本地回归为 **1023 passed、9 skipped**；Ruff、格式检查与 strict mypy
-同时通过。冻结程序、portable ZIP 和 setup 的公开发布仍受上方许可证审计状态约束。
+2026-07-21 的当前源码候选已完成完整 Windows 本地回归：**1209 passed、9 skipped、
+0 failed**，分支覆盖率 **90.47%**；Ruff、格式检查、strict mypy 与 `uv lock --check`
+同时通过。此前冻结程序候选的 1023 项回归属于旧构建记录；冻结程序、portable ZIP 和
+setup 的公开发布仍受上方许可证审计状态约束。
 
 ## 界面实际怎样工作
 
@@ -301,8 +303,16 @@ Word 原件或可识别的审稿信息；参与前请阅读 [CONTRIBUTING.md](CO
 
 ```powershell
 uv sync --frozen --group fixture --extra pdf-figures --python 3.12
-uv run --frozen python scripts/run_public_e0_cli_demo.py --skip-verification
+uv run --frozen python scripts/run_public_e0_cli_demo.py --fixture-profile portable --skip-verification
 ```
+
+`portable` 使用不产生 `SEQ`、`REF` 或 `PAGEREF` 活字段的合成论文，因此在没有
+Microsoft Word 的干净 Windows 环境中，也能执行完整的
+`snapshot → export → archive → ingest → approve → plan → apply` 审阅闭环。
+
+它不是降低生产安全要求的开关。`--fixture-profile full` 继续使用包含活字段的完整 E0
+样例；缺少 Microsoft Word 时必须安全失败。详细边界见
+[公开 E0 教程](docs/tutorial-public-e0.md)。
 
 项目只支持 Windows。当前 `0.2.0b1` 仍是源码候选；自动应用只覆盖精确普通正文，Word
 审阅稿不保证复刻 LaTeX PDF 版式，text-patch 基线也不等于整份 DOCX 的所有对象均已验证。
