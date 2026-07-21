@@ -280,6 +280,11 @@ def test_build_script_uses_one_onedir_and_is_offline_fail_closed() -> None:
     assert "Stop-Process -Id $owned.Id -Force" in script
     assert "-RedirectStandardOutput $isccOutput" in script
     assert "-RedirectStandardError $isccError" in script
+    assert "$isccHandle = $isccBuild.Handle" in script
+    assert "$isccHandle -eq [IntPtr]::Zero" in script
+    assert script.index("$isccHandle = $isccBuild.Handle") < script.index(
+        "$isccBuild.WaitForExit($InnoTimeoutSeconds * 1000)"
+    )
     assert "& $isccExe @isccArguments" not in script
     assert "[AllowEmptyString()][string]$Requested" in script
     assert '$isccProbeInfo.Arguments = "/?"' in script

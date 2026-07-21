@@ -426,6 +426,12 @@ $isccBuild = Start-Process -FilePath $isccExe `
     -PassThru `
     -RedirectStandardOutput $isccOutput `
     -RedirectStandardError $isccError
+# Windows PowerShell 5.1 must cache the handle before a redirected process exits;
+# otherwise ExitCode can remain $null after a manual timeout-aware WaitForExit.
+$isccHandle = $isccBuild.Handle
+if ($isccHandle -eq [IntPtr]::Zero) {
+    throw "Inno Setup compiler process handle is unavailable"
+}
 $isccStarted = $isccBuild.StartTime
 if (-not $isccBuild.WaitForExit($InnoTimeoutSeconds * 1000)) {
     $owned = Get-Process -Id $isccBuild.Id -ErrorAction SilentlyContinue
