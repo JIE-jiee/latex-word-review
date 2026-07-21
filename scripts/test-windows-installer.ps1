@@ -225,8 +225,18 @@ try {
         throw "installed GUI page evidence is unsafe"
     }
     $pageContent = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($guiPage))
-    if ($pageContent -notmatch '<title>LaTeX.Word 审阅助手</title>') {
-        throw "installed GUI returned an unexpected page"
+    # Windows PowerShell 5.1 decodes UTF-8 scripts without a BOM through the
+    # active ANSI code page. Keep the expected Unicode title ASCII-only here.
+    $expectedTitleUtf8Base64 = "TGFUZVjigJNXb3JkIOWuoemYheWKqeaJiw=="
+    $titleMatch = [regex]::Match($pageContent, '<title>([^<]{1,128})</title>')
+    if (-not $titleMatch.Success) {
+        throw "installed GUI page omitted its title"
+    }
+    $titleUtf8Base64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($titleMatch.Groups[1].Value)
+    )
+    if ($titleUtf8Base64 -cne $expectedTitleUtf8Base64) {
+        throw "installed GUI returned an unexpected page title"
     }
     $csrfMatch = [regex]::Match(
         $pageContent,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import json
 import os
@@ -342,6 +343,7 @@ def test_local_deploy_script_is_atomic_hash_bound_and_preserves_user_data() -> N
 def test_installer_smoke_starts_and_gracefully_stops_frozen_gui() -> None:
     script = _text(INSTALLER_SMOKE_SCRIPT)
 
+    assert script.isascii()
     assert '"LatexWordReview.exe"' in script
     assert '"--no-browser"' in script
     assert "http://127.0.0.1:$guiPort" in script
@@ -349,7 +351,12 @@ def test_installer_smoke_starts_and_gracefully_stops_frozen_gui() -> None:
     assert "[Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($guiPage))" in script
     assert "$pageResponse.Content" not in script
     assert "$pageFile.Length -le 0 -or $pageFile.Length -gt 2MB" in script
-    assert "$pageContent -notmatch '<title>LaTeX.Word 审阅助手</title>'" in script
+    expected_title_base64 = base64.b64encode("LaTeX–Word 审阅助手".encode()).decode()
+    assert f'$expectedTitleUtf8Base64 = "{expected_title_base64}"' in script
+    assert "$titleMatch = [regex]::Match(" in script
+    assert "'<title>([^<]{1,128})</title>'" in script
+    assert "$titleUtf8Base64 -cne $expectedTitleUtf8Base64" in script
+    assert "<title>LaTeX.Word 审阅助手</title>" not in script
     assert 'Uri "$origin/app/exit"' in script
     assert "installed_gui_http_status" in script
     assert "installed_gui_exit_code" in script
