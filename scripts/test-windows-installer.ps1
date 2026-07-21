@@ -105,12 +105,13 @@ $installRoot = Join-Path $buildRoot "windows-installer-smoke"
 $installLog = Join-Path $buildRoot "windows-installer-smoke-install.log"
 $uninstallLog = Join-Path $buildRoot "windows-installer-smoke-uninstall.log"
 $guiDataRoot = Join-Path $buildRoot "windows-installer-smoke-gui-data"
+$guiPage = Join-Path $buildRoot "windows-installer-smoke-page.html"
 $defaultInstallRoot = Join-Path $env:LOCALAPPDATA "Programs\LatexWordReview"
 $uninstallKey = (
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\" +
     "{FA0A89F6-357A-4C99-879A-A49B4576BB77}_is1"
 )
-foreach ($ownedPath in @($installRoot, $installLog, $uninstallLog, $guiDataRoot)) {
+foreach ($ownedPath in @($installRoot, $installLog, $uninstallLog, $guiDataRoot, $guiPage)) {
     Assert-ContainedPath -Root $buildRoot -Candidate $ownedPath -Label "installer smoke path"
     if (Test-Path -LiteralPath $ownedPath) {
         throw "installer smoke path already exists: $ownedPath"
@@ -199,7 +200,10 @@ try {
             throw "installed GUI exited before its local page became ready"
         }
         try {
-            $pageResponse = Invoke-WebRequest -Uri "$origin/" -WebSession $guiSession -UseBasicParsing -TimeoutSec 1
+            $pageResponse = Invoke-WebRequest -Uri "$origin/" `
+                -WebSession $guiSession `
+                -UseBasicParsing -TimeoutSec 1 `
+                -OutFile $guiPage -PassThru
             if ($pageResponse.StatusCode -eq 200) {
                 break
             }
@@ -212,11 +216,20 @@ try {
     if ($null -eq $pageResponse -or $pageResponse.StatusCode -ne 200) {
         throw "installed GUI did not expose its local page within 20 seconds"
     }
-    if ($pageResponse.Content -notmatch '<title>LaTeX.Word 审阅助手</title>') {
+    if (-not (Test-Path -LiteralPath $guiPage -PathType Leaf)) {
+        throw "installed GUI page evidence is missing"
+    }
+    $pageFile = Get-Item -Force -LiteralPath $guiPage
+    if (($pageFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $pageFile.Length -le 0 -or $pageFile.Length -gt 2MB) {
+        throw "installed GUI page evidence is unsafe"
+    }
+    $pageContent = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($guiPage))
+    if ($pageContent -notmatch '<title>LaTeX.Word 审阅助手</title>') {
         throw "installed GUI returned an unexpected page"
     }
     $csrfMatch = [regex]::Match(
-        $pageResponse.Content,
+        $pageContent,
         'name="csrf" value="([A-Za-z0-9_-]+)"'
     )
     if (-not $csrfMatch.Success) {
@@ -253,6 +266,10 @@ finally {
     if (Test-Path -LiteralPath $guiDataRoot) {
         Assert-ContainedPath -Root $buildRoot -Candidate $guiDataRoot -Label "installer GUI smoke data"
         Remove-Item -LiteralPath $guiDataRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $guiPage) {
+        Assert-ContainedPath -Root $buildRoot -Candidate $guiPage -Label "installer GUI page"
+        Remove-Item -LiteralPath $guiPage -Force
     }
 }
 
