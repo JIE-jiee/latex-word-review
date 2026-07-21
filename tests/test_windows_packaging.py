@@ -370,6 +370,10 @@ def test_windows_app_candidate_workflow_is_pinned_minimal_and_never_publishes() 
     assert workflow.count('"PYTHON_MANAGED_INSTALL_KEY=$installKey"') == 2
     assert workflow.count('"PYTHON_EXECUTABLE_SHA256=$pythonSha256"') == 2
     assert workflow.count('$identity -cne "$env:EXACT_PYTHON_VERSION|64|cpython"') == 2
+    assert workflow.count("$identityCode = `") == 2
+    assert workflow.count("$identity = ((& $pythonPath -c $identityCode)") == 2
+    assert workflow.count("struct.calcsize('P')") == 2
+    assert 'struct.calcsize("P")' not in workflow
     assert '--extra pdf-figures --python "$env:EXACT_PYTHON"' in workflow
     assert '--python "$env:EXACT_PYTHON" pytest tests/test_app_browser_e2e.py' in workflow
     assert "third_party/cpython-3.12.13-license.rst" in workflow
