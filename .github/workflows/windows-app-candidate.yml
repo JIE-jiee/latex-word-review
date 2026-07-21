@@ -266,7 +266,21 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
               throw "Pinned Inno Setup compiler was not installed"
           }
-          $banner = ((& $iscc "/?" 2>&1) | Out-String)
+          $bannerStdout = Join-Path $toolsRoot "iscc-help.stdout.txt"
+          $bannerStderr = Join-Path $toolsRoot "iscc-help.stderr.txt"
+          if ((Test-Path -LiteralPath $bannerStdout) -or
+              (Test-Path -LiteralPath $bannerStderr)) {
+              throw "ISCC help evidence path already exists"
+          }
+          $null = Start-Process -FilePath $iscc -ArgumentList "/?" `
+              -Wait -WindowStyle Hidden `
+              -RedirectStandardOutput $bannerStdout `
+              -RedirectStandardError $bannerStderr
+          $banner = [IO.File]::ReadAllText($bannerStdout) + `
+              [Environment]::NewLine + [IO.File]::ReadAllText($bannerStderr)
+          if ($banner.Length -eq 0 -or $banner.Length -gt 64KB) {
+              throw "Pinned Inno Setup compiler banner size is invalid"
+          }
           if ($banner -notmatch "(?m)^Inno Setup 7 Command-Line Compiler\r?$") {
               throw "Pinned Inno Setup compiler banner could not be verified"
           }
