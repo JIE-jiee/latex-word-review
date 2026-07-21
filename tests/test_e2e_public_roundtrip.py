@@ -120,11 +120,23 @@ def _fake_tools(calls: list[tuple[str, tuple[str, ...]]]) -> Any:
         max_output_bytes: int,
         environment: Mapping[str, str] | None,
     ) -> CommandResult:
-        del timeout_s, max_output_bytes, environment
+        del timeout_s, max_output_bytes
         name = str(executable)
         args = tuple(arguments)
         calls.append((name, args))
-        if "latexdiff" in name:
+        if Path(name).stem.casefold() == "initexmf":
+            assert environment is not None
+            stdout = "\n".join(
+                (
+                    "SharedSetup: no",
+                    "PathOkay: yes",
+                    f"LinkTargetDirectory: {Path(name).parent}",
+                    f"UserInstall: {environment['MIKTEX_USERINSTALL']}",
+                    f"UserConfig: {environment['MIKTEX_USERCONFIG']}",
+                    f"UserData: {environment['MIKTEX_USERDATA']}",
+                )
+            )
+        elif "latexdiff" in name:
             stdout = (
                 "\\documentclass{article}\n"
                 "\\begin{document}\\DIFdel{defined}\\DIFadd{carefully defined}"

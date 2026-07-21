@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.frozen_runtime import is_frozen_application
 from latex_word_review.hashing import digest_file
 from latex_word_review.runtime import minimal_environment, run_command
 
@@ -219,13 +220,29 @@ def diagnose_environment(
 ) -> DoctorReport:
     """Return a deterministic, path-free capability snapshot; never install tools."""
 
-    tools = tuple(probe_tool(spec, cwd=cwd) for spec in tool_specs)
     packages = (
         probe_package("tex2word", required=True),
         probe_package("lxml", required=True),
         probe_package("pypdfium2", required=False),
         probe_package("Pillow", required=False),
     )
+    if is_frozen_application():
+        embedded_package = packages[0]
+        embedded_tex2word = ToolProbe(
+            name="tex2word",
+            required=True,
+            status=embedded_package.status,
+            version=embedded_package.version,
+            executable_sha256=None,
+            output_sha256=None,
+            error_code=embedded_package.error_code,
+        )
+        tools = (
+            embedded_tex2word,
+            *(probe_tool(spec, cwd=cwd) for spec in tool_specs if spec.name != "tex2word"),
+        )
+    else:
+        tools = tuple(probe_tool(spec, cwd=cwd) for spec in tool_specs)
     required_failed = any(probe.required and probe.status != "available" for probe in tools)
     required_failed = required_failed or any(
         probe.required and probe.status != "available" for probe in packages

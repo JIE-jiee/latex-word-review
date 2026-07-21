@@ -126,15 +126,25 @@ the sdist pyproject to the checkout; permits only the reviewed static Hatchling 
 version-source shape; and binds filename/root/PKG-INFO/source/reference-wheel identity. The helper
 removes `PYTHONHOME` and `PYTHONPATH`, disables the user site, enables Python safe-path mode, and
 proves that `latex_word_review` resolves below the fresh venv prefix. It then launches
-`scripts/run_public_e0_cli_demo.py --skip-verification` with that venv's Python. All CLI subprocesses
+`scripts/run_public_e0_cli_demo.py --fixture-profile portable --skip-verification` with that venv's
+Python. The fixed profile must report zero live fields and at least one exact accepted mapping. All
+CLI subprocesses
 inherit the same interpreter and isolated environment; the repository `src/` tree is therefore not
 an import source for this gate.
 
-Existing venv/work/demo paths, symlink components, parent traversal, paths outside `build/`, and
-overlapping/nested roots are rejected before installation. On failure, the helper removes only the
-fresh roots it owns; it never deletes an existing path. On success the venv and demo remain as CI
-evidence while the transient work root is removed. External TeX verification is covered separately
-by `real-tex`, so the installed-artifact gate intentionally stops after `apply`.
+Existing venv/work/demo paths, symlink components, parent traversal, paths outside build/, and
+overlapping/nested roots are rejected before installation. The helper deliberately performs no
+path-based deletion or recursive cleanup after a root has been created. On Windows, a process
+started by pull-request code could otherwise replace an already checked parent with a junction
+between validation and deletion. Success and failure therefore retain the fresh venv, work, and
+demo roots as diagnostic evidence, and the JSON receipt records
+"fresh_build_roots = retained_until_runner_teardown". GitHub-hosted runner teardown is the disposal
+boundary. A manual local run can leave these ignored build/ roots and should use a fresh output
+name or remove the entire trusted build/ tree only after all related processes have stopped.
+Under ordinary non-concurrent use, explicitly pre-existing roots are rejected before writes. This
+preflight is not handle-bound protection against malicious same-account replacement during later
+writes, so CI uses a fresh hosted runner and never reuses these roots. External TeX verification is
+covered separately by real-tex, so the installed-artifact gate intentionally stops after apply.
 
 ## Changing support
 

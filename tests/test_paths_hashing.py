@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.hashing import TreeEntry, digest_file, source_tree_sha256
-from latex_word_review.paths import ensure_disjoint_roots, resolve_within, validate_relative_path
+from latex_word_review.paths import (
+    ensure_disjoint_roots,
+    resolve_within,
+    validate_relative_path,
+    windows_extended_path,
+)
 
 
 @pytest.mark.parametrize(
@@ -39,6 +45,23 @@ def test_relative_path_rejects_ambiguous_or_escaping_values(
 
 def test_relative_path_preserves_unicode() -> None:
     assert validate_relative_path("章节/方法与结果.tex") == "章节/方法与结果.tex"
+
+
+def test_windows_extended_path_is_idempotent_and_preserves_location(tmp_path: Path) -> None:
+    target = tmp_path / "paper"
+    target.mkdir()
+
+    extended = windows_extended_path(target)
+
+    assert extended.is_dir()
+    assert windows_extended_path(extended) == extended
+    if os.name == "nt":
+        assert str(extended).startswith("\\\\?\\")
+        dotted = target / "child" / ".."
+        assert windows_extended_path(dotted) == extended
+        assert ".." not in windows_extended_path(dotted).parts
+    else:
+        assert extended == target
 
 
 def test_resolve_within_rejects_symlink_escape(tmp_path: Path) -> None:

@@ -14,9 +14,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cache, lru_cache
-from importlib import resources
 from pathlib import PurePosixPath
-from typing import Any, Final
+from typing import Any
 
 from latex_word_review.canonical import (
     compute_document_sha256,
@@ -26,6 +25,13 @@ from latex_word_review.canonical import (
     verify_envelope_integrity,
 )
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.schema_catalog import (
+    COMMON_SCHEMA_FILENAME,
+    SCHEMA_FILES,
+    SCHEMA_MAJOR,
+    SCHEMA_VERSION,
+    read_schema_resource,
+)
 
 try:
     from jsonschema import Draft202012Validator, FormatChecker, ValidationError
@@ -36,10 +42,6 @@ except ImportError as exc:  # pragma: no cover - exercised in clean-install CI
     ) from exc
 
 
-SCHEMA_VERSION: Final = "1.0.0-alpha.1"
-SCHEMA_MAJOR: Final = 1
-_SCHEMA_PACKAGE: Final = "latex_word_review.schemas.v1alpha"
-_COMMON_FILENAME: Final = "common.schema.json"
 _SEMVER_RE = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\."
     r"(?P<minor>0|[1-9][0-9]*)\."
@@ -47,21 +49,6 @@ _SEMVER_RE = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-
-SCHEMA_FILES: Final[dict[str, str]] = {
-    "RunManifest": "run-manifest.schema.json",
-    "SourceManifest": "source-manifest.schema.json",
-    "BackendCapabilities": "backend-capabilities.schema.json",
-    "ReviewIR": "review-ir.schema.json",
-    "SourceMap": "source-map.schema.json",
-    "ExportReport": "export-report.schema.json",
-    "RawRevisionEvent": "raw-revision-event.schema.json",
-    "ChangeSet": "change-set.schema.json",
-    "ApprovalSet": "approval-set.schema.json",
-    "PatchPlan": "patch-plan.schema.json",
-    "VerificationReport": "verification-report.schema.json",
-    "AuditBundle": "audit-bundle.schema.json",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +109,7 @@ def available_schema_names() -> tuple[str, ...]:
 
 @cache
 def _read_schema_file(filename: str) -> dict[str, Any]:
-    text = resources.files(_SCHEMA_PACKAGE).joinpath(filename).read_text(encoding="utf-8")
+    text = read_schema_resource(filename).decode("utf-8", errors="strict")
     value = _loads_json_object(text, trusted_schema=True)
     Draft202012Validator.check_schema(value)
     return value
@@ -145,7 +132,7 @@ def load_schema(schema_name: str, *, schema_version: str = SCHEMA_VERSION) -> di
 
 @lru_cache(maxsize=1)
 def _schema_registry() -> Registry[Any]:
-    schemas = [_read_schema_file(_COMMON_FILENAME)]
+    schemas = [_read_schema_file(COMMON_SCHEMA_FILENAME)]
     schemas.extend(_read_schema_file(filename) for filename in SCHEMA_FILES.values())
     pairs = []
     for schema in schemas:

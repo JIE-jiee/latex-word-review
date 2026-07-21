@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -23,9 +26,11 @@ from latex_word_review.image_materializer import GraphicOption, scan_graphics_te
 from latex_word_review.image_overlay import (
     IMAGE_OVERLAY_MANIFEST,
     IMAGE_OVERLAY_ROOT,
+    TEX2WORD_COMPATIBILITY_PROFILE,
     ImageOverlayDiagnostic,
     build_image_overlay,
 )
+from latex_word_review.inspection import inspect_docx
 from latex_word_review.snapshot import snapshot_project
 from tests._docx_factory import write_docx
 from tests.test_image_materializer import _minimal_pdf, _require_pdf_runtime
@@ -60,7 +65,7 @@ def _write_complex_source(root: Path) -> None:
         "\\includegraphics[page=2,trim=6bp 0 6bp 0,clip,angle=90,"
         "width=.72\\linewidth,keepaspectratio]{multi.pdf}\n"
         "\\includegraphics[page=1,scale=.5]{multi.pdf}\n"
-        "\\includegraphics[height=2cm]{figures/raster.png}\n"
+        "\\includegraphics[height=2cm]{raster.png}\n"
         "\\end{document}\n",
         encoding="utf-8",
         newline="\n",
@@ -107,6 +112,7 @@ def test_public_multi_page_pdf_overlay_is_auditable_and_snapshot_stays_immutable
     assert derived_tex.count("\\includegraphics[") == 3
     assert derived_tex.count(f"{{{IMAGE_OVERLAY_ROOT}/") == 2
     assert "\\includegraphics[height=2cm]{figures/raster.png}" in derived_tex
+    assert "\\includegraphics[height=2cm]{raster.png}" not in derived_tex
     assert "page=2,trim=6bp 0 6bp 0,clip,angle=90" in original_bytes["main.tex"].decode("utf-8")
 
     manifest_bytes = read_stable_bytes(overlay.manifest_path, max_bytes=1024 * 1024)
@@ -122,6 +128,10 @@ def test_public_multi_page_pdf_overlay_is_auditable_and_snapshot_stays_immutable
         "materialized_pdf",
         "passthrough_raster",
     ]
+    assert entries[2]["original_target"] == "raster.png"
+    assert entries[2]["resolved_source"]["path"] == "figures/raster.png"
+    assert entries[2]["derived_command"] == ("\\includegraphics[height=2cm]{figures/raster.png}")
+    assert entries[2]["derived_command_sha256"].startswith("sha256:")
     assert [entry["request"]["page"] for entry in entries[:2]] == [2, 1]
     assert entries[0]["request"]["angle_millidegrees"] == 90_000
     assert entries[0]["request"]["trim_micro_bp"] == [6_000_000, 0, 6_000_000, 0]
@@ -140,6 +150,95 @@ def test_public_multi_page_pdf_overlay_is_auditable_and_snapshot_stays_immutable
     assert entries[0]["materialized"]["pixel_sha256"] != entries[1]["materialized"]["pixel_sha256"]
 
 
+def test_tex2word_profile_rewrites_only_proven_direct_figure_minipages(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "figures").mkdir(parents=True)
+    _write_png(source / "figures/column.png")
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{graphicx}\n"
+        "\\graphicspath{{figures/}}\n"
+        "\\begin{document}\n\n"
+        "Public compatibility review text.\n\n"
+        "\\begin{figure}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\n\\caption{Left eligible}\n"
+        "\\end{minipage}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\n\\caption{Right eligible}\n"
+        "\\end{minipage}\n"
+        "\\end{figure}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\n\\caption{Outside figure}\n"
+        "\\end{minipage}\n"
+        "\\begin{figure}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\nNo caption here.\n"
+        "\\end{minipage}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\n\\caption{Nested construct}\n"
+        "\\subfloat{Already a subfigure construct}\n"
+        "\\end{minipage}\n"
+        "\\begin{center}\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{column.png}\n\\caption{Not a direct child}\n"
+        "\\end{minipage}\n"
+        "\\end{center}\n"
+        "\\end{figure}\n"
+        "% \\begin{minipage} commented and ignored\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    before = _snapshot_bytes(source)
+
+    overlay = build_image_overlay(
+        source,
+        tmp_path / "tex2word-overlay",
+        discovery,
+        compatibility_profile=TEX2WORD_COMPATIBILITY_PROFILE,
+    )
+
+    assert overlay.ready
+    assert overlay.compatibility_profile == TEX2WORD_COMPATIBILITY_PROFILE
+    assert overlay.compatibility_transformations == 1
+    assert overlay.source_image_instances == 6
+    assert overlay.passthrough_raster_instances == 6
+    assert _snapshot_bytes(source) == before
+    derived = (overlay.derived_root / "main.tex").read_text(encoding="utf-8")
+    masked = overlay_module._mask_tex_comments(derived)
+    assert "\\begin{subfigure}" not in derived
+    assert masked.count("\\begin{figure}") == 3
+    assert masked.count("\\begin{minipage}") == 6
+    assert "\\includegraphics{figures/column.png}" in derived
+    assert "\\includegraphics{column.png}" not in derived
+    assert "\\caption{Left eligible}" in derived
+    assert "\\caption{Outside figure}" in derived
+
+    manifest = json.loads(overlay.manifest_path.read_text(encoding="utf-8"))
+    compatibility = manifest["compatibility"]
+    assert compatibility["profile"] == TEX2WORD_COMPATIBILITY_PROFILE
+    assert compatibility["transformation_count"] == 1
+    transformations = compatibility["transformations"]
+    assert len({item["transformation_id"] for item in transformations}) == 1
+    item = transformations[0]
+    assert item["kind"] == "figure_minipage_split"
+    assert item["source_path"] == "main.tex"
+    assert item["original_environment"] == "figure"
+    assert item["derived_environment"] == "figure_sequence"
+    assert item["direct_child_count"] == 2
+    assert item["includegraphics_count"] == 2
+    assert item["caption_count"] == 2
+    assert item["label_count"] == 0
+    assert item["labels"] == []
+    assert item["nested_subfigure_constructs"] == 0
+    assert item["original_block_sha256"].startswith("sha256:")
+    assert item["derived_block_sha256"].startswith("sha256:")
+
+
 def test_export_backend_receives_only_the_derived_root_and_source_map_uses_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -149,7 +248,10 @@ def test_export_backend_receives_only_the_derived_root_and_source_map_uses_snaps
     (source / "figures/page.pdf").write_bytes(_minimal_pdf(((1, 0, 0),)))
     (source / "main.tex").write_text(
         "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\n\n"
-        "Original review text.\n\n\\includegraphics{figures/page.pdf}\n"
+        "Original review text.\n\n\\begin{figure}\n"
+        "\\begin{minipage}{.8\\linewidth}\n"
+        "\\includegraphics{figures/page.pdf}\n\\caption{Public page}\n"
+        "\\end{minipage}\n\\end{figure}\n"
         "\\end{document}\n",
         encoding="utf-8",
         newline="\n",
@@ -168,7 +270,7 @@ def test_export_backend_receives_only_the_derived_root_and_source_map_uses_snaps
 
     class CapturingBackend:
         def capabilities(self) -> BackendCapabilities:
-            return Tex2WordBackend().capabilities()
+            return replace(Tex2WordBackend().capabilities(), tool_version="1.0.5")
 
         def export(self, request: BackendRequest) -> BackendResult:
             observed["source_root"] = request.source_root
@@ -209,6 +311,10 @@ def test_export_backend_receives_only_the_derived_root_and_source_map_uses_snaps
     assert observed["expected_source_tree_sha256"] == observed["actual_source_tree_sha256"]
     assert discovery.source_tree_sha256 == outcome.image_overlay.original_source_tree_sha256
     assert f"{{{IMAGE_OVERLAY_ROOT}/" in str(observed["main_text"])
+    assert "\\begin{subfigure}" not in str(observed["main_text"])
+    assert "\\begin{minipage}" in str(observed["main_text"])
+    assert outcome.image_overlay.compatibility_profile == TEX2WORD_COMPATIBILITY_PROFILE
+    assert outcome.image_overlay.compatibility_transformations == 0
     assert _snapshot_bytes(snapshot) == before
     assert outcome.anchoring is not None
     mapping = outcome.anchoring.mappings[0]
@@ -443,7 +549,7 @@ def test_overlay_rejects_existing_stale_and_case_colliding_reserved_paths(
         build_image_overlay(reserved, destination, reserved_discovery)
     assert raised.value.code is ErrorCode.SCHEMA_INVALID
     assert not destination.exists()
-    assert not list(tmp_path.glob(".reserved-overlay.image-overlay-*"))
+    assert not list(tmp_path.glob(".lwr-img-*"))
 
 
 def test_overlay_records_parse_lookup_option_and_render_failures_as_manual(
@@ -539,7 +645,7 @@ def test_overlay_publication_failure_cleans_owned_stage(
     )
     assert raised.value.code is expected
     assert not destination.exists()
-    assert not list(tmp_path.glob(".overlay.image-overlay-*"))
+    assert not list(tmp_path.glob(".lwr-img-*"))
 
 
 def test_overlay_final_manifest_verification_failure_removes_published_tree(
@@ -566,3 +672,110 @@ def test_overlay_final_manifest_verification_failure_removes_published_tree(
 
     assert raised.value.code is ErrorCode.HASH_INTEGRITY_MISMATCH
     assert not destination.exists()
+
+
+def test_redundant_literal_group_is_rewritten_only_in_the_derived_overlay(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "figures").mkdir(parents=True)
+    figure_name = "Review \N{EN DASH} plot.png"
+    _write_png(source / "figures" / figure_name)
+    original_command = r"\includegraphics[height=2cm]{{" + figure_name + "}}"
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{graphicx}\n"
+        "\\graphicspath{{figures/}}\n"
+        "\\begin{document}\nText.\n"
+        f"{original_command}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    original = _snapshot_bytes(source)
+
+    overlay = build_image_overlay(source, tmp_path / "overlay", discovery)
+
+    assert overlay.ready
+    assert overlay.source_image_instances == 1
+    assert overlay.passthrough_raster_instances == 1
+    assert _snapshot_bytes(source) == original
+    derived_command = f"\\includegraphics[height=2cm]{{figures/{figure_name}}}"
+    derived_text = (overlay.derived_root / "main.tex").read_text(encoding="utf-8")
+    assert original_command in original["main.tex"].decode("utf-8")
+    assert original_command not in derived_text
+    assert derived_command in derived_text
+
+    manifest = json.loads(overlay.manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["entries"][0]
+    assert entry["original_target"] == f"{{{figure_name}}}"
+    assert entry["original_command"] == original_command
+    assert entry["resolved_source"]["path"] == f"figures/{figure_name}"
+    assert entry["derived_command"] == derived_command
+    assert entry["source_span"]["end_char"] > entry["source_span"]["start_char"]
+    assert entry["source_span"]["end_utf8"] > entry["source_span"]["start_utf8"]
+
+
+def test_tex2word_profile_preserves_split_figure_reference_targets(tmp_path: Path) -> None:
+    backend = Tex2WordBackend()
+    if backend.capabilities().tool_version != "1.0.5":
+        pytest.skip("locked tex2word runtime is unavailable")
+    source = tmp_path / "source"
+    (source / "figures").mkdir(parents=True)
+    _write_png(source / "figures/panel.png")
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{graphicx}\n"
+        "\\usepackage{cleveref}\n"
+        "\\begin{document}\n"
+        "See \\cref{fig:left} and \\cref{fig:right}.\n"
+        "\\begin{figure}[htbp]\n"
+        "\\centering\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{figures/panel.png}\n"
+        "\\caption{Left panel}\\label{fig:left}\n"
+        "\\end{minipage}\n"
+        "\\hfill\n"
+        "\\begin{minipage}{.48\\linewidth}\n"
+        "\\includegraphics{figures/panel.png}\n"
+        "\\caption{Right panel}\\label{fig:right}\n"
+        "\\end{minipage}\n"
+        "\\end{figure}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    original = _snapshot_bytes(source)
+
+    overlay = build_image_overlay(
+        source,
+        tmp_path / "overlay",
+        discovery,
+        compatibility_profile=TEX2WORD_COMPATIBILITY_PROFILE,
+    )
+    derived = (overlay.derived_root / "main.tex").read_text(encoding="utf-8")
+    assert derived.count("\\begin{figure}[htbp]") == 2
+    assert "\\label{fig:left}" in derived
+    assert "\\label{fig:right}" in derived
+    assert _snapshot_bytes(source) == original
+
+    output = tmp_path / "output/review.docx"
+    result = backend.export(BackendRequest(overlay.derived_root, "main.tex", output))
+    assert result.succeeded
+    inspection = inspect_docx(output)
+    assert inspection.seq_fields == 2
+    assert inspection.ref_fields == 2
+    assert inspection.image_instances == 2
+
+    with zipfile.ZipFile(output) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    codes = ["".join(node.itertext()) for node in root.iter(f"{{{W_NS}}}instrText")]
+    targets = {
+        match.group(1)
+        for code in codes
+        if (match := re.search(r"\b(?:REF|PAGEREF)\s+([A-Za-z_][A-Za-z0-9_.]*)", code))
+    }
+    assert len(targets) == 2
+    assert targets.issubset(set(inspection.bookmark_names))

@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+import latex_word_review.image_materializer as image_materializer_module
 import latex_word_review.workflow as workflow_module
+from latex_word_review.backends import Tex2WordBackend
+from latex_word_review.backends.base import BackendResult
 from latex_word_review.canonical import canonical_json, seal_envelope
 from latex_word_review.cli import main
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export import ExportOutcome
+from latex_word_review.export_models import ExportFinding, ExportReport, ExportValidation
 from latex_word_review.hashing import digest_file
 from latex_word_review.jsonio import read_contract_file
+from latex_word_review.paths import windows_extended_path
 from latex_word_review.workflow import (
     clean_workflow,
     export_workflow,
@@ -321,6 +329,7 @@ def _tamper_cache_output(cache: dict[str, Any]) -> None:
 )
 def test_status_verifies_materialized_pdf_cache_evidence(
     tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
     tamper: Callable[[dict[str, Any]], None],
 ) -> None:
     _require_pdf_runtime()
@@ -346,6 +355,17 @@ def test_status_verifies_materialized_pdf_cache_evidence(
         generated_at=TIME,
     )
     export_workflow(run, confidentiality="public_fixture", generated_at=TIME)
+
+    def forbidden_pixel_reload(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("sealed workflow reload must not decode or re-encode PNG pixels")
+
+    monkeypatch.setattr(image_materializer_module, "_decode_png", forbidden_pixel_reload)
+    monkeypatch.setattr(image_materializer_module, "_encode_canonical_png", forbidden_pixel_reload)
+    monkeypatch.setattr(
+        image_materializer_module,
+        "_load_pillow_image_module",
+        forbidden_pixel_reload,
+    )
     assert workflow_status(run)["integrity"] == "workflow_bindings_verified"
 
     overlay_root = run / "export/review.docx.image-overlay"
@@ -453,6 +473,119 @@ def test_failed_export_cleans_its_owned_stage(
     assert not (run / "export").exists()
     assert (run / ".lwr-staging").is_dir()
     assert not list((run / ".lwr-staging").iterdir())
+
+
+def test_failed_export_preserves_safe_backend_cause_without_paths() -> None:
+    capabilities = Tex2WordBackend().capabilities()
+    finding = ExportFinding(
+        code=ErrorCode.TOOL_VERSION_UNSUPPORTED,
+        severity="error",
+        phase="export",
+        message="synthetic path-free failure",
+        recoverable=False,
+    )
+    backend_result = BackendResult(
+        status="failed",
+        capabilities=capabilities,
+        artifact_name=None,
+        artifact_sha256=None,
+        artifact_size_bytes=None,
+        findings=(finding,),
+        native_report={
+            "duration_ms": 12_345,
+            "output_truncated": False,
+            "error_count": 2,
+            "warning_count": 1,
+            "failure_kind": "unsupported_version",
+            "private_path": r"C:\private\paper.tex",
+        },
+        timed_out=False,
+        returncode=7,
+    )
+    report = ExportReport(
+        status="failed",
+        source_manifest_sha256="sha256:" + "a" * 64,
+        backend_capabilities_sha256=capabilities.payload_sha256,
+        review_ir_sha256=None,
+        source_map_sha256=None,
+        review_docx=None,
+        image_overlay={},
+        source_metrics={},
+        output_metrics={},
+        feature_results=(),
+        findings=(finding,),
+        validation=ExportValidation("blocked", "not_run", "blocked", "blocked"),
+    )
+    outcome = ExportOutcome(
+        backend_result=backend_result,
+        report=report,
+        units=(),
+        anchoring=None,
+        inspection=None,
+        output_path=None,
+    )
+    error = workflow_module._export_failure_error(outcome, backend_name="tex2word")
+
+    assert error.code is ErrorCode.TOOL_VERSION_UNSUPPORTED
+    assert error.violation.details == {
+        "provider": "tex2word",
+        "stage": "backend_export",
+        "export_status": "failed",
+        "backend_status": "failed",
+        "backend_error_code": ErrorCode.TOOL_VERSION_UNSUPPORTED.value,
+        "timed_out": "no",
+        "finding_count": 1,
+        "returncode": 7,
+        "duration_ms": 12_345,
+        "error_count": 2,
+        "warning_count": 1,
+        "output_truncated": "no",
+        "failure_kind": "unsupported_version",
+    }
+    assert "private" not in str(error.as_dict())
+
+
+def test_partial_export_is_reviewable_only_for_recoverable_warnings() -> None:
+    capabilities = Tex2WordBackend().capabilities()
+    warning = ExportFinding(
+        code=ErrorCode.EXPORT_DEGRADED,
+        severity="warning",
+        phase="export",
+        message="synthetic recoverable compatibility warning",
+        recoverable=True,
+    )
+    report = ExportReport(
+        status="partial",
+        source_manifest_sha256="sha256:" + "a" * 64,
+        backend_capabilities_sha256=capabilities.payload_sha256,
+        review_ir_sha256="sha256:" + "b" * 64,
+        source_map_sha256="sha256:" + "c" * 64,
+        review_docx=None,
+        image_overlay={},
+        source_metrics={},
+        output_metrics={},
+        feature_results=(),
+        findings=(warning,),
+        validation=ExportValidation("pass", "not_run", "pass", "pass"),
+    )
+
+    assert workflow_module._is_reviewable_export_report(report)
+    assert workflow_module._is_reviewable_export_payload(report.as_payload())
+
+    blocking = replace(
+        report,
+        findings=(
+            ExportFinding(
+                code=ErrorCode.EXPORT_SILENT_LOSS,
+                severity="error",
+                phase="inspect",
+                message="synthetic missing content",
+                recoverable=False,
+            ),
+        ),
+    )
+    assert not workflow_module._is_reviewable_export_report(blocking)
+    assert not workflow_module._is_reviewable_export_payload(blocking.as_payload())
 
 
 def test_public_workflow_arguments_fail_closed(tmp_path: Path) -> None:
@@ -578,10 +711,13 @@ def test_path_and_publication_guards_reject_ambiguous_filesystem_shapes(
     tree.mkdir()
     tree_link = tree / "linked-child"
     tree_link.mkdir()
+    simulated_targets = {
+        windows_extended_path(path) for path in (linklike_directory, linklike_file, tree_link)
+    }
     original_probe = workflow_module._is_link_or_junction
 
     def simulated_links(path: Path) -> bool:
-        return path in {linklike_directory, linklike_file, tree_link} or original_probe(path)
+        return windows_extended_path(path) in simulated_targets or original_probe(path)
 
     monkeypatch.setattr(workflow_module, "_is_link_or_junction", simulated_links)
     with pytest.raises(ContractError, match=ErrorCode.PATH_LINK_ESCAPE.value):
@@ -632,3 +768,32 @@ def test_path_and_publication_guards_reject_ambiguous_filesystem_shapes(
     foreign.mkdir(parents=True)
     with pytest.raises(ContractError, match=ErrorCode.INTERNAL_INVARIANT.value):
         workflow_module._publish_payload(foreign, destination)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 MAX_PATH regression")
+def test_owned_workflow_stage_supports_paths_beyond_legacy_max_path(tmp_path: Path) -> None:
+    parent = tmp_path / "stages"
+    parent.mkdir()
+    stage = parent / ".lwr-stage-export-abcdefgh"
+    stage.mkdir()
+    filesystem_stage = windows_extended_path(stage)
+    nested = filesystem_stage / ("n" * 120)
+    nested.mkdir()
+    long_file = nested / ("f" * 120 + ".txt")
+    long_file.write_bytes(b"long-path-evidence")
+
+    legacy_spelling = stage / nested.name / long_file.name
+    assert len(str(legacy_spelling)) > 260
+    # Legacy spelling depends on machine policy; extended I/O must work either way.
+
+    entries = workflow_module._tree_entries_without_links(stage)
+    assert long_file in entries
+    workflow_module._seal_tree_files(stage)
+    assert not long_file.stat().st_mode & stat.S_IWUSR
+
+    workflow_module._remove_owned_tree(
+        stage,
+        parent,
+        prefixes=(".lwr-stage-export-",),
+    )
+    assert not stage.exists()

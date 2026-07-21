@@ -76,7 +76,7 @@ def _run(source_path: Path, request_path: Path, output_path: Path, report_path: 
             ErrorCode.TOOL_VERSION_UNSUPPORTED,
             "image worker renderer identity differs",
         )
-    png_bytes, width_px, height_px, pixel_sha256 = _render_pdf(
+    png_bytes, width_px, height_px, pixel_sha256, effective_dpi = _render_pdf(
         source_bytes,
         request,
         runtime,
@@ -95,7 +95,7 @@ def _run(source_path: Path, request_path: Path, output_path: Path, report_path: 
             "pixel_sha256": pixel_sha256,
             "width_px": width_px,
             "height_px": height_px,
-            "dpi": request.quality.dpi,
+            "dpi": effective_dpi,
         },
     }
     _write_exclusive(output_path, png_bytes)

@@ -28,6 +28,17 @@ from tests.test_contracts import _golden_contracts
 from tests.test_plan_apply import _changeset, _final_approval, _write_source
 
 
+@pytest.fixture(autouse=True)
+def _make_default_tool_resolution_host_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most verifier tests use a fake runner and must not depend on host TeX."""
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        "latex_word_review.latex_verify._common_miktex_candidates",
+        lambda _name: (),
+    )
+
+
 def _diff() -> bytes:
     return "".join(
         difflib.unified_diff(
@@ -92,8 +103,11 @@ def _success_runner(calls: list[dict[str, Any]]) -> Any:
                 "environment": dict(environment or {}),
             }
         )
-        if os.fspath(executable).startswith("latexdiff"):
-            stdout = "\\documentclass{article}\n\\begin{document}changed\\end{document}\n"
+        if Path(os.fspath(executable)).stem.casefold().startswith("latexdiff"):
+            stdout = (
+                "\\documentclass{article}\n\\begin{document}"
+                "\\DIFdel{Hello}\\DIFadd{carefully Hello}\\end{document}\n"
+            )
         else:
             out_argument = next(item for item in args if item.startswith("-outdir="))
             outdir = (cwd / out_argument.partition("=")[2]).resolve()
@@ -195,15 +209,24 @@ def test_verified_outputs_bind_every_authorization_hash_and_keep_inputs_immutabl
     assert (revised / "main.tex").read_bytes() == revised_before
     assert returned.read_bytes() == returned_before
     assert len(calls) == 3
+    assert "--flatten" not in calls[1]["arguments"]
+    assert calls[1]["arguments"][-2:] == (
+        "latexdiff-input/original.tex",
+        "latexdiff-input/revised.tex",
+    )
     assert all("SYNTHETIC_SECRET" not in call["environment"] for call in calls)
+    assert all(call["environment"]["NoDefaultCurrentDirectoryInExePath"] == "1" for call in calls)
+    assert all(Path(call["environment"]["HOME"]).is_relative_to(tmp_path) for call in calls)
     assert all(
-        {name: call["environment"][name] for name in miktex_roots} == miktex_roots for call in calls
+        all(call["environment"].get(name) != value for name, value in miktex_roots.items())
+        for call in calls
     )
     assert all(not Path(cast("Path", call["cwd"])).is_relative_to(original) for call in calls)
     assert all(not Path(cast("Path", call["cwd"])).is_relative_to(revised) for call in calls)
     for call in calls:
         if str(call["executable"]).startswith("latexmk"):
-            assert "-disable-installer" in call["arguments"]
+            assert "-norc" in call["arguments"]
+            assert "-disable-installer" not in call["arguments"]
             assert "-no-shell-escape" in call["arguments"]
             assert "-shell-escape" not in call["arguments"]
     logs = b"".join(path.read_bytes() for path in sorted((output / "logs").iterdir()))
@@ -344,7 +367,7 @@ def test_missing_latexdiff_is_explicitly_blocked(
         arguments: Sequence[str],
         **kwargs: Any,
     ) -> CommandResult:
-        if os.fspath(executable) == "latexdiff":
+        if Path(os.fspath(executable)).stem.casefold() == "latexdiff":
             raise ContractError(ErrorCode.TOOL_MISSING, "synthetic missing tool")
         return cast("CommandResult", success(executable, arguments, **kwargs))
 
@@ -355,6 +378,99 @@ def test_missing_latexdiff_is_explicitly_blocked(
     assert result.report["payload"]["latexdiff"]["status"] == "blocked"
     command = result.report["extensions"]["org.latex-word-review.verification"]["commands"][1]
     assert command["error_code"] == ErrorCode.TOOL_MISSING.value
+
+
+def test_static_latexdiff_flattening_uses_sealed_unicode_include_edges() -> None:
+    from latex_word_review import latex_verify
+
+    tree = latex_verify._SourceTree(
+        files={
+            "main.tex": (
+                "% \\input{章节/方法}\n\\input{章节/方法}\n\\begin{document}正文\\end{document}\n"
+            ).encode(),
+            "章节/方法.tex": "方法正文。\\input{片段}\n".encode(),
+            "片段.tex": "嵌套片段。\n".encode(),
+        },
+        roles={"main.tex": "tex", "章节/方法.tex": "tex", "片段.tex": "tex"},
+        records=(),
+        tree_sha256=sha256_bytes(b"synthetic-tree"),
+    )
+    source_manifest = {
+        "payload": {
+            "dependency_edges": [
+                {"from": "main.tex", "kind": "input", "to": "章节/方法.tex"},
+                {"from": "章节/方法.tex", "kind": "input", "to": "片段.tex"},
+            ]
+        }
+    }
+
+    flattened = latex_verify._flatten_latexdiff_source(
+        tree,
+        source_manifest,
+        "main.tex",
+        max_bytes=4096,
+    ).decode()
+
+    assert "% \\input{章节/方法}" in flattened
+    assert flattened.count("方法正文。") == 1
+    assert flattened.count("嵌套片段。") == 1
+    assert "\\input{片段}" not in flattened
+
+
+def test_latexdiff_marker_gate_ignores_only_preamble_definitions() -> None:
+    from latex_word_review import latex_verify
+
+    definitions_only = (
+        b"\\providecommand{\\DIFadd}[1]{#1} %DIF PREAMBLE\n"
+        b"\\providecommand{\\DIFdel}[1]{} %DIF PREAMBLE\n"
+        b"\\begin{document}unchanged\\end{document}\n"
+    )
+    assert latex_verify._latexdiff_has_change_markers(definitions_only) is False
+    assert (
+        latex_verify._latexdiff_has_change_markers(
+            b"\\begin{document}\\DIFaddbegin added\\DIFaddend\\end{document}\n"
+        )
+        is True
+    )
+
+
+def test_nonempty_patch_without_actual_latexdiff_markers_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _workflow(tmp_path)
+    calls: list[dict[str, Any]] = []
+    success = _success_runner(calls)
+
+    def definitions_only_runner(
+        executable: str | Path,
+        arguments: Sequence[str],
+        **kwargs: Any,
+    ) -> CommandResult:
+        result = cast("CommandResult", success(executable, arguments, **kwargs))
+        if Path(os.fspath(executable)).stem.casefold().startswith("latexdiff"):
+            stdout = (
+                "\\providecommand{\\DIFadd}[1]{#1} %DIF PREAMBLE\n"
+                "\\begin{document}unchanged\\end{document}\n"
+            )
+            return CommandResult(
+                returncode=0,
+                stdout=stdout,
+                stderr="included files were not expanded",
+                timed_out=False,
+                output_truncated=False,
+                duration_ms=1,
+                output_sha256=sha256_bytes(stdout.encode()),
+            )
+        return result
+
+    monkeypatch.setattr("latex_word_review.latex_verify.run_command", definitions_only_runner)
+    result = _verify(workflow)
+
+    assert result.status == "fail"
+    assert result.report["payload"]["latexdiff"]["status"] == "fail"
+    assert not (workflow[-1] / "latexdiff.tex").exists()
+    assert len(calls) == 2
 
 
 def test_shell_escape_dependent_source_is_denied_before_any_command() -> None:
@@ -395,6 +511,199 @@ def test_miktex_installer_prompt_is_disabled_only_for_complete_isolated_roots() 
     incomplete = dict(complete)
     incomplete.pop("MIKTEX_USERDATA")
     assert latex_verify._miktex_latexmk_arguments(incomplete) == ()
+
+
+def _synthetic_miktex_install(root: Path) -> tuple[Path, Path]:
+    config = root / "miktex" / "config"
+    binary = root / "miktex" / "bin" / "x64"
+    config.mkdir(parents=True)
+    binary.mkdir(parents=True)
+    for name in ("scripts.ini", "packages.ini", "mpm.ini", "package-manifests.ini"):
+        (config / name).write_text(f"synthetic {name}\n", encoding="utf-8")
+    for name in (
+        "initexmf.exe",
+        "latexmk.exe",
+        "latexdiff.exe",
+        "pdflatex.exe",
+        "xelatex.exe",
+        "lualatex.exe",
+        "bibtex.exe",
+        "biber.exe",
+        "makeindex.exe",
+    ):
+        (binary / name).write_bytes(f"synthetic {name}\n".encode())
+    return binary / "latexmk.exe", binary / "latexdiff.exe"
+
+
+def _set_synthetic_perl(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    binary = root / "synthetic-perl"
+    binary.mkdir()
+    perl = binary / "perl.exe"
+    perl.write_bytes(b"synthetic perl executable")
+    monkeypatch.setenv("PATH", os.fspath(binary))
+    return perl
+
+
+def test_windows_miktex_toolchain_uses_private_state_and_ignores_inherited_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from latex_word_review import latex_verify
+
+    install = tmp_path / "installed"
+    latexmk, latexdiff = _synthetic_miktex_install(install)
+    perl = _set_synthetic_perl(tmp_path, monkeypatch)
+    outside = tmp_path / "inherited-outside"
+    for name in latex_verify._MIKTEX_ROOT_ENVIRONMENT:
+        monkeypatch.setenv(name, os.fspath(outside / name))
+    work = tmp_path / "work"
+    work.mkdir()
+
+    toolchain = latex_verify._prepare_tex_toolchain(work, latexmk, latexdiff, "-xelatex")
+
+    additions = toolchain.environment_additions
+    assert toolchain.latexmk_arguments[0] == "-disable-installer"
+    assert any(argument.startswith("-xelatex=") for argument in toolchain.latexmk_arguments)
+    assert Path(additions["MIKTEX_USERINSTALL"]) == install.resolve()
+    for name in ("MIKTEX_USERCONFIG", "MIKTEX_USERDATA", "HOME", "USERPROFILE"):
+        value = Path(additions[name])
+        assert value.is_relative_to(work)
+        assert not value.is_relative_to(outside)
+    assert toolchain.temp_root.is_relative_to(work)
+    assert additions["PATH"].split(os.pathsep)[0] == os.fspath(latexmk.parent)
+    assert len(toolchain.installation_state) == 12
+    assert any(item.path == perl.resolve() for item in toolchain.installation_state)
+
+
+def test_windows_default_tools_fall_back_to_standard_local_miktex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from latex_word_review import latex_verify
+
+    install = tmp_path / "local" / "Programs" / "MiKTeX"
+    latexmk, latexdiff = _synthetic_miktex_install(install)
+    _set_synthetic_perl(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        latex_verify,
+        "_common_miktex_candidates",
+        lambda name: (latexmk if name == "latexmk" else latexdiff,),
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+
+    toolchain = latex_verify._prepare_tex_toolchain(work, "latexmk", "latexdiff", "-xelatex")
+
+    assert Path(toolchain.latexmk_executable) == latexmk.resolve()
+    assert Path(toolchain.latexdiff_executable) == latexdiff.resolve()
+    assert toolchain.latexmk_arguments[0] == "-disable-installer"
+
+
+def test_windows_miktex_toolchain_rejects_mixed_or_incomplete_installations(
+    tmp_path: Path,
+) -> None:
+    from latex_word_review import latex_verify
+
+    install = tmp_path / "installed"
+    _latexmk, latexdiff = _synthetic_miktex_install(install)
+    texlive_latexmk = tmp_path / "texlive" / "bin" / "windows" / "latexmk.exe"
+    texlive_latexmk.parent.mkdir(parents=True)
+    texlive_latexmk.write_bytes(b"synthetic texlive latexmk")
+    mixed_work = tmp_path / "mixed-work"
+    mixed_work.mkdir()
+    with pytest.raises(ContractError) as mixed:
+        latex_verify._prepare_tex_toolchain(
+            mixed_work,
+            texlive_latexmk,
+            latexdiff,
+            "-xelatex",
+        )
+    assert mixed.value.code is ErrorCode.TOOL_VERSION_UNSUPPORTED
+
+    incomplete = tmp_path / "fake" / "miktex" / "bin" / "x64" / "latexmk.exe"
+    incomplete.parent.mkdir(parents=True)
+    incomplete.write_bytes(b"not a complete install")
+    incomplete_work = tmp_path / "incomplete-work"
+    incomplete_work.mkdir()
+    with pytest.raises(ContractError) as invalid:
+        latex_verify._prepare_tex_toolchain(
+            incomplete_work,
+            incomplete,
+            tmp_path / "missing-latexdiff.exe",
+            "-xelatex",
+        )
+    assert invalid.value.code is ErrorCode.TOOL_VERSION_UNSUPPORTED
+
+
+def test_windows_miktex_installation_drift_is_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from latex_word_review import latex_verify
+
+    install = tmp_path / "installed"
+    latexmk, latexdiff = _synthetic_miktex_install(install)
+    _set_synthetic_perl(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    toolchain = latex_verify._prepare_tex_toolchain(work, latexmk, latexdiff, "-xelatex")
+    (install / "miktex" / "config" / "packages.ini").write_text(
+        "tampered inventory\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractError) as drift:
+        latex_verify._verify_miktex_installation_state(toolchain)
+    assert drift.value.code is ErrorCode.VERIFY_COMPILE_FAILED
+
+
+def test_windows_texlive_paths_are_explicitly_unsupported(tmp_path: Path) -> None:
+    from latex_word_review import latex_verify
+
+    binary = tmp_path / "texlive" / "bin" / "windows"
+    binary.mkdir(parents=True)
+    latexmk = binary / "latexmk.exe"
+    latexdiff = binary / "latexdiff.exe"
+    latexmk.write_bytes(b"synthetic texlive latexmk")
+    latexdiff.write_bytes(b"synthetic texlive latexdiff")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    with pytest.raises(ContractError) as unsupported:
+        latex_verify._prepare_tex_toolchain(work, latexmk, latexdiff, "-xelatex")
+    assert unsupported.value.code is ErrorCode.TOOL_VERSION_UNSUPPORTED
+
+
+def test_windows_relative_tool_path_is_rejected(tmp_path: Path) -> None:
+    from latex_word_review import latex_verify
+
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(ContractError) as invalid:
+        latex_verify._prepare_tex_toolchain(
+            work,
+            Path("tools/latexmk.exe"),
+            "latexdiff",
+            "-xelatex",
+        )
+    assert invalid.value.code is ErrorCode.SCHEMA_INVALID
+
+
+def test_windows_runtime_does_not_resolve_bare_tools_from_command_cwd(tmp_path: Path) -> None:
+    from latex_word_review import runtime
+
+    planted = tmp_path / "latexmk.exe"
+    planted.write_bytes(b"must not be selected")
+    with pytest.raises(ContractError) as missing:
+        runtime._resolve_windows_executable(
+            "latexmk",
+            cwd=tmp_path,
+            environment={"PATH": "", "PATHEXT": ".EXE"},
+        )
+    assert missing.value.code is ErrorCode.TOOL_MISSING
+
+    environment = runtime.minimal_environment(temp_root=tmp_path)
+    assert environment["NoDefaultCurrentDirectoryInExePath"] == "1"
 
 
 def test_reference_check_uses_final_tex_log_not_transient_latexmk_warnings(

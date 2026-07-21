@@ -19,6 +19,129 @@ $WdDoNotSaveChanges = 0
 $WdFormatXmlDocument = 12
 $MsoAutomationSecurityForceDisable = 3
 
+$ExtendedPathPrefix = "\\?\"
+$DevicePathPrefix = "\\.\"
+$NtPathPrefix = "\??\"
+
+function Get-NormalWin32FullPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Description
+    )
+
+    foreach ($prefix in @($ExtendedPathPrefix, $DevicePathPrefix, $NtPathPrefix)) {
+        if ($LiteralPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Description must use an ordinary Win32 path, not an extended or device path."
+        }
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    foreach ($prefix in @($ExtendedPathPrefix, $DevicePathPrefix, $NtPathPrefix)) {
+        if ($fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Description resolved to an extended or device path; pass an ordinary Win32 path."
+        }
+    }
+    return $fullPath
+}
+
+function Get-WinWordProcessSnapshot {
+    $snapshot = @()
+    $processes = @(Get-Process -Name "WINWORD" -ErrorAction SilentlyContinue)
+    foreach ($process in $processes) {
+        try {
+            $snapshot += [pscustomobject]@{
+                pid = [int] $process.Id
+                started_filetime_utc = [long] $process.StartTime.ToUniversalTime().ToFileTimeUtc()
+            }
+        }
+        catch {
+            throw "Unable to inspect every existing WINWORD process before automation."
+        }
+        finally {
+            $process.Dispose()
+        }
+    }
+    return @($snapshot)
+}
+
+function Get-WinWordIdentityKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Identity
+    )
+
+    return "{0}:{1}" -f ([int] $Identity.pid), ([long] $Identity.started_filetime_utc)
+}
+
+function Wait-ForOwnedWinWordIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $BeforeSnapshot
+    )
+
+    $beforeKeys = @{}
+    foreach ($identity in $BeforeSnapshot) {
+        $beforeKeys[(Get-WinWordIdentityKey -Identity $identity)] = $true
+    }
+
+    for ($attempt = 1; $attempt -le 50; $attempt++) {
+        $newIdentities = @(
+            Get-WinWordProcessSnapshot | Where-Object {
+                -not $beforeKeys.ContainsKey((Get-WinWordIdentityKey -Identity $_))
+            }
+        )
+        if ($newIdentities.Count -eq 1) {
+            return $newIdentities[0]
+        }
+        if ($newIdentities.Count -gt 1) {
+            throw "More than one new WINWORD process appeared; ownership is ambiguous."
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    throw "No unique new WINWORD process could be attributed to this QA run."
+}
+
+function Open-ExactWinWordProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Identity
+    )
+
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById([int] $Identity.pid)
+        $started = [long] $process.StartTime.ToUniversalTime().ToFileTimeUtc()
+        if ($started -ne [long] $Identity.started_filetime_utc) {
+            $process.Dispose()
+            return $null
+        }
+        return $process
+    }
+    catch [System.ArgumentException] {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        return $null
+    }
+    catch [System.InvalidOperationException] {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        return $null
+    }
+    catch {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        throw "Unable to verify the owned WINWORD process identity."
+    }
+}
+
 function Get-Sha256 {
     param(
         [Parameter(Mandatory = $true)]
@@ -42,6 +165,197 @@ function Release-ComObject {
         catch {
             # Word may already have disconnected an RCW during Close/Quit. Cleanup must continue.
         }
+    }
+}
+
+function Invoke-ComGarbageCollection {
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+}
+
+function Get-WordCollectionCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Document,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Bookmarks", "Comments", "Revisions")]
+        [string] $CollectionName
+    )
+
+    $collection = $null
+    try {
+        switch ($CollectionName) {
+            "Bookmarks" {
+                $collection = $Document.Bookmarks
+                $collection.ShowHidden = $true
+            }
+            "Comments" {
+                $collection = $Document.Comments
+            }
+            "Revisions" {
+                $collection = $Document.Revisions
+            }
+        }
+        return [int] $collection.Count
+    }
+    finally {
+        Release-ComObject -ComObject $collection
+    }
+}
+
+function Add-WordComment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Document,
+
+        [Parameter(Mandatory = $true)]
+        [object] $Range,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Text
+    )
+
+    $comments = $null
+    try {
+        $comments = $Document.Comments
+        return $comments.Add($Range, $Text)
+    }
+    finally {
+        Release-ComObject -ComObject $comments
+    }
+}
+
+function Get-WordBookmark {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Document,
+
+        [Parameter(Mandatory = $true)]
+        [int] $Index
+    )
+
+    $bookmarks = $null
+    try {
+        $bookmarks = $Document.Bookmarks
+        $bookmarks.ShowHidden = $true
+        return $bookmarks.Item($Index)
+    }
+    finally {
+        Release-ComObject -ComObject $bookmarks
+    }
+}
+
+function Wait-ForExactWinWordExit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Identity,
+
+        [Parameter(Mandatory = $false)]
+        [int] $TimeoutMilliseconds = 5000
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            $process = Open-ExactWinWordProcess -Identity $Identity
+            if ($null -eq $process) {
+                return $true
+            }
+            try {
+                if ($process.HasExited) {
+                    return $true
+                }
+            }
+            finally {
+                $process.Dispose()
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        $process = Open-ExactWinWordProcess -Identity $Identity
+        if ($null -eq $process) {
+            return $true
+        }
+        $process.Dispose()
+        return $false
+    }
+    finally {
+        $timer.Stop()
+    }
+}
+
+function Stop-ExactOwnedWinWordProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Identity
+    )
+
+    $process = Open-ExactWinWordProcess -Identity $Identity
+    if ($null -eq $process) {
+        return
+    }
+    try {
+        $process.Kill()
+        if (-not $process.WaitForExit(5000)) {
+            throw "The owned WINWORD process did not exit after exact termination."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Close-OwnedWordApplication {
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object] $Word,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object] $Identity,
+
+        [Parameter(Mandatory = $true)]
+        [bool] $OwnershipConfirmed
+    )
+
+    if ($null -eq $Word) {
+        return
+    }
+
+    if (-not $OwnershipConfirmed -or $null -eq $Identity) {
+        Release-ComObject -ComObject $Word
+        Invoke-ComGarbageCollection
+        return
+    }
+
+    $ownedProcess = Open-ExactWinWordProcess -Identity $Identity
+    if ($null -eq $ownedProcess) {
+        Release-ComObject -ComObject $Word
+        Invoke-ComGarbageCollection
+        return
+    }
+    $ownedProcess.Dispose()
+
+    try {
+        $Word.Quit($WdDoNotSaveChanges)
+    }
+    catch {
+        # Exact-process termination below is the bounded fallback for our own instance only.
+    }
+    finally {
+        Release-ComObject -ComObject $Word
+        Invoke-ComGarbageCollection
+    }
+
+    if (-not (Wait-ForExactWinWordExit -Identity $Identity)) {
+        Stop-ExactOwnedWinWordProcess -Identity $Identity
+    }
+    if (-not (Wait-ForExactWinWordExit -Identity $Identity -TimeoutMilliseconds 1000)) {
+        throw "The exactly owned WINWORD process could not be stopped safely."
     }
 }
 
@@ -113,8 +427,16 @@ function Open-WordWorkingCopy {
         throw "A private working copy already exists."
     }
     Copy-Item -LiteralPath $BaselineFullPath -Destination $WorkingPath
-    # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles.
-    return $Word.Documents.Open($WorkingPath, $false, $false, $false)
+
+    $documents = $null
+    try {
+        $documents = $Word.Documents
+        # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles.
+        return $documents.Open($WorkingPath, $false, $false, $false)
+    }
+    finally {
+        Release-ComObject -ComObject $documents
+    }
 }
 
 function Save-AsDocx {
@@ -129,7 +451,13 @@ function Save-AsDocx {
     if (Test-Path -LiteralPath $Destination) {
         throw "A contract-case destination already exists."
     }
-    $Document.SaveAs2($Destination, $WdFormatXmlDocument)
+    $Document.SaveAs2(
+        $Destination,
+        $WdFormatXmlDocument,
+        [System.Type]::Missing,
+        [System.Type]::Missing,
+        $false
+    )
 }
 
 function Publish-StageDirectory {
@@ -168,20 +496,20 @@ function Invoke-RoundtripCase {
     $document = $null
     try {
         $document = Open-WordWorkingCopy $Word $BaselineFullPath $WorkingPath
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "The synthetic baseline must not contain pre-existing revisions."
         }
-        if ([int] $document.Bookmarks.Count -lt 1) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Bookmarks") -lt 1) {
             throw "The synthetic baseline must contain at least one bookmark."
         }
         [void] (Get-EditableTextSpan -Document $document)
 
-        $bookmarkCount = [int] $document.Bookmarks.Count
+        $bookmarkCount = Get-WordCollectionCount -Document $document -CollectionName "Bookmarks"
         Save-AsDocx -Document $document -Destination $Destination
 
         return [pscustomobject]@{
-            revision_count = [int] $document.Revisions.Count
-            comment_count = [int] $document.Comments.Count
+            revision_count = Get-WordCollectionCount -Document $document -CollectionName "Revisions"
+            comment_count = Get-WordCollectionCount -Document $document -CollectionName "Comments"
             bookmark_count = $bookmarkCount
         }
     }
@@ -206,7 +534,7 @@ function Invoke-TrackedReviewCase {
     $comment = $null
     try {
         $document = Open-WordWorkingCopy $Word $BaselineFullPath $WorkingPath
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "The synthetic baseline must not contain pre-existing revisions."
         }
 
@@ -231,24 +559,24 @@ function Invoke-TrackedReviewCase {
         $insertionRange = $null
 
         $commentRange = $document.Range([int] $span.Start, [int] $span.Start + 1)
-        $comment = $document.Comments.Add($commentRange, "Synthetic contract comment.")
+        $comment = Add-WordComment -Document $document -Range $commentRange -Text "Synthetic contract comment."
         Release-ComObject -ComObject $comment
         $comment = $null
         Release-ComObject -ComObject $commentRange
         $commentRange = $null
 
-        if ([int] $document.Revisions.Count -lt 3) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -lt 3) {
             throw "Word did not retain the expected local tracked revisions."
         }
-        if ([int] $document.Comments.Count -lt 1) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Comments") -lt 1) {
             throw "Word did not retain the synthetic comment."
         }
 
         Save-AsDocx -Document $document -Destination $Destination
         return [pscustomobject]@{
-            revision_count = [int] $document.Revisions.Count
-            comment_count = [int] $document.Comments.Count
-            bookmark_count = [int] $document.Bookmarks.Count
+            revision_count = Get-WordCollectionCount -Document $document -CollectionName "Revisions"
+            comment_count = Get-WordCollectionCount -Document $document -CollectionName "Comments"
+            bookmark_count = Get-WordCollectionCount -Document $document -CollectionName "Bookmarks"
         }
     }
     finally {
@@ -273,7 +601,7 @@ function Invoke-UntrackedDriftCase {
     $insertionRange = $null
     try {
         $document = Open-WordWorkingCopy $Word $BaselineFullPath $WorkingPath
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "The synthetic baseline must not contain pre-existing revisions."
         }
         $span = Get-EditableTextSpan -Document $document
@@ -283,15 +611,15 @@ function Invoke-UntrackedDriftCase {
         Release-ComObject -ComObject $insertionRange
         $insertionRange = $null
 
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "The untracked-drift negative control unexpectedly contains revisions."
         }
 
         Save-AsDocx -Document $document -Destination $Destination
         return [pscustomobject]@{
-            revision_count = [int] $document.Revisions.Count
-            comment_count = [int] $document.Comments.Count
-            bookmark_count = [int] $document.Bookmarks.Count
+            revision_count = Get-WordCollectionCount -Document $document -CollectionName "Revisions"
+            comment_count = Get-WordCollectionCount -Document $document -CollectionName "Comments"
+            bookmark_count = Get-WordCollectionCount -Document $document -CollectionName "Bookmarks"
         }
     }
     finally {
@@ -312,7 +640,7 @@ function Invoke-AcceptAllCase {
     $insertionRange = $null
     try {
         $document = Open-WordWorkingCopy $Word $BaselineFullPath $WorkingPath
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "The synthetic baseline must not contain pre-existing revisions."
         }
         $span = Get-EditableTextSpan -Document $document
@@ -322,19 +650,19 @@ function Invoke-AcceptAllCase {
         Release-ComObject -ComObject $insertionRange
         $insertionRange = $null
 
-        if ([int] $document.Revisions.Count -lt 1) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -lt 1) {
             throw "Word did not create the acceptance negative control."
         }
         $document.AcceptAllRevisions()
-        if ([int] $document.Revisions.Count -ne 0) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Revisions") -ne 0) {
             throw "Word did not accept every revision in the negative control."
         }
 
         Save-AsDocx -Document $document -Destination $Destination
         return [pscustomobject]@{
-            revision_count = [int] $document.Revisions.Count
-            comment_count = [int] $document.Comments.Count
-            bookmark_count = [int] $document.Bookmarks.Count
+            revision_count = Get-WordCollectionCount -Document $document -CollectionName "Revisions"
+            comment_count = Get-WordCollectionCount -Document $document -CollectionName "Comments"
+            bookmark_count = Get-WordCollectionCount -Document $document -CollectionName "Bookmarks"
         }
     }
     finally {
@@ -356,24 +684,24 @@ function Invoke-BrokenBookmarkCase {
     $bookmark = $null
     try {
         $document = Open-WordWorkingCopy $Word $BaselineFullPath $WorkingPath
-        if ([int] $document.Bookmarks.Count -ne $ExpectedBookmarkCount) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Bookmarks") -ne $ExpectedBookmarkCount) {
             throw "The working copy does not match the synthetic baseline bookmark count."
         }
         $document.TrackRevisions = $false
-        $bookmark = $document.Bookmarks.Item(1)
+        $bookmark = Get-WordBookmark -Document $document -Index 1
         $bookmark.Delete()
         Release-ComObject -ComObject $bookmark
         $bookmark = $null
 
-        if ([int] $document.Bookmarks.Count -ne ($ExpectedBookmarkCount - 1)) {
+        if ((Get-WordCollectionCount -Document $document -CollectionName "Bookmarks") -ne ($ExpectedBookmarkCount - 1)) {
             throw "Word did not remove exactly one bookmark in the negative control."
         }
 
         Save-AsDocx -Document $document -Destination $Destination
         return [pscustomobject]@{
-            revision_count = [int] $document.Revisions.Count
-            comment_count = [int] $document.Comments.Count
-            bookmark_count = [int] $document.Bookmarks.Count
+            revision_count = Get-WordCollectionCount -Document $document -CollectionName "Revisions"
+            comment_count = Get-WordCollectionCount -Document $document -CollectionName "Comments"
+            bookmark_count = Get-WordCollectionCount -Document $document -CollectionName "Bookmarks"
         }
     }
     finally {
@@ -404,14 +732,17 @@ function New-CaseManifestEntry {
 $stageRoot = $null
 $word = $null
 $published = $false
+$wordIdentity = $null
+$wordOwnershipConfirmed = $false
+$winWordBefore = @()
 
 try {
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         throw "Microsoft Word contract QA is supported only on Windows."
     }
 
-    $BaselineFullPath = [System.IO.Path]::GetFullPath($BaselineDocx)
-    $OutputFullPath = [System.IO.Path]::GetFullPath($OutputDir)
+    $BaselineFullPath = Get-NormalWin32FullPath -LiteralPath $BaselineDocx -Description "The synthetic baseline"
+    $OutputFullPath = Get-NormalWin32FullPath -LiteralPath $OutputDir -Description "The output directory"
 
     if (-not (Test-Path -LiteralPath $BaselineFullPath -PathType Leaf)) {
         throw "The explicitly supplied synthetic baseline DOCX does not exist."
@@ -437,7 +768,10 @@ try {
     [void] (New-Item -ItemType Directory -Path $workRoot)
 
     try {
+        $winWordBefore = @(Get-WinWordProcessSnapshot)
         $word = New-Object -ComObject Word.Application
+        $wordIdentity = Wait-ForOwnedWinWordIdentity -BeforeSnapshot $winWordBefore
+        $wordOwnershipConfirmed = $true
         # Force-disable VBA automation before any document is opened.
         $word.AutomationSecurity = $MsoAutomationSecurityForceDisable
         $word.DisplayAlerts = $WdAlertsNone
@@ -510,22 +844,10 @@ try {
         )
     }
     finally {
-        if ($null -ne $word) {
-            try {
-                $word.Quit($WdDoNotSaveChanges)
-            }
-            catch {
-                # Continue to release the COM server and clean the stage.
-            }
-            finally {
-                Release-ComObject -ComObject $word
-                $word = $null
-                [System.GC]::Collect()
-                [System.GC]::WaitForPendingFinalizers()
-                [System.GC]::Collect()
-                [System.GC]::WaitForPendingFinalizers()
-            }
-        }
+        Close-OwnedWordApplication -Word $word -Identity $wordIdentity -OwnershipConfirmed $wordOwnershipConfirmed
+        $word = $null
+        $wordIdentity = $null
+        $wordOwnershipConfirmed = $false
     }
 
     $baselineHashAfter = Get-Sha256 -LiteralPath $BaselineFullPath

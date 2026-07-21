@@ -364,6 +364,32 @@ def test_accept_all_safe_is_audited_and_idempotent(changeset: dict[str, Any]) ->
     assert retry == bulk
 
 
+@pytest.mark.parametrize("decision", ["rejected", "manual", "accepted_with_edit"])
+def test_accept_all_safe_never_overwrites_an_existing_decision(
+    changeset: dict[str, Any], decision: str
+) -> None:
+    safe_id = cast("str", _safe_change(changeset)["change_id"])
+    decided = record_decision(
+        changeset,
+        _draft(changeset),
+        change_id=safe_id,
+        decision=cast("Any", decision),
+        final_text="carefully edited text" if decision == "accepted_with_edit" else None,
+        decided_at=TIME_1,
+        generated_at=TIME_1,
+    )
+
+    retried = record_bulk_decision(
+        changeset,
+        decided,
+        operation="accept_all_safe",
+        decided_at=TIME_2,
+        generated_at=TIME_2,
+    )
+
+    assert retried == decided
+
+
 def test_atomic_write_uses_explicit_new_json_path_and_never_touches_tex(
     changeset: dict[str, Any], tmp_path: Path
 ) -> None:

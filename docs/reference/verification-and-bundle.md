@@ -7,6 +7,10 @@
 source 或 returned DOCX。带标记的 `latexdiff` 仅是派生审阅产物，`revised-clean/`
 才是已批准补丁对应的干净工作副本。
 
+有实际源差异时，`latexdiff.tex` 使用生成的增删宏表达可视差异，成功编译后才有
+`latexdiff.pdf`；noop 计划不会制造虚假标记。Word 作者、时间、批注与审批状态属于
+ChangeSet/ledger，不编码进 `latexdiff`。
+
 ## 完整处理链
 
 ```text
@@ -121,15 +125,29 @@ commands[]
 到该私有工作区，但不会传给 TeX 工具或进入最终输出。调用约束为：
 
 - Python list argv；复用项目的 `run_command`，从不经 shell；
-- 固定 `latexmk` 参数包含 `-no-shell-escape`、nonstop、halt-on-error 和独立 outdir；当
-  三个隔离 MiKTeX 根均已显式提供时，额外传入 `-disable-installer` 并由 `latexmk` 转交
-  TeX 引擎，使引擎级缺包直接失败；真实公共门禁还会比较测试前后的完整 MiKTeX 已安装
-  包清单，以检测辅助进程意外补包；
+- 固定 `latexmk` 参数包含 `-norc`、`-no-shell-escape`、nonstop、halt-on-error 和独立
+  outdir；Windows 下不会读取项目或用户的 `.latexmkrc`，也不会从命令工作目录解析 bare
+  executable；
+- Windows 默认工具名先从绝对 `PATH` 项解析；若 PATH 中没有工具，再检查标准的当前用户
+  `%LOCALAPPDATA%\Programs\MiKTeX` 安装位置，不扫描磁盘，也不硬编码用户名；
+- 只有 `latexmk` 与 `latexdiff` 能证明属于同一个完整 MiKTeX install/bin 时，才启用 MiKTeX
+  profile：`USERCONFIG`、`USERDATA`、HOME 与 TEMP 全部位于本次私有验证工作树，
+  `USERINSTALL` 绑定已经存在且含 `scripts.ini` 的安装根；继承的宿主 `MIKTEX_*` 不会透传；
+- MiKTeX 的 `latexmk`/`latexdiff` 还需要从安全 `PATH` 解析到绝对、非链接的 Perl；隔离后的
+  子进程 PATH 仅保留同一 MiKTeX bin、该 Perl 所在目录与 Windows 系统目录，Perl 文件也
+  纳入前后大小、mtime 与 SHA-256 复核；
+- 编译前使用同一 MiKTeX bin 的 `initexmf --report --disable-installer` 复核 non-shared
+  setup、`PathOkay`、UserInstall/UserConfig/UserData 与 LinkTargetDirectory；每次
+  `latexmk` 还带 `-disable-installer`。混合发行版、不同 MiKTeX 根、伪装布局与相对工具路径
+  在执行前阻断。安装树关键 registry/inventory/tool 文件的大小、mtime 与 SHA-256 还会在
+  前后复核；这把安装根当作只读依赖，但不等同于 Windows ACL 或网络沙箱；
+- Windows 产品核验当前只支持能够证明来自同一安装根的 MiKTeX 工具链；检测到 TeX Live
+  或 MiKTeX/非 MiKTeX 混用时返回 `E_TOOL_VERSION_UNSUPPORTED`，不会把不完整隔离冒充通过；
 - 源中的 `write18`、pipe input 和 minted shell-escape 依赖在启动前拒绝；
 - latexdiff 生成结果为空或重新引入上述危险构造时，不会交给编译器；
 - `cwd` 固定为工作副本，main document 使用 `./relative-path`，避免选项注入；
 - 环境只透传运行所需的少量系统变量，强制 UTF-8，并设置受限
-  `openin_any/openout_any/shell_escape`；
+  `openin_any/openout_any/shell_escape` 与 `NoDefaultCurrentDirectoryInExePath=1`；
 - 单命令 timeout 最大 60 秒，stdout/stderr 分别有上限，超限即终止；
 - 日志只保存状态、退出码、timeout/truncation、输出哈希及清洗后的文本，Windows、
   POSIX 绝对路径都替换为占位符。

@@ -17,9 +17,12 @@ from typing import BinaryIO, cast
 
 import pytest
 
+from latex_word_review import doctor as doctor_module
 from latex_word_review import runtime as runtime_module
 from latex_word_review.doctor import (
     DEFAULT_TOOL_SPECS,
+    PackageProbe,
+    ToolProbe,
     ToolSpec,
     diagnose_environment,
     probe_package,
@@ -484,6 +487,34 @@ def test_required_missing_tool_blocks_doctor(tmp_path: Path) -> None:
     spec = ToolSpec("missing", ("missing-tool-52aa2",), required=True)
     report = diagnose_environment(cwd=tmp_path, tool_specs=(spec,))
     assert report.status == "blocked"
+
+
+def test_frozen_doctor_uses_bundled_tex2word_instead_of_external_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed_tools: list[str] = []
+
+    def fake_package(name: str, *, required: bool) -> PackageProbe:
+        return PackageProbe(name, required, "available", "1.0.5", None)
+
+    def fake_tool(spec: ToolSpec, *, cwd: Path) -> ToolProbe:
+        assert cwd == tmp_path
+        probed_tools.append(spec.name)
+        return ToolProbe(spec.name, spec.required, "available", "1.0", None, None, None)
+
+    monkeypatch.setattr(doctor_module, "is_frozen_application", lambda: True)
+    monkeypatch.setattr(doctor_module, "probe_package", fake_package)
+    monkeypatch.setattr(doctor_module, "probe_tool", fake_tool)
+
+    report = diagnose_environment(cwd=tmp_path)
+
+    embedded = report.tools[0]
+    assert embedded.name == "tex2word"
+    assert embedded.status == "available"
+    assert embedded.version == "1.0.5"
+    assert "tex2word" not in probed_tools
+    assert report.status == "pass"
 
 
 def test_doctor_uses_owned_temporary_cwd_and_leaves_requested_cwd_unchanged(

@@ -62,6 +62,43 @@ def test_snapshot_reuses_exact_content_and_rejects_conflict(tmp_path: Path) -> N
     assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
 
 
+def test_snapshot_copies_runtime_closure_read_only_and_reuses_it(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "snapshot"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{local}\n\\bibliographystyle{local}\n\\begin{document}x\\end{document}\n",
+        encoding="utf-8",
+    )
+    (source / "local.cls").write_text(
+        "\\LoadClass{article}\n\\RequirePackage{local}\n\\InputIfFileExists{local.cfg}{}{}\n",
+        encoding="utf-8",
+    )
+    (source / "local.sty").write_text("% synthetic style\n", encoding="utf-8")
+    (source / "local.cfg").write_text("% synthetic config\n", encoding="utf-8")
+    (source / "local.bst").write_text("ENTRY{}{}{}\n", encoding="utf-8")
+    expected_bytes = {path.name: path.read_bytes() for path in source.iterdir() if path.is_file()}
+
+    first = snapshot_project(source, destination)
+    manifest_before = (destination / SNAPSHOT_MANIFEST).read_bytes()
+    second = snapshot_project(source, destination)
+
+    assert first.file_count == 5
+    assert second.reused is True
+    assert first.source_tree_sha256 == second.source_tree_sha256
+    manifest = json.loads(manifest_before)
+    inventory = {item["path"]: item for item in manifest["files"]}
+    assert set(inventory) == set(expected_bytes)
+    assert inventory["local.cls"]["role"] == "class"
+    assert inventory["local.sty"]["role"] == "style"
+    assert inventory["local.bst"]["media_type"] == "text/x-bibtex-style"
+    for relative, expected in expected_bytes.items():
+        copied = destination / relative
+        assert copied.read_bytes() == expected
+        assert copied.stat().st_mode & stat.S_IWUSR == 0
+    assert (destination / SNAPSHOT_MANIFEST).read_bytes() == manifest_before
+
+
 def test_snapshot_reuse_rejects_writable_entry(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "snapshot"

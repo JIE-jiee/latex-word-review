@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -16,7 +18,8 @@ from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBa
 from latex_word_review.backends.base import BackendCapabilities, BackendResult
 from latex_word_review.discovery import discover_project
 from latex_word_review.errors import ContractError, ErrorCode
-from latex_word_review.export import ExportBindings, export_review_docx
+from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
+from latex_word_review.export_models import ExportReport, ReviewDocxArtifact
 from latex_word_review.hashing import digest_file
 from latex_word_review.inspection import inspect_docx
 from latex_word_review.runtime import CommandResult
@@ -24,6 +27,22 @@ from tests._docx_factory import write_docx
 from tests.test_image_materializer import _minimal_pdf, _require_pdf_runtime
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures/e0-minimal-paper"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W = f"{{{W_NS}}}"
+
+
+def _style_by_name(root: ET.Element, name: str) -> ET.Element:
+    for style in root.findall(f"{W}style"):
+        name_node = style.find(f"{W}name")
+        if name_node is not None and name_node.get(f"{W}val") == name:
+            return style
+    raise AssertionError(f"missing Word style: {name}")
+
+
+def _required_child(root: ET.Element, path: str) -> ET.Element:
+    child = root.find(path)
+    assert child is not None
+    return child
 
 
 def _write_project(root: Path) -> None:
@@ -33,6 +52,32 @@ def _write_project(root: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+class _MinimalReviewBackend:
+    def capabilities(self) -> BackendCapabilities:
+        return Tex2WordBackend().capabilities()
+
+    def export(self, request: BackendRequest) -> BackendResult:
+        write_docx(
+            request.output_path,
+            document_xml=(
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b'<w:document xmlns:w="http://schemas.openxmlformats.org/'
+                b'wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'
+                b"Plain text.</w:t></w:r></w:p></w:body></w:document>"
+            ),
+        )
+        digest = digest_file(request.output_path, max_bytes=128 * 1024 * 1024)
+        return BackendResult(
+            status="success",
+            capabilities=self.capabilities(),
+            artifact_name=request.output_path.name,
+            artifact_sha256=digest.sha256,
+            artifact_size_bytes=digest.size_bytes,
+            findings=(),
+            native_report={},
+        )
 
 
 def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
@@ -45,6 +90,9 @@ def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
 
     assert result.succeeded
     assert result.capabilities.tool_version == "1.0.5"
+    assert result.capabilities.interface_version == tex2word_module.TEX2WORD_INTERFACE_VERSION
+    assert result.native_report["reference_loaded"] is True
+    assert result.native_report["reference_profile"] == "academic-review-v1"
     assert result.native_report["math_omml"] == 5
     assert (
         inspection.paragraphs,
@@ -55,6 +103,22 @@ def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
     ) == (34, 5, 1, 1, 9)
     assert (inspection.seq_fields, inspection.ref_fields, inspection.pageref_fields) == (5, 6, 0)
     assert not list(output.parent.glob(".review.docx.tex2word-*.docx"))
+    with zipfile.ZipFile(output) as package:
+        styles = ET.fromstring(package.read("word/styles.xml"))
+        document = ET.fromstring(package.read("word/document.xml"))
+    fonts = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}rFonts")
+    defaults = styles.find(f"{W}docDefaults/{W}pPrDefault/{W}pPr")
+    assert fonts is not None and defaults is not None
+    assert fonts.get(f"{W}ascii") == "Times New Roman"
+    assert fonts.get(f"{W}eastAsia") == "SimSun"
+    assert _required_child(defaults, f"{W}jc").get(f"{W}val") == "both"
+    assert _required_child(_style_by_name(styles, "Title"), f"{W}rPr/{W}sz").get(f"{W}val") == "44"
+    section = document.find(f".//{W}sectPr")
+    assert section is not None
+    assert _required_child(section, f"{W}pgSz").attrib == {
+        f"{W}w": "11906",
+        f"{W}h": "16838",
+    }
 
 
 def test_real_tex2word_embeds_selected_pdf_page_as_related_png(
@@ -147,6 +211,9 @@ def test_tex2word_worker_timeout_preserves_output_and_cleans_owned_stages(
 
     assert not result.succeeded
     assert result.timed_out
+    assert result.native_report["failure_kind"] == "timeout"
+    assert result.native_report["failure_code"] == ErrorCode.BACKEND_FAILED.value
+    assert not any("private" in str(value) for value in result.native_report.values())
     assert output.read_bytes() == b"existing"
     assert observed["cwd"] == source.resolve()
     assert observed["timeout_s"] == 0.05
@@ -154,7 +221,18 @@ def test_tex2word_worker_timeout_preserves_output_and_cleans_owned_stages(
     assert isinstance(arguments, tuple)
     assert arguments[:2] == ("-m", "latex_word_review.backends._tex2word_worker")
     assert not list(output.parent.glob(".review.docx.tex2word-*.docx"))
-    assert not list(output.parent.glob(".review.docx.tex2word-report-*.json"))
+    assert not list(output.parent.glob(".lwr-t2w-report-*.json"))
+
+
+def test_tex2word_report_path_has_a_fixed_short_owned_name(tmp_path: Path) -> None:
+    report = Tex2WordBackend._prepare_report_path(tmp_path)
+
+    assert report.parent == tmp_path
+    assert report.name.startswith(".lwr-t2w-report-")
+    assert report.suffix == ".json"
+    assert len(report.name) < 40
+    assert not report.exists()
+    Tex2WordBackend._cleanup_report_path(report, tmp_path)
 
 
 def test_tex2word_success_never_overwrites_an_existing_output(tmp_path: Path) -> None:
@@ -200,6 +278,26 @@ def test_full_e0_pipeline_adds_only_exact_source_bookmarks(tmp_path: Path) -> No
     assert outcome.inspection is not None
     assert outcome.inspection.bookmarks == 11
     assert output.is_file()
+    with zipfile.ZipFile(output) as package:
+        styles = ET.fromstring(package.read("word/styles.xml"))
+        document = ET.fromstring(package.read("word/document.xml"))
+    fonts = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}rFonts")
+    defaults = styles.find(f"{W}docDefaults/{W}pPrDefault/{W}pPr")
+    assert fonts is not None and defaults is not None
+    assert fonts.get(f"{W}ascii") == "Times New Roman"
+    assert fonts.get(f"{W}eastAsia") == "SimSun"
+    assert _required_child(defaults, f"{W}spacing").get(f"{W}line") == "320"
+    assert (
+        _required_child(_style_by_name(styles, "heading 1"), f"{W}rPr/{W}color").get(f"{W}val")
+        == "1F4E79"
+    )
+    section = document.find(f".//{W}sectPr")
+    assert section is not None
+    assert _required_child(section, f"{W}pgSz").attrib == {
+        f"{W}w": "11906",
+        f"{W}h": "16838",
+    }
+    assert _required_child(section, f"{W}cols").get(f"{W}num") == "1"
 
 
 def test_export_refuses_a_successful_zero_unit_review(tmp_path: Path) -> None:
@@ -396,3 +494,237 @@ def test_pandoc_real_e0_contract_when_available(tmp_path: Path) -> None:
 
     assert result.succeeded
     assert inspect_docx(output).package_valid
+
+
+def test_silent_loss_gate_counts_redundantly_grouped_image_instances(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "plot.png").write_bytes(b"synthetic-static-image")
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n\nPlain text.\n\n"
+        "\\includegraphics{{plot.png}}\n\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output" / "review.docx"
+    document_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body><w:p><w:r><w:t>Plain text.</w:t></w:r></w:p></w:body>
+    </w:document>"""
+
+    class MissingGroupedImageBackend:
+        def capabilities(self) -> BackendCapabilities:
+            return Tex2WordBackend().capabilities()
+
+        def export(self, request: BackendRequest) -> BackendResult:
+            write_docx(request.output_path, document_xml=document_xml)
+            digest = digest_file(request.output_path, max_bytes=128 * 1024 * 1024)
+            return BackendResult(
+                status="success",
+                capabilities=self.capabilities(),
+                artifact_name=request.output_path.name,
+                artifact_sha256=digest.sha256,
+                artifact_size_bytes=digest.size_bytes,
+                findings=(),
+                native_report={},
+            )
+
+    outcome = export_review_docx(
+        MissingGroupedImageBackend(),
+        BackendRequest(source, "main.tex", output),
+        discovery,
+        ExportBindings(
+            source_manifest_sha256="sha256:" + "d" * 64,
+            artifact_path="artifacts/review.docx",
+        ),
+    )
+
+    assert "plot.png" in {item.path for item in discovery.files}
+    assert outcome.output_path is None
+    assert outcome.report.status == "failed"
+    assert outcome.image_overlay is not None
+    assert outcome.image_overlay.source_image_instances == 1
+    image_feature = next(
+        feature for feature in outcome.report.feature_results if feature.feature == "images"
+    )
+    assert (image_feature.source_count, image_feature.output_count, image_feature.status) == (
+        1,
+        0,
+        "failed",
+    )
+    assert any(finding.code is ErrorCode.EXPORT_SILENT_LOSS for finding in outcome.report.findings)
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}.image-overlay").exists()
+
+
+def test_export_publication_race_preserves_the_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source)
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output" / "review.docx"
+    original_link = os.link
+
+    def racing_link(
+        source_path: Path,
+        destination_path: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if Path(destination_path) == output:
+            output.write_bytes(b"racing-destination")
+            raise FileExistsError(destination_path)
+        original_link(
+            source_path,
+            destination_path,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr("latex_word_review.export.os.link", racing_link)
+    with pytest.raises(ContractError) as raised:
+        export_review_docx(
+            _MinimalReviewBackend(),
+            BackendRequest(source, "main.tex", output),
+            discovery,
+            ExportBindings(
+                source_manifest_sha256="sha256:" + "e" * 64,
+                artifact_path="artifacts/review.docx",
+                confidentiality="public_fixture",
+            ),
+        )
+
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
+    assert output.read_bytes() == b"racing-destination"
+    assert not output.with_name(f"{output.name}.image-overlay").exists()
+    assert not list(output.parent.glob(f".{output.name}.*-*.docx"))
+
+
+def test_export_hardlink_is_the_last_business_commit_and_cleanup_is_best_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source)
+    discovery = discover_project(source, main_document="main.tex")
+    output = tmp_path / "output" / "review.docx"
+    state = {
+        "artifact_built": False,
+        "report_built": False,
+        "outcome_built": False,
+        "linked": False,
+    }
+    original_artifact = ReviewDocxArtifact.from_file
+    original_report = ExportReport
+    original_outcome = ExportOutcome
+    original_link = os.link
+    concrete_path = type(output)
+    original_unlink = concrete_path.unlink
+    failed_unlinks: list[Path] = []
+
+    def track_artifact(
+        cls: type[Any],
+        file_path: Path,
+        *,
+        artifact_path: str,
+        confidentiality: Any,
+    ) -> Any:
+        del cls
+        assert not state["linked"]
+        state["artifact_built"] = True
+        return original_artifact(
+            file_path,
+            artifact_path=artifact_path,
+            confidentiality=confidentiality,
+        )
+
+    def track_report(*args: Any, **kwargs: Any) -> Any:
+        assert not state["linked"]
+        state["report_built"] = True
+        return original_report(*args, **kwargs)
+
+    def track_outcome(*args: Any, **kwargs: Any) -> Any:
+        assert not state["linked"]
+        state["outcome_built"] = True
+        return original_outcome(*args, **kwargs)
+
+    def tracking_link(
+        source_path: Path,
+        destination_path: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        original_link(
+            source_path,
+            destination_path,
+            follow_symlinks=follow_symlinks,
+        )
+        if Path(destination_path) == output:
+            assert state["artifact_built"]
+            assert state["report_built"]
+            assert state["outcome_built"]
+            state["linked"] = True
+
+    def fail_first_post_link_stage_unlink(
+        self: Path,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        if (
+            state["linked"]
+            and self.name.startswith(f".{output.name}.anchored-")
+            and not failed_unlinks
+        ):
+            failed_unlinks.append(self)
+            raise PermissionError("simulated post-link cleanup failure")
+        original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        ReviewDocxArtifact,
+        "from_file",
+        classmethod(track_artifact),
+    )
+    monkeypatch.setattr("latex_word_review.export.ExportReport", track_report)
+    monkeypatch.setattr("latex_word_review.export.ExportOutcome", track_outcome)
+    monkeypatch.setattr("latex_word_review.export.os.link", tracking_link)
+    monkeypatch.setattr(concrete_path, "unlink", fail_first_post_link_stage_unlink)
+
+    outcome = export_review_docx(
+        _MinimalReviewBackend(),
+        BackendRequest(source, "main.tex", output),
+        discovery,
+        ExportBindings(
+            source_manifest_sha256="sha256:" + "f" * 64,
+            artifact_path="artifacts/review.docx",
+            confidentiality="public_fixture",
+        ),
+    )
+
+    assert state == {
+        "artifact_built": True,
+        "report_built": True,
+        "outcome_built": True,
+        "linked": True,
+    }
+    assert outcome.output_path == output
+    assert outcome.report.status == "success"
+    assert outcome.report.review_docx is not None
+    assert (
+        outcome.report.review_docx.sha256
+        == digest_file(
+            output,
+            max_bytes=128 * 1024 * 1024,
+        ).sha256
+    )
+    assert len(failed_unlinks) == 1
+    assert failed_unlinks[0].exists()
+    assert os.path.samefile(failed_unlinks[0], output)
+
+    monkeypatch.setattr(concrete_path, "unlink", original_unlink)
+    failed_unlinks[0].unlink()
+    assert output.is_file()
+    assert not list(output.parent.glob(f".{output.name}.*-*.docx"))

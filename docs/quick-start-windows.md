@@ -1,15 +1,38 @@
 # Windows Quick Start
 
-This guide is the shortest supported path from a LaTeX project to a Word review and back to a new
-LaTeX copy. The original LaTeX tree and the returned Word file remain immutable. Run every command
-in PowerShell on Windows with Python 3.12 or 3.13.
+LaTeX Word Review `0.2.0b1` turns the auditable CLI workflow into a four-step local Windows
+application:
 
-For a complete Chinese walkthrough through verification, ledger, and offline audit bundle, see
-[`guide.zh-CN.md`](guide.zh-CN.md).
+1. choose `main.tex`;
+2. generate a Word review and select the returned `.docx`;
+3. decide each tracked change;
+4. inspect the exact diff, confirm a second time, and generate the revised copy and evidence.
 
-## 1. Install the core CLI
+The original LaTeX project and the returned Word original remain immutable. For the complete Chinese
+walkthrough, see [`guide.zh-CN.md`](guide.zh-CN.md).
 
-Clone a reviewed commit of the public repository and install the locked development environment:
+> [!WARNING]
+> There is no GitHub Release or PyPI publication yet. The installer and portable ZIP pass local
+> build, static, and frozen-runtime checks; this final installer was not installed or uninstalled in
+> the current rehearsal. Public binary redistribution remains blocked while the lxml Windows
+> static-native dependency license and relinking evidence remains incomplete. The repository
+> currently publishes source, build scripts, and CI evidence only. See the
+> [Windows binary license audit](reviews/windows-binary-license-audit-2026-07.md).
+
+## Run the application now
+
+### Maintainer workspace shortcut, when present
+
+If the repository root already contains
+`LaTeX Word Review（双击启动）.lnk`, double-click it. The fallback is
+`output\local-windows\Start-Latex-Word-Review.cmd`. This workspace-only delivery needs no
+Python, uv, or Git and keeps the application, review data, and `TEMP/TMP` below
+`output\local-windows`. It is ignored by Git and is not a published GitHub binary.
+
+### Public source route
+
+Pin a source commit you reviewed, install the locked runtime with PDF preview support, and open the
+local application:
 
 ```powershell
 git clone https://github.com/JIE-jiee/latex-word-review.git
@@ -17,136 +40,207 @@ Set-Location latex-word-review
 $ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
 git checkout --detach $ReviewedCommit
 if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
-uv sync --frozen --group fixture --extra pdf-figures --python 3.12
-$VenvScripts = (Resolve-Path .\.venv\Scripts).Path
-$env:PATH = "$VenvScripts;$env:PATH"
-$Lwr = (Resolve-Path "$VenvScripts\latex-word-review.exe").Path
-& $Lwr --version
-& $Lwr doctor
+uv sync --frozen --extra pdf-figures --python 3.12
+uv run --frozen latex-word-review --version
+uv run --frozen latex-word-review doctor
+uv run --frozen latex-word-review app
 ```
 
-Replace `$ReviewedCommit` with the exact 40-character commit SHA you reviewed. The placeholder is
-intentionally invalid, so the checkout fails instead of silently following a moving branch.
+Replace the placeholder with the exact 40-character commit SHA you reviewed. It is intentionally
+invalid so the command fails instead of silently following a moving branch.
 
-The `pdf-figures` extra enables safe PDF-page previews for Word. It does not install Microsoft Word,
-MiKTeX, Pandoc, or other external programs implicitly.
+The application binds only to a random `127.0.0.1` port and opens the default browser. The browser
+is a local view, not a cloud upload surface.
 
-`$Lwr` is an absolute path, so it remains valid after changing to a run directory. With an installed
-wheel, set `$Lwr = "latex-word-review"` instead.
+## Installer and portable behavior
 
-## 2. Create an immutable run and export Word
+After the binary-license hold is closed, the intended public options are:
 
-Choose a new, absent run directory outside the source project:
+| Option | How to start | Python/Git required |
+|---|---|---:|
+| Per-user installer | Launch at setup completion, then desktop or Start menu | No |
+| Portable ZIP | Extract, then run `LatexWordReview.exe` | No |
+| Source checkout | `uv run --frozen latex-word-review app` | Yes |
+
+The installer requests no administrator privileges and creates no CLI shortcut. Both formal binary
+forms use the same verified PyInstaller onedir bytes and store review sessions in
+`%LOCALAPPDATA%\LatexWordReview`, not in the installation or extraction directory. The
+workspace-only launcher deliberately overrides this with `output\local-windows\user-data`.
+
+The final local `0.2.0b1` Windows x64 rebuild on 2026-07-20 measured:
+
+| Asset | Measured size | SHA-256 |
+|---|---:|---|
+| setup executable | **21,444,947 bytes (20.45 MiB)** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
+| portable ZIP | **33,421,203 bytes (31.87 MiB)** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
+| installed/extracted application | **65,752,373 bytes (62.71 MiB)** (438 files) | — |
+
+That candidate is frozen with exact 64-bit CPython 3.12.13; the source/library test range remains
+Python 3.12/3.13. Sizes vary with the application, PyInstaller, PDFium, and dependency versions. The
+frozen application includes Python, this project, tex2word, Pillow, PDFium, Schemas, and UI assets.
+It does not bundle Word, MiKTeX/TeX Live, Pandoc, Playwright browsers, or development tools.
+
+The final local Windows regression completed with **1023 passed and 9 skipped**; Ruff, formatting,
+and strict mypy checks also passed. This is local candidate evidence and does not lift the binary
+licensing publication hold described above.
+
+If a future beta is not Authenticode-signed, Windows SmartScreen may report an unknown publisher.
+Verify the GitHub Release SHA-256, tag/commit, and stated signing status before running it. Do not
+obtain a same-named executable from a third-party mirror.
+
+## Step 1: choose the project
+
+Select **New review**, choose the paper's main `.tex` file, inspect the preflight, and select
+**Generate review Word**.
+
+The application:
+
+- conservatively discovers static dependencies below the selected project root;
+- rejects traversal, link/junction escape, ambiguous inputs, and unsafe references;
+- creates a new random session and immutable source snapshot;
+- generates the Word review in a bounded local background job;
+- applies the deterministic, SHA-256-bound `academic-review-v1` reference profile through
+  tex2word's public `reference_doc` API. The default is A4, single-column, Times New Roman/SimSun,
+  compact tables, and images bounded to the text width. A failed template load blocks export.
+
+It never writes generated files into the original source tree.
+
+## Step 2: review in Word and import the return
+
+Open the generated `review.docx`. Ask the reviewer to use Microsoft Word with Track Changes
+enabled, use comments for discussion, and avoid Accept All, deleting bookmarks, or saving as legacy
+`.doc`.
+
+This is an editable semantic review layout, not a pixel reproduction of the LaTeX PDF or a journal
+submission template. Explicit source font declarations may override the default profile, and figures,
+pagination, formulas, tables, and special fields should still be reviewed in Word.
+
+When the `.docx` returns, select **Choose returned Word and read changes**. The application first
+archives the original bytes read-only, then compares the returned reject-changes view with the
+sealed export baseline before extracting revisions. Baseline drift, Accept All, untracked visible
+text edits, a wrong review round, or damaged anchors fail closed.
+
+The reviewer may use Word on another Windows computer. A normal paper containing live `SEQ`, `REF`,
+or `PAGEREF` fields also needs Microsoft Word on the application machine so the program can refresh
+and freeze those fields; a document with no live fields skips that automation. Returned-DOCX parsing
+does not launch Word. Word is never bundled or installed silently.
+
+## Step 3: decide every change
+
+Each Chinese approval card shows before/after text, author, timestamp, context, source location,
+confidence, safety class, and diagnostics. Record one of:
+
+- accept;
+- accept with edited final text;
+- reject;
+- manual;
+- conflict.
+
+The restricted **accept all safe text** action fills only still-undecided exact
+`plain_text_candidate` changes. It never overwrites an existing decision, and it excludes formulas,
+references, structure, moves, formatting, comments, low-confidence mappings, and conflicts.
+
+Select **Finish approval and preview patch** only after every item has a decision. This is the first
+human gate. It seals intent and produces a dry-run preview; it does not change LaTeX.
+
+## Step 4: inspect the diff and confirm again
+
+Review counts and the unified diff for every affected file. A plan containing
+`accepted_but_blocked` cannot continue. Explicitly select **重新审批** (re-approve), change the
+relevant items to manual/rejected handling, and create a new immutable approval/plan revision.
+Existing decisions and old evidence remain intact; neither the bulk action nor replanning overwrites
+them.
+
+For a ready/noop plan, tick the explicit confirmation and select **Confirm and generate all
+results**. This is the independent second gate. The application rechecks the exact PatchPlan hash,
+source hashes, UTF-8 byte spans, overlap, and safety policy before creating `revised-clean/`.
+
+It then attempts verification, ledger generation, and the allowlisted audit bundle. Missing TeX
+tools produce an honest partial result instead of discarding the safely revised LaTeX tree.
+
+## Results
+
+Typical artifacts are:
+
+```text
+export/review.docx
+receive/original/returned-original.docx
+receive/changeset.json
+approvals/approval-rN.json
+plans/plan-rN/changes.patch
+revised-clean/
+verification/revised-clean.pdf
+verification/latexdiff.tex
+verification/latexdiff.pdf
+ledger/ledger.json
+ledger/ledger.html
+audit.zip
+```
+
+`revised-clean/` is the clean authoritative candidate. When there is an actual accepted source
+difference, `latexdiff.tex` contains the derived add/delete markup and a successfully compiled
+`latexdiff.pdf` shows it visually; a no-op plan has no artificial marks. Word authors, timestamps,
+comments, and decisions remain in ChangeSet/ledger evidence rather than in `latexdiff`.
+
+PDF figures are rendered only in a derived overlay as canonical PNG review previews. The original
+PDF and LaTeX stay unchanged. Unsupported SVG/EPS, `pagebox`, dynamic paths, or ambiguous operations
+remain manual.
+
+## Resume and exit
+
+Sessions live below:
+
+```text
+%LOCALAPPDATA%\LatexWordReview\runs\session_<random-id>\
+```
+
+The workspace-only launcher instead keeps sessions below
+`output\local-windows\user-data\runs` and `TEMP/TMP` below its `temp` directory.
+
+Reopen the application and choose a recent task. It reconstructs the phase from sealed evidence,
+not browser cache. Explicit recovery controls may create the first approval ledger, rebuild a
+dry-run preview, or start a new immutable verification attempt, but never make user decisions or
+cross the apply gate.
+
+Closing the browser tab does not stop the process. Use **Exit application** on the home or result
+page. If a background job is active, shutdown waits for it to finish safely. In a source terminal,
+`Ctrl+C` also stops the server.
+
+## External tools
+
+- A reviewer needs Microsoft Word for Windows to produce native tracked-change evidence.
+- The application machine also needs Word when the generated review contains live fields.
+- Clean PDF output needs the document's TeX engine/packages/fonts and `latexmk`.
+- Marked PDF output additionally needs `latexdiff`.
+- Missing tools are reported as partial/blocked; they are never installed silently.
+
+Automatic PDF verification on Windows currently accepts only one coherent MiKTeX installation.
+Default tool names are resolved from absolute `PATH` entries, then from the standard per-user
+MiKTeX location. `latexmk` and `latexdiff` must belong to that same installation, and a regular
+Perl executable must also resolve from an absolute `PATH` entry. The verifier creates private
+MiKTeX config/data, HOME, and temporary directories and does not install or update packages.
+TeX Live, mixed roots, missing packages, or missing Perl remain explicit partial/blocked results.
+
+## Codex Skill and advanced CLI
+
+The `$latex-word-review` Skill is a thin orchestrator. For an ordinary review it should launch
+`latex-word-review app` and leave file selection, per-change decisions, and both human gates to the
+user. Granular commands are for an explicit CLI/agent request or recovery; the Skill must never
+infer blanket acceptance, overwrite an existing decision, or cross either gate. A blocked plan must
+return through the application's explicit re-approval action.
+
+Advanced entry points:
 
 ```powershell
-& $Lwr workflow init C:\research\paper C:\review-runs\paper-r1 `
-  --main main.tex --confidentiality local_private
-Set-Location C:\review-runs\paper-r1
-& $Lwr workflow export . --backend tex2word --confidentiality local_private
-& $Lwr workflow status .
+latex-word-review app --data-root C:\review-data
+latex-word-review app --no-browser
+latex-word-review workflow status <run-root>
+latex-word-review workflow clean <run-root>
 ```
 
-Send `export\review.docx` to the reviewer. Ask them to edit a copy in Microsoft Word with Track
-Changes enabled and to use comments for discussion. Keep `export\review.docx` unchanged: it is the
-semantic baseline used to detect untracked visible-text edits, Accept All, or damaged anchors within
-the `verified_for_text_patch` scope. Formatting, OMML, images, hyperlink targets, content controls,
-custom XML, and embedded objects still require a manual integrity review.
+`workflow clean` is a dry run. Use `workflow clean <run-root> --execute` only after reviewing the
+allowlisted staging directories. It cannot delete the immutable snapshot, export, returned
+original, ChangeSet, approvals, plans, revised tree, or delivery evidence.
 
-## 3. Receive and inspect the returned Word file
-
-Keep the file received from the reviewer outside the run directory and ingest it once:
-
-```powershell
-& $Lwr workflow receive . C:\received\reviewed.docx `
-  --confidentiality local_private
-& $Lwr workflow status .
-```
-
-The command archives the returned original read-only, compares its reject-changes view with the
-immutable export baseline, and writes `receive\changeset.json`. A mismatch fails closed; do not work
-around it by editing a sealed JSON file. At this point `workflow status` reports `ingested` and the
-first approval command. It does not later discover ApprovalSet, PatchPlan, or revised-tree progress.
-
-## 4. Decide each change locally
-
-Create the first approval revision and open the loopback-only review page:
-
-```powershell
-& $Lwr approve init receive\changeset.json approvals\approval-r1.json `
-  --actor-id maintainer --actor-name "Maintainer"
-& $Lwr approve serve receive\changeset.json `
-  approvals\approval-r1.json approvals --open-browser
-```
-
-For each item, inspect before/after text, author, time, source range, confidence, risk, raw Word
-evidence, and diagnostics. Record `accepted`, `accepted_with_edit`, `rejected`, `manual`, or
-`conflict`, then finalize only after every item has a decision. Approval writes a new immutable JSON
-revision; it never changes LaTeX.
-
-## 5. Preview the exact patch, then cross the second gate
-
-Create a dry-run plan from the final approval revision:
-
-```powershell
-& $Lwr plan snapshot objects\source-manifest.json receive\changeset.json `
-  approvals\approval-rN.json plans\plan-r1 --confidentiality local_private
-```
-
-Review `plans\plan-r1\changes.patch` and the planned operations. Any `accepted_but_blocked` item
-makes the plan `blocked`; revise the approval to `manual` or `rejected`, finalize a new approval,
-and create a fresh plan. Only after a `ready` or `noop` plan and a separate decision to apply that
-exact plan, write a new LaTeX tree:
-
-```powershell
-& $Lwr apply snapshot plans\plan-r1 `
-  receive\changeset.json `
-  approvals\approval-rN.json revised-clean
-```
-
-The destination must not already exist. The command rechecks hashes and source byte ranges before
-publishing it. It never overwrites `snapshot` or the original project.
-
-## Pause, resume, and clean safely
-
-Before granular approval begins, run this to resume the high-level lifecycle:
-
-```powershell
-& $Lwr workflow status .
-```
-
-It verifies the snapshot/export/receive objects and hashes without changing state. Its phase is only
-`snapshotted`, `exported`, or `ingested`; after `receive`, it keeps printing the generic first
-approval command even when later approval or plan files exist.
-
-Once granular work begins, record the new output path from every `approve`, `plan`, `apply`,
-`verify`, `ledger`, and `bundle` command. Resume from the latest sealed ApprovalSet/PatchPlan and the
-relevant command receipt, using `validate` and `<command> --help` when needed. Do not use
-`workflow status` to infer granular progress.
-
-To inspect abandoned tool-owned staging directories at any phase, run:
-
-```powershell
-& $Lwr workflow clean .
-```
-
-This is a dry run. Remove only the listed staging directories by repeating it with `--execute`.
-`workflow clean` cannot remove the snapshot, export, received original, ChangeSet, approvals, plans,
-or revised tree.
-
-For verification PDFs, `latexdiff`, ledgers, and audit bundles, continue with the commands in
-[CLI and run-directory contract](reference/cli.md). Missing external tools are reported as blocked,
-not silently skipped.
-
-## Optional Codex Plugin
-
-The Plugin supplies the `$latex-word-review` orchestration Skill; the Python CLI above remains the
-workflow authority. From a published repository revision:
-
-```powershell
-codex plugin marketplace add JIE-jiee/latex-word-review --ref main
-codex plugin add latex-word-review@personal
-```
-
-Pin the marketplace to a reviewed tag or commit for repeatable use. The Skill may run and explain
-the same commands, but it must stop for per-change decisions and again before `apply`. Its use of
-`workflow status` has the same receive-stage boundary described above.
+The full granular contract remains documented in [CLI and run directory](reference/cli.md).
+Do not edit sealed JSON or guess safety-critical command arguments.

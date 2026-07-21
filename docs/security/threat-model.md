@@ -125,15 +125,26 @@ duplicate or unapproved change.
 
 The tex2word Python API and PDF renderer run in bounded child workers. Pandoc, latexmk and latexdiff
 use fixed list argv, no shell, fixed working directories, a minimal allowlisted environment,
-bounded output and hard timeout. On Windows the TeX verifier adds only MiKTeX's three documented
-isolated-root variables (`MIKTEX_USERINSTALL`, `MIKTEX_USERCONFIG`, and `MIKTEX_USERDATA`) to that
-minimal environment; unrelated environment values remain excluded, and other backends do not
-inherit the MiKTeX-specific values. When all three isolated roots are present, `latexmk` also
-receives MiKTeX's fixed `-disable-installer` option and forwards it to the TeX engine, so an
-engine-level missing package fails instead of opening an unattended installation prompt. The hosted public gate also
-compares MiKTeX's complete installed-package inventory before and after the test, so an unexpected
-package installed by a helper process fails the gate. This comparison is detection, not a network
-sandbox; the fixed public fixture and explicit package closure remain part of the trust boundary.
+bounded output and hard timeout. On Windows a bare top-level tool is never resolved from its command
+cwd. The verifier resolves an exact absolute executable from absolute PATH entries, with a bounded
+fallback to the standard per-user MiKTeX location. It rejects relative tool paths, mixed
+MiKTeX/non-MiKTeX pairs, different MiKTeX roots and incomplete MiKTeX-shaped layouts.
+
+For a proven MiKTeX pair, `MIKTEX_USERCONFIG`, `MIKTEX_USERDATA`, HOME and TEMP are newly created
+inside that verification's private work tree. `MIKTEX_USERINSTALL` points to the existing install
+root only after the root's script registry and companion executable are verified. Host `MIKTEX_*`
+values are ignored. Every `latexmk` run receives `-norc`, `-disable-installer` and
+`-no-shell-escape`. The required Perl interpreter must resolve to an absolute, non-link regular
+file from an absolute PATH entry. Helper lookup is then limited to the same MiKTeX bin, that Perl
+directory, and Windows system directories; Windows cwd executable lookup is disabled. Before TeX
+runs, `initexmf --report --disable-installer` must report the expected non-shared install, private
+config/data roots, and link target. Key install registry, package inventory, MiKTeX tool, and Perl
+files are hashed and have their mtimes checked before and after. The hosted public gate additionally
+compares MiKTeX's complete installed-package inventory. These checks treat the install tree as a
+read-only dependency, but they are detection and configuration controls, not a filesystem ACL or a
+network sandbox; the fixed public fixture and explicit package closure remain part of the trust
+boundary. Windows TeX Live verification is blocked with `E_TOOL_VERSION_UNSUPPORTED` until it has
+an equivalent isolated TEXMF profile; it is never silently mixed with MiKTeX.
 TeX runs only on private copies with `-no-shell-escape`; known shell-escape constructs are rejected
 before execution and checked again in generated latexdiff source. This reduces risk but is not a
 general sandbox for a hostile TeX engine. Process documents from untrusted authors inside an OS or

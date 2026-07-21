@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -21,16 +22,38 @@ from typing import Any, cast
 
 from lxml import etree  # type: ignore[import-untyped]
 
+from latex_word_review.inspection import inspect_docx
+
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 DOCUMENT_PART = "word/document.xml"
 DEFAULT_GENERATED_AT = "2026-07-16T06:30:00Z"
 SAFE_KINDS = frozenset({"insertion", "deletion", "replacement"})
 FORBIDDEN_LATEX_TEXT = frozenset("\\{}%$&#^_~")
+FIXTURE_PROFILES: Mapping[str, str] = {
+    "full": "tests/fixtures/e0-minimal-paper/source",
+    "portable": "tests/fixtures/e0-portable-smoke/source",
+}
+FIXTURE_PROFILE_CHOICES = tuple(sorted(FIXTURE_PROFILES))
 
 
 class DemoError(RuntimeError):
     """A public-demo invariant or CLI step failed."""
+
+
+def _cli_command(*arguments: str | Path) -> list[str]:
+    frozen_cli = os.environ.get("LATEX_WORD_REVIEW_DEMO_CLI")
+    if frozen_cli:
+        executable = Path(frozen_cli)
+        if not executable.is_absolute() or not executable.is_file():
+            raise DemoError("LATEX_WORD_REVIEW_DEMO_CLI must name an existing absolute file")
+        return [os.fspath(executable), *(os.fspath(item) for item in arguments)]
+    return [
+        sys.executable,
+        "-m",
+        "latex_word_review",
+        *(os.fspath(item) for item in arguments),
+    ]
 
 
 def _emit_json(value: Mapping[str, Any], *, error: bool = False) -> None:
@@ -70,7 +93,7 @@ def _run_cli(
     *arguments: str | Path,
     timeout_s: float = 180.0,
 ) -> dict[str, Any]:
-    command = [sys.executable, "-m", "latex_word_review", *(str(item) for item in arguments)]
+    command = _cli_command(*arguments)
     try:
         completed = subprocess.run(
             command,
@@ -128,6 +151,75 @@ def _safe_replacement(before: str) -> str:
     ):
         raise DemoError("the selected E0 source unit cannot form a safe plain-text replacement")
     return after
+
+
+def _fixture_for_profile(repository: Path, profile: str) -> tuple[Path, str]:
+    relative = FIXTURE_PROFILES.get(profile)
+    if relative is None:
+        raise DemoError("unknown public E0 fixture profile")
+    fixtures_root = (repository / "tests/fixtures").resolve(strict=False)
+    fixture = (repository / relative).resolve(strict=False)
+    if not fixture.is_relative_to(fixtures_root):
+        raise DemoError("public E0 fixture profile escaped the fixture root")
+    fixture_label = Path(relative).parent.as_posix()
+    return fixture, fixture_label
+
+
+def _validate_profile_field_counts(
+    profile: str,
+    *,
+    seq_fields: int,
+    ref_fields: int,
+    pageref_fields: int,
+) -> dict[str, int]:
+    counts = {
+        "seq_fields": seq_fields,
+        "ref_fields": ref_fields,
+        "pageref_fields": pageref_fields,
+        "live_fields": seq_fields + ref_fields + pageref_fields,
+    }
+    if any(value < 0 for value in counts.values()):
+        raise DemoError("the exported DOCX returned an invalid live-field count")
+    if profile == "portable":
+        if counts["live_fields"] != 0:
+            raise DemoError("the portable E0 profile unexpectedly produced SEQ/REF/PAGEREF fields")
+    elif profile == "full":
+        if counts["live_fields"] < 1:
+            raise DemoError(
+                "the full E0 profile produced no live fields and did not prove the Word path"
+            )
+    else:
+        raise DemoError("unknown public E0 fixture profile")
+    return counts
+
+
+def _inspect_profile_export(profile: str, exported_docx: Path) -> dict[str, int]:
+    inspection = inspect_docx(exported_docx)
+    if not inspection.package_valid or not inspection.structure_inspected:
+        raise DemoError("the exported DOCX failed package or structure inspection")
+    return _validate_profile_field_counts(
+        profile,
+        seq_fields=inspection.seq_fields,
+        ref_fields=inspection.ref_fields,
+        pageref_fields=inspection.pageref_fields,
+    )
+
+
+def _exact_bookmark_mapping_count(source_map: Mapping[str, Any]) -> int:
+    payload = source_map.get("payload")
+    mappings = payload.get("mappings") if isinstance(payload, dict) else None
+    if not isinstance(mappings, list):
+        raise DemoError("SourceMap mappings are missing")
+    return sum(
+        1
+        for candidate in mappings
+        if isinstance(candidate, dict)
+        and candidate.get("status") == "exact"
+        and candidate.get("confidence") == 1
+        and isinstance(candidate.get("docx_anchor"), dict)
+        and candidate["docx_anchor"].get("kind") == "bookmark"
+        and candidate["docx_anchor"].get("part_uri") == DOCUMENT_PART
+    )
 
 
 def _select_exact_mapping(
@@ -441,7 +533,8 @@ def _full_verification(
 
 def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
     repository = Path(__file__).resolve().parents[1]
-    fixture = repository / "tests/fixtures/e0-minimal-paper/source"
+    profile = cast("str", arguments.fixture_profile)
+    fixture, fixture_label = _fixture_for_profile(repository, profile)
     if not (fixture / "main.tex").is_file():
         raise DemoError("the public E0 fixture is missing")
     source_before = _tree_sha256(fixture)
@@ -499,8 +592,12 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
         "--generated-at",
         generated_at,
     )
+    field_counts = _inspect_profile_export(profile, exported)
     source_map_path = export_objects / "source-map.json"
     source_map = _read_json(source_map_path)
+    exact_mapping_count = _exact_bookmark_mapping_count(source_map)
+    if exact_mapping_count < 1:
+        raise DemoError("the selected E0 profile produced no exact bookmark mapping")
     bookmark, relative_path, before, after, start_byte = _select_exact_mapping(source_map, snapshot)
     received = run_root / "received/returned-reviewed.docx"
     _create_tracked_replacement(
@@ -632,6 +729,8 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
         )
         approval_current = approval_next
     approval_final = objects / "approval-final.json"
+    if profile == "portable" and accepted < 1:
+        raise DemoError("the portable E0 profile produced no accepted safe change")
     _run_cli(
         repository,
         "approve-finalize",
@@ -709,7 +808,12 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "demo_status": overall_status,
         "run_id": run_id,
-        "fixture": "tests/fixtures/e0-minimal-paper",
+        "fixture_profile": profile,
+        "fixture": fixture_label,
+        "export_contract": {
+            **field_counts,
+            "exact_mapping_count": exact_mapping_count,
+        },
         "core_loop": {
             "status": "pass",
             "change_count": len(changes),
@@ -739,6 +843,12 @@ def run_demo(arguments: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the repository's public E0 fixture through the real CLI workflow."
+    )
+    parser.add_argument(
+        "--fixture-profile",
+        choices=FIXTURE_PROFILE_CHOICES,
+        default="full",
+        help="fixed public fixture profile; portable needs no Word, full proves live fields",
     )
     parser.add_argument(
         "--output",

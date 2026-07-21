@@ -1006,8 +1006,7 @@ def _replacement_pair(first: ExtractedRevision, second: ExtractedRevision) -> bo
     a = first.raw_event
     b = second.raw_event
     return (
-        a["kind"] == "delete"
-        and b["kind"] == "insert"
+        (a["kind"], b["kind"]) in {("delete", "insert"), ("insert", "delete")}
         and a["part_uri"] == b["part_uri"]
         and first.parent_node_ordinal is not None
         and first.parent_node_ordinal == second.parent_node_ordinal
@@ -1422,7 +1421,10 @@ def normalize_revision_changes(
             )
             consumed.add(paired_index)
         elif index + 1 < len(events) and _replacement_pair(event, events[index + 1]):
-            group = [event, events[index + 1]]
+            group = sorted(
+                [event, events[index + 1]],
+                key=lambda item: 0 if item.raw_event["kind"] == "delete" else 1,
+            )
             consumed.add(index + 1)
         elif event.raw_event["kind"] in {"move_from", "move_to"}:
             forced_conflict = True

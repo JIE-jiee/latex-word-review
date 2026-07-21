@@ -1,0 +1,28 @@
+{
+  "schema_version": "fixture-provenance-v1",
+  "fixture_id": "e0-portable-smoke",
+  "title": "E0 portable fieldless installed-package smoke fixture",
+  "origin": "synthetic LaTeX content created inside this repository",
+  "authors": ["Open Fixture Authors"],
+  "contains_personal_data": false,
+  "contains_private_paper_content": false,
+  "synthetic_reviewer_metadata_intentionally_present": false,
+  "redistribution_allowed_by_creator": true,
+  "license": "Apache-2.0",
+  "license_source": "repository root LICENSE",
+  "third_party_components": [],
+  "public_release_status": "ready_for_public_redistribution_under_apache_2_0",
+  "files": {
+    "source/main.tex": "756d15ab2e62fc4b0ce54bbd07fff9e7f2dc7ab39d1c4980155d0cf91be068d6"
+  },
+  "privacy_review": {
+    "status": "pass",
+    "evidence": "synthetic_text_only"
+  },
+  "field_policy": {
+    "seq_fields": 0,
+    "ref_fields": 0,
+    "pageref_fields": 0,
+    "purpose": "installed-package round trip without Microsoft Word"
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from latex_word_review import (
     validate_contract,
     verify_payload_binding,
 )
+from latex_word_review.schema_catalog import read_schema_resource, schema_catalog
 
 RUN_ID = new_run_id(timestamp_ms=1_768_464_000_000, random_bits=7)
 GENERATED_AT = "2026-01-15T08:00:00+08:00"
@@ -625,6 +627,16 @@ def test_packaged_schemas_are_versioned_and_fail_closed() -> None:
         assert schema["additionalProperties"] is False
         assert schema["properties"]["schema_name"] == {"const": schema_name}
         assert "extensions" in schema["properties"]
+
+
+def test_authoritative_schema_catalog_binds_the_exact_runtime_set() -> None:
+    catalog = schema_catalog()
+
+    assert catalog.schema_version == SCHEMA_VERSION
+    assert tuple(entry.name for entry in catalog.objects) == available_schema_names()
+    assert catalog.common.filename == "common.schema.json"
+    for entry in (catalog.common, *catalog.objects):
+        assert hashlib.sha256(read_schema_resource(entry.filename)).hexdigest() == entry.sha256
 
 
 def test_rfc8785_golden_vectors() -> None:

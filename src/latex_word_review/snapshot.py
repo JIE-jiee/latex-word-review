@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from latex_word_review.atomic_publish import publish_new_directory
 from latex_word_review.canonical import canonical_json
 from latex_word_review.discovery import (
     DEFAULT_DISCOVERY_LIMITS,
@@ -323,7 +324,7 @@ def snapshot_project(
             raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "source changed while copying")
         _make_tree_read_only(temporary)
         try:
-            temporary.rename(target)
+            publish_new_directory(temporary, target)
         except FileExistsError as exc:
             raise ContractError(
                 ErrorCode.HASH_SOURCE_MISMATCH,

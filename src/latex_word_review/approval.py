@@ -391,6 +391,7 @@ def record_bulk_decision(
             for change_id in order
             if changes[change_id]["safety_class"] == "plain_text_candidate"
             and cast("Mapping[str, Any]", changes[change_id]["resolution"])["status"] == "exact"
+            and change_id not in prior_decisions
         )
     else:
         selected_set = set(change_ids)
@@ -487,6 +488,33 @@ def finalize_approval_set(
     )
 
 
+def reopen_approval_set(
+    changeset: Mapping[str, Any],
+    approval: Mapping[str, Any],
+    *,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    """Create a new immutable draft from one final approval revision."""
+
+    _, decisions, payload = _validated_current(changeset, approval)
+    if payload["status"] != "final":
+        raise ContractError(
+            ErrorCode.APPROVAL_NOT_FINAL,
+            "only a final approval can be reopened",
+        )
+    audit = cast("Mapping[str, Any]", payload["audit"])
+    return _make_approval(
+        changeset,
+        decided_by=cast("Mapping[str, Any]", payload["decided_by"]),
+        decisions=decisions,
+        status="draft",
+        revision=cast("int", payload["revision"]) + 1,
+        supersedes_payload_sha256=compute_payload_sha256(approval),
+        bulk_operations=cast("Sequence[Mapping[str, Any]]", audit["bulk_operations"]),
+        generated_at=generated_at,
+    )
+
+
 def write_approval_json(
     changeset: Mapping[str, Any], approval: Mapping[str, Any], output_path: str | Path
 ) -> Path:
@@ -549,5 +577,6 @@ __all__ = [
     "finalize_approval_set",
     "record_bulk_decision",
     "record_decision",
+    "reopen_approval_set",
     "write_approval_json",
 ]

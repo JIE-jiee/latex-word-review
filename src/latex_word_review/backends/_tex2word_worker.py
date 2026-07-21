@@ -11,8 +11,17 @@ import importlib
 import json
 import os
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol, cast
+
+from latex_word_review.paths import windows_extended_path
+from latex_word_review.review_reference import (
+    PROFILE_ID,
+    REFERENCE_DOCX_SHA256,
+    materialized_review_reference,
+)
 
 
 class _Severity(Protocol):
@@ -45,7 +54,12 @@ class _ConvertSource(Protocol):
         embed_manifest: bool = True,
         citation_mode: str = "static",
         frontend: str = "pure",
+        reference_doc: str | None = None,
     ) -> _ConversionResult: ...
+
+
+class _ImageWriter(Protocol):
+    base_dir: str
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -83,17 +97,57 @@ def _severity_value(entry: _ReportEntry) -> str:
     return value
 
 
+@contextmanager
+def _windows_image_path_compat(module: object) -> Iterator[None]:
+    """Temporarily normalize locked tex2word image paths for one conversion."""
+    if os.name != "nt":
+        yield
+        return
+    if getattr(module, "__version__", None) != "1.0.5":
+        raise RuntimeError("tex2word image-path compatibility version mismatch")
+    document_module = importlib.import_module("tex2word.backend.document")
+    writer = getattr(document_module, "DocumentWriter", None)
+    candidate = getattr(writer, "_resolve_image_path", None)
+    if not isinstance(writer, type) or not callable(candidate):
+        raise RuntimeError("tex2word image-path compatibility target is unavailable")
+    original = cast("Callable[[object, str], str | None]", candidate)
+
+    def normalized_resolver(instance: object, relative: str) -> str | None:
+        image_writer = cast(_ImageWriter, instance)
+        normalized = os.path.normpath(relative)
+        if os.path.isabs(normalized):
+            absolute = os.fspath(windows_extended_path(Path(normalized)))
+            return original(instance, absolute)
+        original_base_dir = image_writer.base_dir
+        image_writer.base_dir = os.fspath(windows_extended_path(Path(original_base_dir)))
+        try:
+            return original(instance, normalized)
+        finally:
+            image_writer.base_dir = original_base_dir
+
+    type.__setattr__(writer, "_resolve_image_path", normalized_resolver)
+    try:
+        yield
+    finally:
+        type.__setattr__(writer, "_resolve_image_path", original)
+
+
 def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
     source = source_path.read_text(encoding="utf-8")
     module = importlib.import_module("tex2word")
     convert_source = cast(_ConvertSource, module.convert_source)
-    result = convert_source(
-        source,
-        base_dir=".",
-        embed_manifest=False,
-        citation_mode="static",
-        frontend="pure",
-    )
+    with (
+        materialized_review_reference(output_path.parent) as reference_path,
+        _windows_image_path_compat(module),
+    ):
+        result = convert_source(
+            source,
+            base_dir=".",
+            embed_manifest=False,
+            citation_mode="static",
+            frontend="pure",
+            reference_doc=os.fspath(reference_path),
+        )
     entries = tuple(result.report.entries)
     severities = tuple(_severity_value(entry) for entry in entries)
     errors = tuple(
@@ -102,6 +156,14 @@ def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
     warnings = tuple(
         entry for entry, value in zip(entries, severities, strict=True) if value == "warning"
     )
+    reference_events = tuple(
+        value
+        for entry, value in zip(entries, severities, strict=True)
+        if entry.construct == "reference-doc"
+    )
+    reference_loaded = "info" in reference_events and not any(
+        value in {"warning", "error"} for value in reference_events
+    )
     report = {
         "constructs": _bounded_constructs(entries),
         "entry_count": len(entries),
@@ -109,6 +171,9 @@ def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
         "math_image": int(result.report.math_image),
         "math_omml": int(result.report.math_omml),
         "math_raw": int(result.report.math_raw),
+        "reference_loaded": reference_loaded,
+        "reference_profile": PROFILE_ID,
+        "reference_sha256": REFERENCE_DOCX_SHA256,
         "warning_count": len(warnings),
         "warning_constructs": _bounded_constructs(warnings),
     }
@@ -118,6 +183,9 @@ def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+    if not reference_loaded:
+        _write_exclusive(report_path, report_bytes)
+        return 23
     if errors:
         _write_exclusive(report_path, report_bytes)
         return 20

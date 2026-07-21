@@ -161,10 +161,40 @@ def path_identity(path: Path) -> tuple[int, int]:
     return status.st_dev, status.st_ino
 
 
+def windows_extended_path(path: Path) -> Path:
+    """Return an absolute Win32 extended-length spelling for filesystem I/O.
+
+    Windows' legacy ``MAX_PATH`` limit can still affect a process even on a
+    current operating system when the machine-wide long-path policy is off.
+    The ``\\\\?\\`` namespace avoids that dependency without changing the
+    physical location of a file. Callers must perform their usual containment
+    and ownership validation before using the returned path; this helper only
+    changes the spelling handed to the operating system.
+
+    Other platforms are deliberately unchanged.
+    """
+
+    if os.name != "nt":
+        return path
+    value = os.path.abspath(os.fspath(path))
+    absolute = Path(value)
+    if value.startswith("\\\\?\\"):
+        return absolute
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    if _WINDOWS_DRIVE_RE.match(value) is None:
+        raise ContractError(
+            ErrorCode.PATH_ABSOLUTE,
+            "extended-length filesystem paths must be absolute",
+        )
+    return Path("\\\\?\\" + value)
+
+
 __all__ = [
     "ensure_disjoint_roots",
     "path_identity",
     "relative_path_from",
     "resolve_within",
     "validate_relative_path",
+    "windows_extended_path",
 ]
