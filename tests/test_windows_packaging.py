@@ -385,7 +385,12 @@ def test_windows_app_candidate_workflow_is_pinned_minimal_and_never_publishes() 
     assert "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1" in workflow
     assert "Get-AuthenticodeSignature" in workflow
     assert "CN=Pyrsys B\\.V\\." in workflow
+    assert "Start-Process -FilePath $installer -ArgumentList @(" in workflow
+    assert ") -Wait -PassThru -WindowStyle Hidden" in workflow
+    assert "if ($installProcess.ExitCode -ne 0)" in workflow
+    assert '& $installer "/VERYSILENT"' not in workflow
     assert '"/PORTABLE=1"' in workflow
+    assert '"/DIR=`"$innoRoot`""' in workflow
     assert "Inno Setup 7 Command-Line Compiler" in workflow
     assert ".\\scripts\\build-windows.ps1" in workflow
     assert ".\\scripts\\test-windows-installer.ps1" in workflow

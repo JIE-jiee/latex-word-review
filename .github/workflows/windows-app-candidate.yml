@@ -255,10 +255,12 @@ jobs:
               $signature.SignerCertificate.Subject -notmatch "CN=Pyrsys B\.V\.") {
               throw "Inno Setup Authenticode signature is not the expected valid publisher"
           }
-          & $installer "/VERYSILENT" "/SUPPRESSMSGBOXES" "/NORESTART" "/SP-" `
-              "/PORTABLE=1" "/DIR=$innoRoot"
-          if ($LASTEXITCODE -ne 0) {
-              throw "Inno Setup portable tool installation failed with exit code $LASTEXITCODE"
+          $installProcess = Start-Process -FilePath $installer -ArgumentList @(
+              "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+              "/PORTABLE=1", "/DIR=`"$innoRoot`""
+          ) -Wait -PassThru -WindowStyle Hidden
+          if ($installProcess.ExitCode -ne 0) {
+              throw "Inno Setup portable tool installation failed with exit code $($installProcess.ExitCode)"
           }
           $iscc = Join-Path $innoRoot "ISCC.exe"
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
