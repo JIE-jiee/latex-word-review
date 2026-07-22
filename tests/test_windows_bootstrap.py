@@ -32,7 +32,11 @@ def test_bootstrap_pins_and_verifies_upstream_assets() -> None:
     assert "c5a583d5f1f6d055fc1c32c87d8eceee90edc69a5b9af5da70811befdfc04880" in text
     assert "cpython-3.12.13-windows-x86_64-none" in text
     assert "24168aff2e7d93784c6a436124c4ebb79b076a4e289bde4902c08333507b71d0" in text
-    assert "Get-FileHash -Algorithm SHA256" in text
+    assert "[System.IO.File]::Open(" in text
+    assert "[System.Security.Cryptography.SHA256]::Create()" in text
+    assert "$sha256.ComputeHash($stream)" in text
+    assert "[System.BitConverter]::ToString($hash)" in text
+    assert "Get-FileHash" not in text
     assert "uv archive contains an unexpected member" in text
     assert "AllowAutoRedirect = $true" in text
     assert "Tls12" in text

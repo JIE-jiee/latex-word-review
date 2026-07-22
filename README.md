@@ -1,6 +1,109 @@
+<p align="center">
+  <strong>Language / 语言 / 言語</strong><br>
+  <strong>简体中文</strong> ·
+  <a href="README.en.md">English</a> ·
+  <a href="README.ja.md">日本語</a>
+</p>
+
 # LaTeX Word Review
 
-[简体中文](README.md) | [English](README.en.md) | [日本語](README.ja.md)
+让只习惯 Word 的导师或合作者审阅论文，也让 LaTeX 作者能逐条确认修改，再安全地写回新的 LaTeX 副本。
+
+LaTeX Word Review 是一个只在 Windows 本机运行的论文审阅助手。它不要求审阅者学习 LaTeX，也不会用修改后的 Word 重建整篇论文。
+
+## 你是否遇到过这种情况
+
+你用 LaTeX 写论文，导师或合作者却只习惯 Microsoft Word。
+
+把论文转成 Word 并不难。真正麻烦的是 Word 返回以后：几十处修订要手工比对，公式、引用和 LaTeX 命令又不能随便覆盖。复制少一处会漏改，复制错一处可能破坏原稿。论文越长，这件事越难核对。
+
+这个项目把 Word 当作审阅工具，而不是新的论文源文件。程序会读取返回 Word 中的修订和批注，列出每一项变化，让你决定采用还是拒绝。只有能够准确定位、风险较低且经过你确认的正文修改，才会写入新的 LaTeX 副本。原稿始终保留。
+
+## 它适合谁
+
+- 用 LaTeX 写论文，但需要和 Word 用户协作的学生、研究人员与作者。
+- 希望继续用 Word 的“修订”和“批注”功能审稿的导师、合作者或编辑。
+- 不愿把未发表论文上传到在线转换网站，希望在本机完成审阅流程的人。
+- 需要知道“改了什么、采用了什么、为什么没有自动写回”的谨慎用户。
+
+## 它能帮你做什么
+
+| 你要做的事 | 程序的处理方式 |
+|---|---|
+| 把 LaTeX 交给 Word 用户审阅 | 从 `main.tex` 生成便于审阅的 Word 文件 |
+| 收回审阅结果 | 读取 Word 的插入、删除、作者、时间和批注信息 |
+| 决定哪些修改要采用 | 在本机页面中逐条采用或拒绝，也可批量采用已确认安全的普通正文修改 |
+| 防止误改原稿 | 先显示文件级差异，再由你第二次确认；结果只写入新副本 |
+| 保留核对依据 | 保存修改记录、审批结果、差异和审计材料 |
+| 生成最终核验材料 | 工具齐全时生成新 LaTeX、PDF 和带修订标记的 `latexdiff.pdf` |
+
+## 四步完成一次审阅
+
+1. **选择论文**：点击“新建审阅”，选择论文的主 `.tex` 文件。
+2. **生成并收回 Word**：生成审阅稿，交给对方在 Word 中开启“修订”后编辑；拿回文件后，在程序里选择返回的 `.docx`。
+3. **逐条审批**：查看每项修改的前后文本、作者、时间和风险，决定采用或拒绝。
+4. **预览并生成结果**：检查 LaTeX 文件差异，再次确认后生成新的论文副本和可用的核验材料。
+
+原 LaTeX 和返回的 Word 原件都不会被覆盖。关闭浏览器后，任务仍保存在本机，可以继续处理。
+
+## Windows 上怎样开始
+
+目前公开的是源码双击启动方式，还不是签名安装包。
+
+1. 下载本仓库的 [源码 ZIP](https://github.com/JIE-jiee/latex-word-review/archive/refs/heads/main.zip)。
+2. 在资源管理器中选择“全部解压”。不要直接在 ZIP 预览窗口里运行。
+3. 双击解压目录中的 **`Start-Latex-Word-Review.cmd`**。
+4. 第一次启动时保持联网并等待准备完成。浏览器随后会自动打开本机页面。以后继续双击同一个文件即可启动。
+
+普通用户不需要预先安装 Python、Git 或 uv，也不需要管理员权限。第一次启动会下载并校验程序所需的私有运行环境，因此会比以后启动慢。
+
+> [!IMPORTANT]
+> 当前 GitHub 首页提供简体中文、English 和日本語三份说明。点击页面最上方的语言名称，会进入对应的完整 README。应用程序本身目前仍是简体中文界面，切换 README 不会改变应用语言。
+
+[查看完整中文使用指南](docs/guide.zh-CN.md) | [Windows 快速入门](docs/quick-start-windows.md)
+
+## 使用前需要知道
+
+项目当前是 `0.2.0b1` beta 候选，仍可能遇到 LaTeX 模板兼容、Word 排版、复杂修订识别或性能问题。开始前请备份论文，并检查每一次输出。
+
+- **Word 是审阅稿，不是排版成品。** 它优先保留语义和可审阅性，不会复制 LaTeX PDF 的投稿版式。公式、复杂表格、引用和图片需要在交付前检查。
+- **它不会把整篇 Word 转回 LaTeX。** 这样做很容易破坏宏、标签、引用和模板。程序只尝试回填已经批准并能准确定位的普通正文。
+- **识别到修改，不等于一定能自动写回。** 对复杂 Word，程序可能读出修订，却无法证明它在 LaTeX 中的唯一位置。这些修改会留在记录里供你手工处理，而不会冒险改稿。
+- **审阅者需要 Microsoft Word for Windows。** 原生“修订”证据应由 Word 产生。包含 Word 活字段的稿件，在生成端也可能需要 Word 来刷新字段。
+- **最终 PDF 需要本机 TeX 工具。** 首次启动不会安装 Microsoft Word、MiKTeX、TeX Live、Pandoc、`latexmk` 或 `latexdiff`。缺少相关工具时，程序仍可完成部分流程，并明确说明哪些结果没有生成。
+- **目前没有公开的签名安装包。** Windows 可能对从互联网下载的 `.cmd` 显示安全提示。请只从本仓库下载，不要通过关闭系统安全功能来运行来历不明的副本。
+
+## 你会得到哪些结果
+
+一次完整任务通常包含：
+
+- 供审阅者使用的 Word 文件；
+- 返回 Word 中提取出的逐条修改记录；
+- 你的采用和拒绝决定；
+- 修改前后的 LaTeX 文件差异；
+- 不覆盖原稿的新 LaTeX 副本；
+- 环境允许时生成的干净 PDF 和带修订标记的 `latexdiff.pdf`；
+- 便于复查与归档的审计材料。
+
+程序默认把任务放在 `%LOCALAPPDATA%\LatexWordReview`。你也可以在页面中把 Word 另存到自己选择的位置，或删除不再需要的最近任务。删除任务不会删除原论文，也不会删除你另存到其他位置的文件。
+
+## 隐私与安全边界
+
+应用只绑定本机地址 `127.0.0.1`，浏览器页面不是云端网站。程序不会主动上传论文。首次准备运行环境时需要联网下载依赖，论文处理则留在本机。
+
+原 LaTeX、导出的基线和返回 Word 原件都会保持不变。任何自动回填都必须经过逐条审批和最终差异确认，并且只能写入新的工作副本。
+
+请不要在公开 Issue 或 Pull Request 中上传私人论文、导师返回的 Word、审稿人信息或未脱敏的修改记录。
+
+## 这个项目如何产生
+
+项目来自一个真实的 LaTeX 与 Word 协作问题，主要由维护者通过 Vibe Coding 与 OpenAI Codex 协作完成。维护者提出需求、反馈实际使用问题、设定安全边界并决定发布范围；AI 编程 Agent 参与调研、设计、编码、测试和文档整理。
+
+“由 Vibe Coding 产生”是在说明开发过程，不是质量保证。项目仍可能存在未发现的问题，也会在后续版本继续修正。欢迎通过 [Issue](https://github.com/JIE-jiee/latex-word-review/issues) 报告可复现的问题，或通过 [Pull Request](https://github.com/JIE-jiee/latex-word-review/pulls) 改进兼容性、文档、测试和安全性。提交前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+[查看开发来源与 Vibe Coding 记录](docs/development-provenance.md)
+
+## 项目状态
 
 [![CI](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml/badge.svg)](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml)
 [![Double-click bootstrap](https://github.com/JIE-jiee/latex-word-review/actions/workflows/windows-source-bootstrap.yml/badge.svg)](https://github.com/JIE-jiee/latex-word-review/actions/workflows/windows-source-bootstrap.yml)
@@ -8,375 +111,38 @@
 [![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB)](pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**把 Word 修订安全地带回 LaTeX，而不是把修订后的 Word 整篇再转一次。**
+项目只支持 Windows。当前尚未创建 GitHub Release，也未发布到 PyPI。安装器和 portable ZIP 已通过候选构建测试，但因为 Windows 原生依赖的公开再分发材料尚未完成闭环，仓库暂不发布二进制文件。
 
-LaTeX Word Review 是一个仅面向 Windows 的本机审阅助手。论文作者继续把 LaTeX 当作唯一
-权威源，导师或合作者只需在 Microsoft Word 中使用“修订”和“批注”。返回的 Word 会先拆成
-逐条修改，经过人工审批、精确 diff 预览和第二次确认后，才可能写入新的 LaTeX 工作副本。
+<details>
+<summary>开发者、审计人员和高级用户入口</summary>
 
-> [!IMPORTANT]
-> GitHub 项目说明现提供简体中文、English 和日本語三个版本；当前应用程序界面本身仍是
-> 简体中文。README 的语言切换不表示英文或日文应用界面已经完成。
+### 文档导航
 
-> [!NOTE]
-> 本项目源自真实的 LaTeX–Word 协作痛点，并主要通过维护者驱动的
-> **Vibe Coding 与 OpenAI Codex 协作**完成。维护者提出需求、纠正方向、设定安全边界并
-> 决定发布；AI 编程 Agent 参与调研、设计、编码、测试和文档。Vibe Coding 是开发来源
-> 说明，不是正确性保证。详见[开发来源与 Vibe Coding 记录](docs/development-provenance.md)。
-> 当前 beta 仍可能存在未发现的转换兼容性、排版、性能或边界问题，请先备份论文并始终在
-> 副本上验证结果。项目会在后续版本持续修正和完善，也欢迎通过
-> [Issue](https://github.com/JIE-jiee/latex-word-review/issues) 与
-> [Pull Request](https://github.com/JIE-jiee/latex-word-review/pulls) 参与测试、文档、兼容性和安全改进。
+- [文档总览](docs/README.md)
+- [完整中文使用指南](docs/guide.zh-CN.md)
+- [Windows 快速入门](docs/quick-start-windows.md)
+- [CLI 参考](docs/reference/cli.md)
+- [核心契约与安全模型](docs/architecture/domain-contracts.md)
+- [威胁模型](docs/security/threat-model.md)
+- [上游复用与差距评估](docs/reviews/maturity-upstream-reuse-2026-07.md)
+- [依赖供应链审计](docs/reviews/dependency-supply-chain-audit.md)
+- [Windows 二进制许可证审计](docs/reviews/windows-binary-license-audit-2026-07.md)
+- [发布流程与门禁](docs/release/release-process.md)
 
-> [!WARNING]
-> 当前源码版本为 `0.2.0b1` beta 候选，密封对象仍使用 `v1alpha` 契约。项目尚未创建
-> GitHub Release，也未发布到 PyPI。GitHub 源码 ZIP 现在提供经过校验的 Windows 双击
-> 首启入口，但它仍是源码 bootstrap，不是已签名安装包。Windows 安装器和 portable ZIP
-> 虽已完成本地候选验证，仍因 lxml Windows 静态原生依赖的许可证材料与可重链接路径尚未
-> 闭环而**不公开上传二进制资产**。详见
-> [Windows 二进制许可证审计](docs/reviews/windows-binary-license-audit-2026-07.md)。
-## 四步完成一轮审阅
-
-安装版、portable 与源码方式都打开同一个本机中文界面：
-
-1. **选择 `main.tex`**：Windows 文件选择器确认论文，程序创建只读快照并预检。
-2. **生成并收回 Word**：打开 `review.docx` 交给审阅者；收到文件后选择返回的 `.docx`。
-3. **逐条审批**：查看修改前后、作者、时间、源位置和风险，逐项决定；受限批量操作只包含
-   精确映射的安全正文。
-4. **核对 diff 后生成结果**：第一道闸门密封审批决定；第二道闸门展示按文件 diff，用户
-   再次确认后才生成新的 LaTeX、PDF、账本和审计包。
-
-```mermaid
-flowchart LR
-    A["选择 main.tex"] --> B["生成 Word"]
-    B --> C["选择返回 Word"]
-    C --> D{"第一道闸门<br/>逐条审批"}
-    D --> E["按文件核对 diff"]
-    E --> F{"第二道闸门<br/>确认生成"}
-    F --> G["新 LaTeX / PDF<br/>ledger / bundle"]
-```
-
-界面不会要求普通用户管理 `ApprovalSet`、`PatchPlan`、哈希或 JSON 路径。后台仍保存这些
-不可变证据，恢复时从磁盘重新核验，而不是依赖浏览器缓存猜测状态。
-
-## 现在怎样运行
-
-### 普通 Windows 用户：下载、解压、双击
-
-1. 从本仓库下载 [GitHub 源码 ZIP](https://github.com/JIE-jiee/latex-word-review/archive/refs/heads/main.zip)。
-2. 在资源管理器中选择“全部解压”；不要直接在 ZIP 预览窗口里运行。
-3. 双击根目录的 **`Start-Latex-Word-Review.cmd`**。
-4. 第一次保持联网并等待初始化完成；浏览器随后自动打开本机中文界面。以后双击同一文件即可，
-   已就绪环境不再下载或同步依赖，也可以离线启动。
-
-普通用户**不需要预装 Python、uv 或 Git，不需要管理员权限**。首启脚本固定下载 uv
-`0.11.16` Windows x64 官方 ZIP，先核对文件长度与硬编码 SHA-256，再由该 uv 安装固定的
-64 位 CPython `3.12.13`；程序先检查 `uv.lock` 与项目是否一致，再只安装锁文件中的生产依赖
-和 `pdf-figures` extra，不安装 pytest、mypy、PyInstaller 等开发工具。脚本不会执行
-`irm | iex`、`latest` 或自更新命令。
-
-首启生成的私有运行时位于解压目录下的 `.lwr-runtime`。当前实测清理后约 **96 MiB**；安装
-成功会删除 uv 下载包、uv.exe 和依赖缓存。论文任务仍放在
-`%LOCALAPPDATA%\LatexWordReview`，与程序运行时分开。需要重装环境时可先关闭程序，再删除
-`.lwr-runtime` 并重新双击；这不会删除任务数据或原论文。
-
-当前没有签名安装包，Windows 可能对从互联网下载的 `.cmd` 显示安全提示。只应从本仓库
-下载并完整解压；不要从第三方获取同名启动器，也不要通过关闭系统安全功能来强行运行未知
-文件。源码 ZIP 跟随 `main` 更新，正式不可变 Release 仍待后续发布门禁完成。
-
-> [!NOTE]
-> 首次初始化只准备本程序、Python 与转换/预览依赖；它不会安装 Microsoft Word、MiKTeX、
-> TeX Live、`latexmk`、`latexdiff` 或 Pandoc。生成 Word 的基本流程可直接使用；要生成最终
-> PDF 或刷新 Word 活字段，仍需对应的 TeX 工具或 Microsoft Word。
-
-### 高级用户：固定源码提交并手动运行
-
-需要审计某个不可变提交时，可继续使用 Git、uv 和已有 Python：
+### 从命令行运行
 
 ```powershell
 git clone https://github.com/JIE-jiee/latex-word-review.git
 Set-Location latex-word-review
-$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
-git checkout --detach $ReviewedCommit
-if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
 uv lock --check
 uv sync --frozen --no-default-groups --extra pdf-figures --python 3.12
 uv run --no-sync latex-word-review app
 ```
 
-把占位值替换为实际审核过的完整 40 位 commit SHA。双击入口本身不要求 Git，也不会修改
-`pyproject.toml` 或 `uv.lock`。
+核心业务逻辑、安全约束和 Schema 位于独立库与 CLI 中，图形界面和 Skill 只负责编排。详细命令、产物契约、测试方式和恢复流程请从上面的文档入口继续阅读。
 
-### 当前维护者工作区：本地冻结候选
+</details>
 
-仓库根目录若已有本机生成的 `LaTeX Word Review（双击启动）.lnk`，可继续直接双击；备用
-入口是 `output\local-windows\Start-Latex-Word-Review.cmd`。这份本地冻结候选受 Git 忽略，
-不会出现在 GitHub 源码 ZIP 中，也不改变上面的公开源码 bootstrap。维护者可用
-`scripts\deploy-local-windows.ps1` 原子更新它而保留既有 `user-data`。
-### 许可证闭环后提供：安装版与 portable
+## 许可证
 
-| 形式 | 使用方式 | Python / Git | 当前公开状态 |
-|---|---|---:|---|
-| 当前用户安装器 | 双击 setup；安装结束可立即启动，以后从桌面或开始菜单打开 | 不需要 | 构建与静态校验通过；本轮未执行安装；暂不公开上传 |
-| Portable ZIP | 解压后双击 `LatexWordReview.exe` | 不需要 | 冻结程序运行验收通过；暂不公开上传 |
-| 源码界面 | `uv run --frozen latex-word-review app` | 需要 | 当前公开可用 |
-
-安装器不请求管理员权限；portable 与安装器使用同一份 PyInstaller onedir 字节。两者都把
-任务放到用户数据目录，而不是安装/解压目录。未来若公开的 Beta 仍没有可信 Authenticode
-签名，Windows SmartScreen 可能显示“未知发布者”。请先核对发布页 SHA-256、版本和源码，
-不要把提示当作可以无条件忽略的弹窗。
-
-### 当前候选大约多大
-
-本地 `0.2.0b1` Windows x64 候选的典型体积为：
-
-| 资产 | 典型大小 |
-|---|---:|
-| setup 安装包 | **约 20.5 MiB** |
-| portable ZIP | **约 31.9 MiB** |
-| 安装或解压后的程序目录 | **约 63 MiB**（约 438 个文件） |
-
-该候选使用固定的 64 位 CPython 3.12.13 冻结。体积会随版本、PyInstaller、PDFium 和依赖
-更新而变化。程序内含 Python 运行时、本项目、`tex2word`、Pillow、PDFium、Schema 和界面
-资源；不含 Microsoft Word、MiKTeX、Pandoc、Playwright 浏览器或开发工具。
-每次构建的精确字节数与 SHA-256 以该次 `artifacts/SHA256SUMS.txt` 和程序目录内的
-`CONTENTS.sha256` 为准，不在 README 中固定易过期的构建哈希。
-
-2026-07-21 的当前源码候选已完成完整 Windows 本地回归：**1209 passed、9 skipped、
-0 failed**，分支覆盖率 **90.47%**；Ruff、格式检查、strict mypy 与 `uv lock --check`
-同时通过。此前冻结程序候选的 1023 项回归属于旧构建记录；冻结程序、portable ZIP 和
-setup 的公开发布仍受上方许可证审计状态约束。
-
-## 界面实际怎样工作
-
-### 1. 选择论文并生成 Word
-
-点击“新建审阅”，选择主 `.tex`。程序以其所在目录为来源，保守发现依赖、拒绝越界引用和
-链接逃逸，在用户数据目录创建新任务与只读快照。预检通过后点击“生成审阅 Word”。
-耗时操作在本机后台执行，同一任务同时只允许一个写操作。
-
-审阅稿默认使用代码确定性生成并经 SHA-256 绑定的 `academic-review-v1` 样式：A4 单栏、
-Times New Roman 西文、SimSun 中文、明确标题层级和两端对齐正文。普通图片只缩小不放大，
-表格使用显式网格和紧凑单元格间距。项目复用 `tex2word 1.0.5` 的公开 `reference_doc`
-接口，不在 wheel/安装包里夹带未知 Word 模板；模板加载失败会阻断导出，不会静默退回默认
-样式。它仍是便于修订的语义审阅稿，不承诺复刻 LaTeX PDF 或期刊终稿版式。
-
-### 2. 让审阅者使用 Word
-
-点击“打开审阅稿”可直接查看内部密封基线；点击“另存到指定位置”可用 Windows 保存窗口
-创建一个便于发送和编辑的 `.docx` 副本。该操作不会移动或改写内部基线，也不会覆盖已有
-文件。请审阅者保持“审阅 → 修订”开启，正文用修订、讨论用批注；不要
-“接受所有修订”、删除定位书签或保存为旧 `.doc`。收到 `.docx` 后，点击“选择返回 Word
-并读取修改”。程序先只读归档，再证明 reject-view 与导出基线一致。Accept All、关闭修订后
-的未跟踪编辑、错误轮次或损坏书签都会停止，而不是猜测来源。
-
-审阅者可以在另一台 Windows 电脑使用 Word 后再导入返回稿。对于含 `SEQ`、`REF`、
-`PAGEREF` 等活字段的通常论文，运行程序的电脑也需要 Microsoft Word 来刷新并冻结字段；
-无活字段稿可跳过该自动化。Word 不会被程序捆绑或静默安装，缺失时会明确阻断而不是交付
-带陈旧字段的审阅稿。返回 DOCX 的只读解析本身不启动 Word。
-
-### 3. 逐条审批：第一道闸门
-
-每张审批卡显示修改前后、作者、时间、上下文、来源位置、置信度和安全分类。可选择：
-
-| 决定 | 含义 |
-|---|---|
-| 采用 | 同意 Word 文字；不保证一定能自动应用 |
-| 修改后采用 | 同意方向，并填写最终文字 |
-| 不采用 | 保留原 LaTeX 文字 |
-| 留待人工 | 保留证据，稍后在独立副本处理 |
-| 无法判断 | 证据或语义冲突，当前不应用 |
-
-“采用全部安全正文修改”仅为尚未决定的精确普通正文填写“采用”，不会覆盖已经逐项作出的
-任何决定。公式、引用、结构、move、格式、批注、低置信度和冲突项不会被包含。点击
-“完成审批并预览补丁”只密封决定，不修改 LaTeX。
-
-### 4. 核对 diff：第二道闸门
-
-程序按文件显示 unified diff，并分别统计自动、人工、不采用和冲突项。若存在
-`accepted_but_blocked`，页面不会继续应用；用户须显式点击“重新审批”，再把阻断项改为
-人工处理或不采用。已有决定与旧证据会保留，不被批量操作或新计划覆盖。计划 ready/noop 后，
-用户还要勾选确认并点击“确认并生成全部结果”。程序重新核对计划哈希、源文件哈希、UTF-8
-字节范围、重叠和安全策略，再编排 apply、verify、ledger 与 bundle；任何漂移都会停止。
-
-## 当前重要限制：识别修改不等于可自动回填
-
-复杂的真实返回 Word 可能被正常读取，修订也能完整进入审批列表，但导出时建立的 LaTeX
-精确来源映射未必覆盖这些修改所在的正文。在这种情况下，可安全自动回填的数量可能是 **0**。
-
-- 已识别但没有精确映射的修改仍会进入 ChangeSet 和账本，并转为人工处理。
-- 程序不会通过整篇模糊匹配、最近书签或同段落猜测源码位置。
-- “0 项可安全回填”表示安全边界生效，不表示修改已经应用，也不表示 Word 中没有修改。
-- 扩大复杂 LaTeX 的精确映射覆盖率仍是后续版本的重要工作。
-
-因此，当前 beta 可以帮助整理复杂论文的审阅证据和审批决定，但不能保证每一条检测到的
-Word 修改都能自动写回 LaTeX。
-
-## 数据、恢复与退出
-
-默认数据根为：
-
-```text
-%LOCALAPPDATA%\LatexWordReview\
-└── runs\
-    └── session_<随机标识>\
-```
-
-安装版、正式 portable 和源码界面默认都使用这里。当前维护者工作区的一键启动器是明确的
-本地例外：它把数据放在 `output\local-windows\user-data`，并把 `TEMP/TMP` 固定到其
-`temp` 子目录。程序不把论文写进安装目录，卸载也不会删除任务。
-
-- **恢复**：重新打开程序，在“最近任务”继续。首页只做有界轻量摘要；点击“打开并核验”
-  后才从全部密封对象重建真实阶段。
-- **删除任务**：在任务卡点击“删除”，阅读不可恢复提示并勾选确认。运行中的任务不能删除；
-  删除只影响程序拥有的该任务目录，不影响原论文，也不删除已经另存到其他位置的 Word 副本。
-- **异常中断或计划受阻**：界面提供显式恢复/“重新审批”入口，不替用户决定、覆盖已有决定
-  或越过闸门。
-- **部分完成**：缺少 TeX/`latexdiff` 时，已安全生成的 LaTeX 与证据保留；安装工具后可
-  新建核验尝试，旧失败记录不覆盖。
-- **关闭标签页**：不会结束本机服务。
-- **退出程序**：使用首页/结果页“退出程序”；若后台任务尚未结束，会等待其安全完成。
-  源码控制台也可按 `Ctrl+C`。
-
-高级用户可用 `latex-word-review app --data-root <目录>` 指定数据根。
-
-## 最终产物
-
-| 产物 | 用途 |
-|---|---|
-| `export/review.docx` | 带稳定书签、启用 Track Changes 的 Word 审阅稿 |
-| `receive/original/returned-original.docx` | 返回文件的只读归档 |
-| `receive/changeset.json` | 插入、删除、替换、move、格式和批注证据 |
-| `approvals/approval-rN.json` | 每项决定与不可变版本链 |
-| `plans/plan-rN/changes.patch` | 第二道闸门前检查的精确 diff |
-| `revised-clean/` | 只含已授权安全正文补丁的新 LaTeX 副本 |
-| `verification/revised-clean.pdf` | 修订后干净 PDF |
-| `verification/latexdiff.tex` / `.pdf` | 原稿与修订稿的派生可视差异；PDF 需核验编译成功 |
-| `ledger/ledger.json` / `.html` | 作者、时间、决定、补丁与核验账本 |
-| `audit.zip` | 显式 allowlist、可离线验哈希的审计包 |
-
-LaTeX 源本身不会出现 Word 气泡。已批准且可安全应用的文字进入 `revised-clean/`；存在
-实际源差异且核验成功时，`latexdiff.tex/.pdf` 展示增删标记。没有实际差异的 noop 任务
-不会凭空产生标记。Word 的作者、时间和批注保存在 ChangeSet 与 ledger，不写入
-`latexdiff`。
-
-## Word、TeX 与 PDF 图片
-
-| 能力 | 依赖 |
-|---|---|
-| 生成/解析 DOCX、审批、生成新 LaTeX | 安装版/portable 内置运行时；源码方式需要 Python |
-| 审阅返回稿 | 审阅者使用 Microsoft Word for Windows |
-| 生成干净 PDF | `latexmk`、论文对应 TeX 引擎、字体和宏包 |
-| 生成带标记 PDF | 上述工具再加 `latexdiff` |
-| PDF 图进入 Word | 安装版内置 PDFium/Pillow；源码安装 `pdf-figures` extra |
-
-Windows 自动 PDF 核验当前只接受同一套可证明身份的 MiKTeX：程序先从绝对 `PATH` 项
-解析，找不到时再检查当前用户的标准 MiKTeX 安装位置。`latexmk` 与 `latexdiff` 必须属于
-同一安装根，并且 `PATH` 中还要有可解析为绝对普通文件的 Perl。程序使用私有
-MiKTeX 配置、数据、HOME 与临时目录，不会安装或更新宏包；TeX Live、混合工具链、缺包或
-缺少 Perl 会得到明确的部分完成/阻断结果，已生成的 LaTeX 副本仍保留。
-
-PDF 图片只在派生 overlay 中把指定页、裁剪和旋转规范化为 PNG 审阅图；原 PDF 与 `.tex`
-不变。Word 中是栅格预览，不是可编辑矢量图。SVG、EPS、`pagebox` 或动态图片操作不能安全
-解释时会转人工。
-
-## 现实痛点与功能创意
-
-| 现实痛点 | 常见做法的风险 | 本项目的处理 |
-|---|---|---|
-| Word 中有几十条修订 | 手工复制容易漏改、错改 | 生成带作者、时间、前后文本和 OOXML 证据的 ChangeSet |
-| 整篇 Word 转回 LaTeX | 宏、公式、引用、标签和模板可能被改写 | 只对已批准且精确定位的普通正文做局部补丁 |
-| 接受与真正写入混在一起 | 一次误点就改论文 | 两道独立人类闸门，只写新副本 |
-| PDF 图不方便进 Word | 丢图、错页、隐式转换难追踪 | 派生 canonical PNG，记录源页、像素与哈希 |
-| 只有最终 PDF | 无法复盘谁改了什么 | 同时输出干净稿、latexdiff、账本和审计包 |
-| 底层 CLI 太繁琐 | 用户要管理十几条命令和 JSON 路径 | ApplicationSession + 中文本机界面自动编排并恢复 |
-
-核心创意不是重写通用转换器，而是把 **Word 定位为审阅界面**，把返回稿变成结构化证据，
-再用“可证明定位 + 两道闸门 + 新副本 + 审计链”安全回填。
-
-## 依托哪些上游
-
-| 上游 | 用法 |
-|---|---|
-| [tex2word](https://github.com/yfyang86/tex2word) | 默认 LaTeX→DOCX 后端，复用解析、OMML、图片、表格与字段 |
-| [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) / Pillow | PDF 页渲染与 canonical PNG |
-| [OpenRefine](https://github.com/OpenRefine/OpenRefine) | 借鉴“本机服务 + 浏览器 + 可恢复项目主页”模式，不复制代码 |
-| [PyInstaller](https://pyinstaller.org/) / [Inno Setup](https://jrsoftware.org/isinfo.php) | 同源 portable 和当前用户安装器 |
-| Pandoc、docx-revisions、Open XML SDK、PowerTools | 对照后端、契约实验与 OOXML oracle |
-
-本项目自行实现不可变运行、SourceMap、reject-view 基线、版本化 Schema、逐条审批、局部补丁、
-核验与审计链。决策见 [ADR-0001](docs/adr/0001-upstream-strategy.md) 与
-[Windows 产品 ADR](docs/adr/0003-windows-product-experience.md)。
-
-## 安全、隐私与 Skill
-
-- 原 LaTeX、导出基线和返回 Word 原件以 SHA-256 绑定并保持不变。
-- 自动补丁只允许精确、置信度至少 0.99 的普通正文。
-- 公式、引用、标签、环境、图表、move、格式与批注默认人工处理。
-- 本机服务只绑定 `127.0.0.1`，并校验 Host、Origin、Cookie、CSRF、CSP 和请求大小。
-- 核心程序不会主动上传论文；真实任务默认 `local_private`。
-
-可选 `$latex-word-review` Skill 只是薄编排层。普通请求优先启动
-`latex-word-review app`，让用户在本机界面亲自选择文件、逐条决定并确认 diff；只有明确
-要求 CLI/Agent 编排或恢复时才使用 granular 命令。Skill 不能替用户跨过任何一道闸门。
-Agent 可能按所用 Codex 产品/组织政策接触命令输出和审阅证据；敏感论文可只用本机界面。
-
-```powershell
-codex plugin marketplace add JIE-jiee/latex-word-review --ref <reviewed-tag-or-commit>
-codex plugin add latex-word-review@personal
-```
-
-## 项目状态与欢迎参与
-
-项目仍在持续迭代。后续版本将重点完善复杂 LaTeX 模板兼容性、Word 审阅稿排版、错误诊断、
-公开测试样例，以及 Windows 二进制许可证闭环。
-
-欢迎通过 [GitHub Issues](https://github.com/JIE-jiee/latex-word-review/issues) 提交最小、脱敏、
-可复现的问题，也欢迎通过 [Pull Requests](https://github.com/JIE-jiee/latex-word-review/pulls)
-参与代码、测试、文档、兼容性和安全改进。请勿在公开 Issue 或 PR 中上传私人论文、导师返回的
-Word 原件或可识别的审稿信息；参与前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和
-[SECURITY.md](SECURITY.md)。
-
-
-## 高级 CLI、验证与文档
-
-普通用户不需要完整 CLI。自动化、旧流程恢复或审计时参阅
-[CLI 与运行目录契约](docs/reference/cli.md)。公开自制样例：
-
-```powershell
-uv sync --frozen --group fixture --extra pdf-figures --python 3.12
-uv run --frozen python scripts/run_public_e0_cli_demo.py --fixture-profile portable --skip-verification
-```
-
-`portable` 使用不产生 `SEQ`、`REF` 或 `PAGEREF` 活字段的合成论文，因此在没有
-Microsoft Word 的干净 Windows 环境中，也能执行完整的
-`snapshot → export → archive → ingest → approve → plan → apply` 审阅闭环。
-
-它不是降低生产安全要求的开关。`--fixture-profile full` 继续使用包含活字段的完整 E0
-样例；缺少 Microsoft Word 时必须安全失败。详细边界见
-[公开 E0 教程](docs/tutorial-public-e0.md)。
-
-项目只支持 Windows。当前 `0.2.0b1` 仍是源码候选；自动应用只覆盖精确普通正文，Word
-审阅稿不保证复刻 LaTeX PDF 版式，text-patch 基线也不等于整份 DOCX 的所有对象均已验证。
-
-- [中文 Windows 完整使用指南](docs/guide.zh-CN.md)
-- [English Windows Quick Start](docs/quick-start-windows.md)
-- [完整文档索引](docs/README.md)
-- [威胁模型](docs/security/threat-model.md)
-- [平台支持矩阵](docs/compat/platform-support.md)
-- [Windows 二进制许可证审计](docs/reviews/windows-binary-license-audit-2026-07.md)
-
-开发检查：
-
-```powershell
-uv run --frozen ruff check .
-uv run --frozen ruff format --check .
-uv run --frozen mypy
-uv run --frozen pytest --cov=latex_word_review --cov-report=term-missing
-```
-
-提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md) 与
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。AI 辅助不免除贡献者理解改动、披露重要
-参与、提供验证并对最终内容负责的义务。问题请提交到
-[GitHub Issues](https://github.com/JIE-jiee/latex-word-review/issues)；安全问题请使用
-[私密漏洞报告](https://github.com/JIE-jiee/latex-word-review/security/advisories/new)。
+项目代码采用 [Apache-2.0](LICENSE) 许可证。第三方组件及测试素材按各自许可证使用，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
