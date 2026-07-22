@@ -380,11 +380,17 @@ def _validate_revision_markup(
 ) -> None:
     move_ranges: dict[tuple[RevisionKind, str], list[bool]] = {}
 
-    def visit(node: etree._Element, property_depth: int, revision_depth: int) -> None:
+    def visit(
+        node: etree._Element,
+        property_depth: int,
+        revision_depth: int,
+        active_revision_kind: RevisionKind | None,
+    ) -> None:
         namespace = _namespace(node)
         local = _local_name(node)
         next_property_depth = property_depth
         next_revision_depth = revision_depth
+        next_active_revision_kind = active_revision_kind
         if namespace == W_NS:
             if local in _PROPERTY_CONTAINERS:
                 next_property_depth += 1
@@ -393,6 +399,7 @@ def _validate_revision_markup(
                 if property_depth or revision_depth:
                     raise _unsupported_revision(part_uri, local, ordinals[node])
                 next_revision_depth += 1
+                next_active_revision_kind = kind
             elif local in _IGNORED_FORMAT_REVISION_LOCALS:
                 pass
             elif local in _UNSUPPORTED_REVISION_LOCALS or (
@@ -410,7 +417,13 @@ def _validate_revision_markup(
                     )
                 direction, is_start = marker
                 move_ranges.setdefault((direction, native_id), []).append(is_start)
-            if local in {"delText", "delInstrText"} and revision_depth == 0:
+            if local == "delInstrText" and active_revision_kind != "delete":
+                raise ContractError(
+                    ErrorCode.DOCX_INVALID_PACKAGE,
+                    "deleted field code is outside a w:del revision",
+                    details={"part_uri": part_uri, "node_ordinal": ordinals[node]},
+                )
+            if local == "delText" and revision_depth == 0:
                 raise ContractError(
                     ErrorCode.DOCX_INVALID_PACKAGE,
                     "deleted text is outside a supported deletion revision",
@@ -419,9 +432,9 @@ def _validate_revision_markup(
         elif _suspicious_revision_local(local):
             raise _unsupported_revision(part_uri, local, ordinals[node])
         for child in node:
-            visit(child, next_property_depth, next_revision_depth)
+            visit(child, next_property_depth, next_revision_depth, next_active_revision_kind)
 
-    visit(nodes[0], 0, 0)
+    visit(nodes[0], 0, 0, None)
     for (direction, native_id), events in move_ranges.items():
         if events != [True, False]:
             raise ContractError(
@@ -509,6 +522,7 @@ class _ViewBuilder:
         self.active_bookmarks: dict[str, list[tuple[int, bool]]] = {}
         self.hidden_move_ranges: set[tuple[RevisionKind, str]] = set()
         self.revision_bookmark_link_count = 0
+        self.field_phases: list[Literal["instruction", "result"]] = []
 
     @property
     def hidden(self) -> bool:
@@ -656,15 +670,33 @@ class _ViewBuilder:
             self._append_atom(f"{_FIELD_ATOM_PREFIX}simple_end")
             return
         if namespace == W_NS and local == "fldChar":
+            field_type = _attr(node, "fldCharType")
             attributes = "\x1f".join(
                 f"{name}={value}" for name, value in sorted(node.attrib.items())
             )
             self._append_field_atom("marker", attributes)
+            if field_type == "begin":
+                self.field_phases.append("instruction")
+            elif field_type == "separate" and self.field_phases:
+                self.field_phases[-1] = "result"
+            elif field_type == "end" and self.field_phases:
+                self.field_phases.pop()
             for child in node:
                 self.walk(child)
             return
         if namespace == W_NS and local in {"instrText", "delInstrText", "fldData"}:
-            self._append_field_atom(local, node.text or "")
+            in_field_instruction = bool(
+                self.field_phases and self.field_phases[-1] == "instruction"
+            )
+            if local == "delInstrText" and not in_field_instruction:
+                # OOXML treats delInstrText outside complex-field code as
+                # ordinary deleted text, so it remains visible in reject view.
+                self._append_atom("text", node.text or "")
+            else:
+                # Inside complex-field code, Word serializes the rejected side
+                # as delInstrText even though the baseline used instrText.
+                field_kind = "instrText" if local == "delInstrText" else local
+                self._append_field_atom(field_kind, node.text or "")
             return
         if namespace == W_NS and local in _SKIPPED_SUBTREES:
             return

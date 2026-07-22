@@ -66,6 +66,7 @@ TEXT_SUFFIXES = {
     ".cls",
     ".css",
     ".csv",
+    ".cmd",
     ".htm",
     ".html",
     ".ini",

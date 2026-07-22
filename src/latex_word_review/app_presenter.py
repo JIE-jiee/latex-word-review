@@ -302,6 +302,41 @@ def _waiting_view(
                 f"ExportReport.payload.metrics.output.{metric_name} must be a non-negative integer"
             )
         compatibility_counts.append({"label": label, "count": value})
+    body_text_summary: tuple[int, int, str] | None = None
+    for index, item in enumerate(
+        _sequence(report_payload.get("feature_results"), "ExportReport.payload.feature_results")
+    ):
+        feature = _mapping(item, f"ExportReport.payload.feature_results[{index}]")
+        if feature.get("feature") != "body_text":
+            continue
+        if body_text_summary is not None:
+            raise PresenterModelError("ExportReport contains duplicate body_text feature results")
+        source_count = feature.get("source_count")
+        output_count = feature.get("output_count")
+        if (
+            isinstance(source_count, bool)
+            or not isinstance(source_count, int)
+            or source_count < 0
+            or isinstance(output_count, bool)
+            or not isinstance(output_count, int)
+            or output_count < 0
+            or output_count > source_count
+        ):
+            raise PresenterModelError(
+                "body_text feature counts must be valid non-negative integers"
+            )
+        body_text_summary = (
+            output_count,
+            source_count,
+            _string(feature.get("status"), "body_text feature status"),
+        )
+    word_paragraphs = output_metrics.get("paragraphs")
+    if word_paragraphs is not None and (
+        isinstance(word_paragraphs, bool)
+        or not isinstance(word_paragraphs, int)
+        or word_paragraphs < 0
+    ):
+        raise PresenterModelError("ExportReport output paragraphs must be a non-negative integer")
     warning_count = sum(
         1
         for index, item in enumerate(findings)
@@ -316,6 +351,25 @@ def _waiting_view(
                 "message": (
                     f"共 {warning_count} 项可恢复提示。图片完整性和 Word 结构已通过校验；"
                     "期刊专用格式或无法精确映射的内容不会被自动回填，请在发送前浏览审阅稿。"
+                ),
+            }
+        )
+    if body_text_summary is not None:
+        exact_units, source_units, mapping_status = body_text_summary
+        paragraph_context = (
+            f"审阅 Word 共 {word_paragraphs} 个段落；"
+            if isinstance(word_paragraphs, int) and not isinstance(word_paragraphs, bool)
+            else ""
+        )
+        notices.append(
+            {
+                "tone": "warning" if mapping_status != "preserved" else "info",
+                "title": "请先确认可自动回填的正文范围",
+                "message": (
+                    f"{paragraph_context}程序只为 {exact_units}/{source_units} 个可安全提取的"
+                    "普通正文单元建立了精确定位锚点。只有锚点内的普通正文修订可能自动回填；"
+                    "这个数字不是整篇论文覆盖率，公式、引用、标题、表格和其他结构内容仍需"
+                    "人工处理。"
                 ),
             }
         )
@@ -534,6 +588,19 @@ def _approval_view(
         }
         for name in _APPROVAL_FILTERS
     ]
+    notices: list[dict[str, str]] = []
+    if changes and counts["safe"] == 0:
+        notices.append(
+            {
+                "tone": "warning",
+                "title": "已识别修改，但没有可安全自动回填项",
+                "message": (
+                    f"共识别 {len(changes)} 项修改，但没有一项同时具备精确 LaTeX 源位置和"
+                    "安全普通正文证据。未精确定位、结构化或冲突项不会被强行匹配，也不会"
+                    "自动写入 LaTeX；请逐项选择不采用或转人工处理。"
+                ),
+            }
+        )
     approval_status = (
         _string(_mapping(approval.get("payload"), "ApprovalSet.payload").get("status"), "status")
         if approval is not None
@@ -566,13 +633,15 @@ def _approval_view(
         "changes": shown,
     }
     if approval is None:
-        view["notices"] = [
+        notices.append(
             {
                 "tone": "info",
                 "title": "审批尚未开始",
                 "message": "请显式恢复审批；这一步只建立本机密封账本，不会记录决定或修改 LaTeX。",
             }
-        ]
+        )
+    if notices:
+        view["notices"] = notices
     return view
 
 

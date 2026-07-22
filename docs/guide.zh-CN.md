@@ -113,7 +113,7 @@ uv run --frozen latex-word-review app
 |---|---:|---|
 | setup | **21,444,947 bytes（20.45 MiB）** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
 | portable ZIP | **33,421,203 bytes（31.87 MiB）** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
-| 安装或解压后的程序目录 | **65,752,373 bytes（62.71 MiB）**（438 个文件） | — |
+| 安装或解压后的程序目录 | **65,767,086 bytes（62.72 MiB）**（438 个文件） | — |
 
 该候选由固定的 64 位 CPython 3.12.13 冻结；源码与库仍按 Python 3.12/3.13 测试。体积会随
 版本、PyInstaller、PDFium 和依赖更新而变化。

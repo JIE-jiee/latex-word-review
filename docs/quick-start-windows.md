@@ -73,7 +73,7 @@ The final local `0.2.0b1` Windows x64 rebuild on 2026-07-20 measured:
 |---|---:|---|
 | setup executable | **21,444,947 bytes (20.45 MiB)** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
 | portable ZIP | **33,421,203 bytes (31.87 MiB)** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
-| installed/extracted application | **65,752,373 bytes (62.71 MiB)** (438 files) | — |
+| installed/extracted application | **65,767,086 bytes (62.72 MiB)** (438 files) | — |
 
 That candidate is frozen with exact 64-bit CPython 3.12.13; the source/library test range remains
 Python 3.12/3.13. Sizes vary with the application, PyInstaller, PDFium, and dependency versions. The

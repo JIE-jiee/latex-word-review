@@ -1,6 +1,9 @@
 # LaTeX Word Review
 
+[简体中文](README.md) | [English](README.en.md) | [日本語](README.ja.md)
+
 [![CI](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml/badge.svg)](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml)
+[![Double-click bootstrap](https://github.com/JIE-jiee/latex-word-review/actions/workflows/windows-source-bootstrap.yml/badge.svg)](https://github.com/JIE-jiee/latex-word-review/actions/workflows/windows-source-bootstrap.yml)
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](docs/compat/platform-support.md)
 [![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB)](pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -10,6 +13,10 @@
 LaTeX Word Review 是一个仅面向 Windows 的本机审阅助手。论文作者继续把 LaTeX 当作唯一
 权威源，导师或合作者只需在 Microsoft Word 中使用“修订”和“批注”。返回的 Word 会先拆成
 逐条修改，经过人工审批、精确 diff 预览和第二次确认后，才可能写入新的 LaTeX 工作副本。
+
+> [!IMPORTANT]
+> GitHub 项目说明现提供简体中文、English 和日本語三个版本；当前应用程序界面本身仍是
+> 简体中文。README 的语言切换不表示英文或日文应用界面已经完成。
 
 > [!NOTE]
 > 本项目源自真实的 LaTeX–Word 协作痛点，并主要通过维护者驱动的
@@ -23,12 +30,11 @@ LaTeX Word Review 是一个仅面向 Windows 的本机审阅助手。论文作�
 
 > [!WARNING]
 > 当前源码版本为 `0.2.0b1` beta 候选，密封对象仍使用 `v1alpha` 契约。项目尚未创建
-> GitHub Release，也未发布到 PyPI。Windows 安装器和 portable ZIP 已完成本地构建、静态
-> 校验与冻结程序运行验收；本轮未执行最终安装器的安装/卸载，
-> 但 lxml Windows 静态原生依赖的许可证材料与可重链接路径尚未闭环，因此
-> **目前不公开上传二进制资产**。GitHub 现阶段只提供源码、构建脚本和 CI 证据。详见
+> GitHub Release，也未发布到 PyPI。GitHub 源码 ZIP 现在提供经过校验的 Windows 双击
+> 首启入口，但它仍是源码 bootstrap，不是已签名安装包。Windows 安装器和 portable ZIP
+> 虽已完成本地候选验证，仍因 lxml Windows 静态原生依赖的许可证材料与可重链接路径尚未
+> 闭环而**不公开上传二进制资产**。详见
 > [Windows 二进制许可证审计](docs/reviews/windows-binary-license-audit-2026-07.md)。
-
 ## 四步完成一轮审阅
 
 安装版、portable 与源码方式都打开同一个本机中文界面：
@@ -55,20 +61,37 @@ flowchart LR
 
 ## 现在怎样运行
 
-### 当前维护者工作区：直接双击
+### 普通 Windows 用户：下载、解压、双击
 
-如果仓库根目录已经存在本机生成的
-`LaTeX Word Review（双击启动）.lnk`，直接双击即可；备用入口是
-`output\local-windows\Start-Latex-Word-Review.cmd`。这份工作区便携交付不需要
-Python、uv 或 Git，程序、任务数据和临时文件都留在 `output\local-windows`。
-它属于本地验收产物，受 Git 忽略，并不是 GitHub 上已经公开的二进制下载。
-维护者重建冻结候选后，使用 `scripts\deploy-local-windows.ps1` 原子更新该本地程序；脚本先
-逐项复核 `CONTENTS.sha256`，并在同目录 stage/rollback 后替换 `app`，不会改动既有
-`user-data`、启动器或根快捷方式。
+1. 从本仓库下载 [GitHub 源码 ZIP](https://github.com/JIE-jiee/latex-word-review/archive/refs/heads/main.zip)。
+2. 在资源管理器中选择“全部解压”；不要直接在 ZIP 预览窗口里运行。
+3. 双击根目录的 **`Start-Latex-Word-Review.cmd`**。
+4. 第一次保持联网并等待初始化完成；浏览器随后自动打开本机中文界面。以后双击同一文件即可，
+   已就绪环境不再下载或同步依赖，也可以离线启动。
 
-### 当前公开可用：从源码启动本机界面
+普通用户**不需要预装 Python、uv 或 Git，不需要管理员权限**。首启脚本固定下载 uv
+`0.11.16` Windows x64 官方 ZIP，先核对文件长度与硬编码 SHA-256，再由该 uv 安装固定的
+64 位 CPython `3.12.13`；程序先检查 `uv.lock` 与项目是否一致，再只安装锁文件中的生产依赖
+和 `pdf-figures` extra，不安装 pytest、mypy、PyInstaller 等开发工具。脚本不会执行
+`irm | iex`、`latest` 或自更新命令。
 
-由于公开二进制仍受许可证审计阻断，当前可复现入口是固定一个已审核源码提交：
+首启生成的私有运行时位于解压目录下的 `.lwr-runtime`。当前实测清理后约 **96 MiB**；安装
+成功会删除 uv 下载包、uv.exe 和依赖缓存。论文任务仍放在
+`%LOCALAPPDATA%\LatexWordReview`，与程序运行时分开。需要重装环境时可先关闭程序，再删除
+`.lwr-runtime` 并重新双击；这不会删除任务数据或原论文。
+
+当前没有签名安装包，Windows 可能对从互联网下载的 `.cmd` 显示安全提示。只应从本仓库
+下载并完整解压；不要从第三方获取同名启动器，也不要通过关闭系统安全功能来强行运行未知
+文件。源码 ZIP 跟随 `main` 更新，正式不可变 Release 仍待后续发布门禁完成。
+
+> [!NOTE]
+> 首次初始化只准备本程序、Python 与转换/预览依赖；它不会安装 Microsoft Word、MiKTeX、
+> TeX Live、`latexmk`、`latexdiff` 或 Pandoc。生成 Word 的基本流程可直接使用；要生成最终
+> PDF 或刷新 Word 活字段，仍需对应的 TeX 工具或 Microsoft Word。
+
+### 高级用户：固定源码提交并手动运行
+
+需要审计某个不可变提交时，可继续使用 Git、uv 和已有 Python：
 
 ```powershell
 git clone https://github.com/JIE-jiee/latex-word-review.git
@@ -76,14 +99,20 @@ Set-Location latex-word-review
 $ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
 git checkout --detach $ReviewedCommit
 if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
-uv sync --frozen --extra pdf-figures --python 3.12
-uv run --frozen latex-word-review app
+uv lock --check
+uv sync --frozen --no-default-groups --extra pdf-figures --python 3.12
+uv run --no-sync latex-word-review app
 ```
 
-把 `$ReviewedCommit` 换成实际审核过的完整 40 位 commit SHA。占位值会明确失败，避免
-不知情地跟随移动中的 `main`。此方式需要 Windows、Git、uv 和 Python 3.12/3.13；
-界面打开后不再需要手工执行审阅链的十几条命令。
+把占位值替换为实际审核过的完整 40 位 commit SHA。双击入口本身不要求 Git，也不会修改
+`pyproject.toml` 或 `uv.lock`。
 
+### 当前维护者工作区：本地冻结候选
+
+仓库根目录若已有本机生成的 `LaTeX Word Review（双击启动）.lnk`，可继续直接双击；备用
+入口是 `output\local-windows\Start-Latex-Word-Review.cmd`。这份本地冻结候选受 Git 忽略，
+不会出现在 GitHub 源码 ZIP 中，也不改变上面的公开源码 bootstrap。维护者可用
+`scripts\deploy-local-windows.ps1` 原子更新它而保留既有 `user-data`。
 ### 许可证闭环后提供：安装版与 portable
 
 | 形式 | 使用方式 | Python / Git | 当前公开状态 |
@@ -169,6 +198,19 @@ Times New Roman 西文、SimSun 中文、明确标题层级和两端对齐正文
 人工处理或不采用。已有决定与旧证据会保留，不被批量操作或新计划覆盖。计划 ready/noop 后，
 用户还要勾选确认并点击“确认并生成全部结果”。程序重新核对计划哈希、源文件哈希、UTF-8
 字节范围、重叠和安全策略，再编排 apply、verify、ledger 与 bundle；任何漂移都会停止。
+
+## 当前重要限制：识别修改不等于可自动回填
+
+复杂的真实返回 Word 可能被正常读取，修订也能完整进入审批列表，但导出时建立的 LaTeX
+精确来源映射未必覆盖这些修改所在的正文。在这种情况下，可安全自动回填的数量可能是 **0**。
+
+- 已识别但没有精确映射的修改仍会进入 ChangeSet 和账本，并转为人工处理。
+- 程序不会通过整篇模糊匹配、最近书签或同段落猜测源码位置。
+- “0 项可安全回填”表示安全边界生效，不表示修改已经应用，也不表示 Word 中没有修改。
+- 扩大复杂 LaTeX 的精确映射覆盖率仍是后续版本的重要工作。
+
+因此，当前 beta 可以帮助整理复杂论文的审阅证据和审批决定，但不能保证每一条检测到的
+Word 修改都能自动写回 LaTeX。
 
 ## 数据、恢复与退出
 
