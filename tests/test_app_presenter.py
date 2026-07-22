@@ -96,7 +96,11 @@ def test_preflight_and_waiting_views_are_renderable_and_post_bound(tmp_path: Pat
     assert waiting["exported_at"] == TIME
     assert waiting["export_status"] == "success"
     assert waiting["export_warning_count"] == 0
-    assert waiting["notices"] == []
+    notices = cast("Sequence[Mapping[str, str]]", waiting["notices"])
+    assert len(notices) == 1
+    assert notices[0]["title"] == "请先确认可自动回填的正文范围"
+    assert "不是整篇论文覆盖率" in notices[0]["message"]
+    assert "不是整篇论文覆盖率" in waiting_html
     assert waiting["title"] == "Word 审阅交接与修改稿导入"
     compatibility_counts = cast("Sequence[Mapping[str, object]]", waiting["compatibility_counts"])
     assert [item["label"] for item in compatibility_counts] == [

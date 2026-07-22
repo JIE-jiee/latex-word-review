@@ -88,6 +88,10 @@ class ArchiveAndPrivacyTests(unittest.TestCase):
         with self.assertRaises(CHECKS.ReleaseCheckError):
             CHECKS.scan_member("README.md", b"-----BEGIN PRIVATE KEY-----")
 
+    def test_cmd_launcher_is_scanned_for_secrets(self) -> None:
+        with self.assertRaises(CHECKS.ReleaseCheckError):
+            CHECKS.scan_member("Start-Latex-Word-Review.cmd", b"github_pat_" + b"a" * 24)
+
     def test_modern_provider_secret_prefixes_are_rejected(self) -> None:
         tokens = (
             b"sk-" + b"proj-" + b"a" * 24,

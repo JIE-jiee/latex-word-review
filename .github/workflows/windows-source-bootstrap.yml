@@ -1,0 +1,129 @@
+name: Windows source bootstrap
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Start-Latex-Word-Review.cmd"
+      - "scripts/bootstrap-windows.ps1"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "tests/test_windows_bootstrap.py"
+      - ".github/workflows/windows-source-bootstrap.yml"
+  pull_request:
+    paths:
+      - "Start-Latex-Word-Review.cmd"
+      - "scripts/bootstrap-windows.ps1"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "tests/test_windows_bootstrap.py"
+      - ".github/workflows/windows-source-bootstrap.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-source-archive:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Export and extract the exact GitHub source tree
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "latex-word-review-source.zip"
+          $source = Join-Path $env:RUNNER_TEMP "latex-word-review-source"
+          git archive --format=zip --output=$archive HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $source
+          if (Test-Path -LiteralPath (Join-Path $source ".git")) {
+            throw "source bootstrap smoke input must not contain .git"
+          }
+          "SOURCE_ROOT=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: First-run preparation through the double-click entry
+        shell: pwsh
+        run: |
+          $env:LATEX_WORD_REVIEW_BOOTSTRAP_PREPARE_ONLY = "1"
+          $env:LATEX_WORD_REVIEW_BOOTSTRAP_RUNTIME_ROOT = Join-Path $env:SOURCE_ROOT ".lwr-runtime"
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          & "$env:SystemRoot\System32\cmd.exe" /d /c `
+            (Join-Path $env:SOURCE_ROOT "Start-Latex-Word-Review.cmd")
+          if ($LASTEXITCODE -ne 0) { throw "first-run source bootstrap failed" }
+
+      - name: Verify exact isolated runtime
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:SOURCE_ROOT ".lwr-runtime"
+          $python = Join-Path $runtime "venv\Scripts\python.exe"
+          $app = Join-Path $runtime "venv\Scripts\latex-word-review.exe"
+          $evidencePath = Join-Path $runtime "bootstrap-evidence.json"
+          if (-not (Test-Path -LiteralPath $evidencePath)) {
+            throw "bootstrap evidence is missing"
+          }
+          $evidence = Get-Content -Raw -LiteralPath $evidencePath | ConvertFrom-Json
+          if ($evidence.uv_version -ne "0.11.16") {
+            throw "unexpected uv identity"
+          }
+          if ($evidence.bootstrap_executable_retained -ne $false -or
+              $evidence.bootstrap_archive_retained -ne $false) {
+            throw "bootstrap cleanup evidence is invalid"
+          }
+          if (Test-Path -LiteralPath (Join-Path $runtime "uv\0.11.16\uv.exe")) {
+            throw "uv bootstrap executable must not be retained"
+          }
+          if ((& $python -I -B -c "import platform;print(platform.python_version())") -ne "3.12.13") {
+            throw "unexpected Python identity"
+          }
+          if ((& $app --version) -notmatch "^latex-word-review\s+0\.2\.0b1$") {
+            throw "unexpected application identity"
+          }
+
+
+      - name: Prove repeat launch preparation is offline
+        shell: pwsh
+        run: |
+          $env:LATEX_WORD_REVIEW_BOOTSTRAP_PREPARE_ONLY = "1"
+          $env:LATEX_WORD_REVIEW_BOOTSTRAP_RUNTIME_ROOT = Join-Path $env:SOURCE_ROOT ".lwr-runtime"
+          $env:UV_OFFLINE = "1"
+          $env:HTTP_PROXY = "http://127.0.0.1:9"
+          $env:HTTPS_PROXY = "http://127.0.0.1:9"
+          & "$env:SystemRoot\System32\cmd.exe" /d /c `
+            (Join-Path $env:SOURCE_ROOT "Start-Latex-Word-Review.cmd")
+          if ($LASTEXITCODE -ne 0) { throw "offline repeat preparation failed" }
+
+      - name: Write text-only bootstrap evidence
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:SOURCE_ROOT ".lwr-runtime"
+          $evidence = Get-Content -Raw -LiteralPath (Join-Path $runtime "bootstrap-evidence.json") |
+            ConvertFrom-Json
+          $summary = [ordered]@{
+            schema = "latex-word-review/windows-source-bootstrap-ci/v1"
+            source_commit = "${{ github.sha }}"
+            source_archive_without_git = $true
+            first_run_passed = $true
+            offline_repeat_passed = $true
+            runtime_identity_sha256 = $evidence.identity_sha256
+            uv_version = $evidence.uv_version
+            uv_archive_sha256 = $evidence.uv_archive_sha256
+            python_request = $evidence.python_request
+            uv_lock_sha256 = $evidence.uv_lock_sha256
+            binaries_uploaded = $false
+          }
+          $output = Join-Path $env:RUNNER_TEMP "windows-source-bootstrap-evidence.json"
+          $summary | ConvertTo-Json | Out-File -LiteralPath $output -Encoding utf8
+
+      - name: Upload text evidence only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-source-bootstrap-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-source-bootstrap-evidence.json
+          if-no-files-found: error
+          retention-days: 14

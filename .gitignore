@@ -1,5 +1,6 @@
 .venv/
 .venv-*/
+/.lwr-runtime/
 __pycache__/
 *.py[cod]
 *.egg-info/

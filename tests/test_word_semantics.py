@@ -285,6 +285,109 @@ def test_complex_field_markers_and_instruction_are_part_of_baseline_structure(
     assert not marker_result.story_differences[0].text_changed
 
 
+def test_tracked_field_instruction_edit_preserves_reject_baseline(
+    tmp_path: Path,
+) -> None:
+    baseline = write_docx(
+        tmp_path / "baseline-field.docx",
+        document_xml=_document(
+            """<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF original </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>1</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"""
+        ),
+    )
+    returned = write_docx(
+        tmp_path / "returned-field.docx",
+        document_xml=_document(
+            """<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:del w:id="1"><w:r><w:delInstrText> REF original </w:delInstrText></w:r></w:del>
+  <w:ins w:id="2"><w:r><w:instrText> REF revised </w:instrText></w:r></w:ins>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>1</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"""
+        ),
+    )
+
+    comparison = compare_export_baseline(baseline, returned, [])
+    story = comparison.returned.story("word/document.xml")
+
+    assert comparison.drift_status == "clean"
+    assert comparison.safe_for_automatic_patch
+    assert story is not None
+    assert [span.kind for span in story.revision_spans] == ["delete", "insert"]
+
+
+def test_tracked_field_instruction_edit_still_detects_changed_reject_content(
+    tmp_path: Path,
+) -> None:
+    baseline = write_docx(
+        tmp_path / "baseline-field.docx",
+        document_xml=_document(
+            """<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF original </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>1</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"""
+        ),
+    )
+    returned = write_docx(
+        tmp_path / "returned-field.docx",
+        document_xml=_document(
+            """<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:del w:id="1"><w:r><w:delInstrText> REF tampered </w:delInstrText></w:r></w:del>
+  <w:ins w:id="2"><w:r><w:instrText> REF revised </w:instrText></w:r></w:ins>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>1</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"""
+        ),
+    )
+
+    comparison = compare_export_baseline(baseline, returned, [])
+
+    assert comparison.drift_status != "clean"
+    assert not comparison.safe_for_automatic_patch
+    assert comparison.story_differences[0].structure_changed
+    assert not comparison.story_differences[0].text_changed
+
+
+def test_deleted_field_code_outside_complex_field_is_deleted_text(tmp_path: Path) -> None:
+    baseline = write_docx(
+        tmp_path / "baseline-text.docx",
+        document_xml=_document("<w:p><w:r><w:t>ordinary</w:t></w:r></w:p>"),
+    )
+    returned = write_docx(
+        tmp_path / "returned-text.docx",
+        document_xml=_document(
+            """<w:p><w:del w:id="1">
+  <w:r><w:delInstrText>ordinary</w:delInstrText></w:r>
+</w:del></w:p>"""
+        ),
+    )
+
+    comparison = compare_export_baseline(baseline, returned, [])
+
+    assert comparison.drift_status == "clean"
+    assert comparison.safe_for_automatic_patch
+
+
+def test_deleted_field_code_in_insert_revision_fails_closed(tmp_path: Path) -> None:
+    path = write_docx(
+        tmp_path / "invalid-field-revision.docx",
+        document_xml=_document(
+            """<w:p><w:ins w:id="1">
+  <w:r><w:delInstrText> REF invalid </w:delInstrText></w:r>
+</w:ins></w:p>"""
+        ),
+    )
+
+    with pytest.raises(ContractError) as exc_info:
+        project_word_semantics(path)
+
+    assert exc_info.value.code is ErrorCode.DOCX_INVALID_PACKAGE
+
+
 def test_committed_review_fixture_is_reject_equivalent_to_its_export_baseline() -> None:
     fixture_root = Path(__file__).parent / "fixtures" / "e0-minimal-paper"
     baseline = fixture_root / "base" / "review-base.docx"

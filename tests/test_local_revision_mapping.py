@@ -49,6 +49,22 @@ def _inserted(native_id: int, text: str) -> str:
     )
 
 
+def _deleted_instruction(native_id: int, text: str) -> str:
+    return (
+        f'<w:del w:id="{native_id}" w:author="Synthetic Reviewer" '
+        f'w:date="2026-07-16T06:30:00Z"><w:r><w:delInstrText>'
+        f"{text}</w:delInstrText></w:r></w:del>"
+    )
+
+
+def _inserted_instruction(native_id: int, text: str) -> str:
+    return (
+        f'<w:ins w:id="{native_id}" w:author="Synthetic Reviewer" '
+        f'w:date="2026-07-16T06:30:00Z"><w:r><w:instrText>'
+        f"{text}</w:instrText></w:r></w:ins>"
+    )
+
+
 def _field_marker(marker: str) -> str:
     return f'<w:r><w:fldChar w:fldCharType="{marker}"/></w:r>'
 
@@ -270,6 +286,36 @@ def test_revision_inside_complex_field_sibling_range_is_manual(tmp_path: Path) -
     assert change["safety_class"] == "manual_high_risk"
     assert raw_event["evidence"]["content_class"] == "structured"
     assert "complexField" in raw_event["evidence"]["structural_context"]
+
+
+def test_tracked_field_instruction_replacement_is_manual_high_risk(
+    tmp_path: Path,
+) -> None:
+    baseline_inner = _complex_field(_run("1"), instruction=" REF original ")
+    returned_inner = (
+        _field_marker("begin")
+        + _deleted_instruction(31, " REF original ")
+        + _inserted_instruction(32, " REF revised ")
+        + _field_marker("separate")
+        + _run("1")
+        + _field_marker("end")
+    )
+
+    document = _changeset(
+        tmp_path,
+        baseline_text="1",
+        baseline_inner=baseline_inner,
+        returned_inner=returned_inner,
+    )
+
+    changes = document["payload"]["changes"]  # type: ignore[index]
+    raw_events = document["payload"]["raw_events"]  # type: ignore[index]
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "replacement"
+    assert changes[0]["resolution"]["status"] == "unsupported"
+    assert changes[0]["safety_class"] == "manual_high_risk"
+    assert {event["evidence"]["content_class"] for event in raw_events} == {"structured"}
+    assert all("complexField" in event["evidence"]["structural_context"] for event in raw_events)
 
 
 def test_nested_complex_field_revision_is_manual(tmp_path: Path) -> None:
