@@ -324,6 +324,7 @@ def _handle_export(args: argparse.Namespace) -> int:
             source_manifest_sha256=compute_payload_sha256(source_manifest),
             review_ir_sha256=compute_payload_sha256(review_ir),
             generated_at=generated_at,
+            export_report_payload=outcome.report.as_payload(),
         )
         write_new_json(args.objects_dir / "review-ir.json", review_ir, contract=True)
         write_new_json(args.objects_dir / "source-map.json", source_map, contract=True)

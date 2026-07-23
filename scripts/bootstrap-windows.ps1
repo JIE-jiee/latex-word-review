@@ -30,6 +30,29 @@ function Write-Step {
     Write-Host "[LaTeX Word Review] $Message"
 }
 
+function Convert-FromUtf8Base64 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
+}
+
+function Write-BilingualStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Code,
+        [Parameter(Mandatory = $true)][string]$ChineseBase64,
+        [Parameter(Mandatory = $true)][string]$English,
+        [switch]$IsError
+    )
+    $chinese = Convert-FromUtf8Base64 -Value $ChineseBase64
+    if ($IsError) {
+        Write-Host "[$Code] $chinese" -ForegroundColor Red
+        Write-Host "[$Code] $English" -ForegroundColor Red
+    }
+    else {
+        Write-Host "[$Code] $chinese"
+        Write-Host "[$Code] $English"
+    }
+}
+
 function Get-FullPath {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -222,7 +245,10 @@ function Get-VerifiedUvArchive {
     }
     $temporary = Join-Path $Downloads ("uv-download-" + [Guid]::NewGuid().ToString("N") + ".tmp")
     try {
-        Write-Step "Downloading the pinned uv $UvVersion bootstrap tool..."
+        Write-BilingualStatus `
+            -Code "I_BOOTSTRAP_UV_DOWNLOAD" `
+            -ChineseBase64 "5q2j5Zyo5LiL6L295bm25qCh6aqM5ZCv5Yqo5bel5YW344CC" `
+            -English "Downloading and verifying the bootstrap tool."
         Invoke-VerifiedDownload `
             -Uri ([Uri]$UvArchiveUri) `
             -Destination $temporary `
@@ -392,7 +418,10 @@ function Start-ReviewApplication {
         $arguments += "--port"
         $arguments += [string]$SelectedPort
     }
-    Write-Step "Opening the local review interface..."
+    Write-BilingualStatus `
+        -Code "I_BOOTSTRAP_APP_START" `
+        -ChineseBase64 "5q2j5Zyo5omT5byA5pys5py65a6h6ZiF6aG16Z2i44CC" `
+        -English "Opening the local review page."
     $process = Start-Process `
         -FilePath $ApplicationExe `
         -ArgumentList $arguments `
@@ -410,10 +439,14 @@ function Start-ReviewApplication {
         if ([string]::IsNullOrWhiteSpace($details)) { $details = "See $stderrLog" }
         throw "the application exited during startup. $details"
     }
-    Write-Step "The application is running. This window can now close."
+    Write-BilingualStatus `
+        -Code "I_BOOTSTRAP_APP_READY" `
+        -ChineseBase64 "5bqU55So5bey5ZCv5Yqo77yM5Y+v5Lul5YWz6Zet5q2k56qX5Y+j44CC" `
+        -English "The application is running. You can close this window."
     Write-Step "Startup logs: $LogDirectory"
 }
 
+$FailureCode = "E_BOOTSTRAP_PRECHECK"
 try {
     if ($env:OS -ne "Windows_NT") { throw "Windows is the only supported operating system." }
     if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) {
@@ -540,14 +573,20 @@ try {
         }
 
         if (-not $ready) {
+            $FailureCode = "E_BOOTSTRAP_UV_SETUP"
             $uvExe = Get-VerifiedUv -Runtime $RuntimeRoot -Downloads $downloads -UvDirectory $uvDirectory
-            Write-Step "First-run setup is preparing a private Python $PythonVersion runtime."
+            $FailureCode = "E_BOOTSTRAP_PYTHON_SETUP"
+            Write-BilingualStatus `
+                -Code "I_BOOTSTRAP_PYTHON_SETUP" `
+                -ChineseBase64 "5q2j5Zyo5YeG5aSH5LiT55SoIFB5dGhvbiDov5DooYznjq/looPjgII=" `
+                -English "Preparing a private Python $PythonVersion runtime."
             Invoke-Uv -UvExe $uvExe -Label "managed Python installation" -Arguments @(
                 "python", "install", $PythonRequest,
                 "--managed-python", "--no-bin", "--no-registry",
                 "--install-dir", $pythonDirectory,
                 "--cache-dir", $cacheDirectory
             )
+            $FailureCode = "E_BOOTSTRAP_DEPENDENCY_SETUP"
             $lockBefore = Get-Sha256 -Path (Join-Path $projectRoot "uv.lock")
             Invoke-Uv -UvExe $uvExe -Label "lock-file validation" -Arguments @(
                 "lock", "--check",
@@ -558,7 +597,10 @@ try {
             if ((Get-Sha256 -Path (Join-Path $projectRoot "uv.lock")) -ne $lockBefore) {
                 throw "lock-file validation changed uv.lock"
             }
-            Write-Step "Installing the locked application dependencies..."
+            Write-BilingualStatus `
+                -Code "I_BOOTSTRAP_DEPENDENCY_SETUP" `
+                -ChineseBase64 "5q2j5Zyo5a6J6KOF5bey6ZSB5a6a55qE5bqU55So5L6d6LWW44CC" `
+                -English "Installing the locked application dependencies."
             Invoke-Uv -UvExe $uvExe -Label "locked dependency installation" -Arguments @(
                 "sync", "--frozen",
                 "--no-default-groups",
@@ -611,16 +653,26 @@ try {
                 Remove-OwnedFile -Root $RuntimeRoot -Path $evidencePath -Label "old bootstrap evidence"
             }
             [IO.File]::Move($evidenceTemporary, $evidencePath)
-            Write-Step "First-run setup completed. Later starts use the local prepared runtime."
+            Write-BilingualStatus `
+                -Code "I_BOOTSTRAP_FIRST_RUN_READY" `
+                -ChineseBase64 "6aaW5qyh5YeG5aSH5bey5a6M5oiQ77yM5Lul5ZCO5ZCv5Yqo5Lya5pu05b+r44CC" `
+                -English "First-run setup is complete. Later starts will be faster."
         }
         else {
-            Write-Step "Prepared runtime verified; no download or dependency sync is needed."
+            Write-BilingualStatus `
+                -Code "I_BOOTSTRAP_RUNTIME_REUSED" `
+                -ChineseBase64 "5bey6aqM6K+B5YeG5aSH5aW955qE6L+Q6KGM546v5aKD77yM5peg6ZyA6YeN5aSN5LiL6L2944CC" `
+                -English "Prepared runtime verified. No download is needed."
         }
 
         if ($PrepareOnly) {
-            Write-Step "Preparation check completed successfully."
+            Write-BilingualStatus `
+                -Code "I_BOOTSTRAP_PREPARE_READY" `
+                -ChineseBase64 "5YeG5aSH5qOA5p+l5bey5a6M5oiQ44CC" `
+                -English "Preparation check completed successfully."
         }
         else {
+            $FailureCode = "E_BOOTSTRAP_APP_START"
             Start-ReviewApplication `
                 -ApplicationExe $applicationExe `
                 -ProjectRoot $projectRoot `
@@ -635,9 +687,17 @@ try {
     }
 }
 catch {
+    $details = $_.Exception.Message
     Write-Host ""
-    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "The original LaTeX and Word files were not modified by the launcher."
-    Write-Host "If the download was interrupted, check the network and double-click again."
+    Write-BilingualStatus `
+        -Code $FailureCode `
+        -ChineseBase64 "5ZCv5Yqo5aSx6LSl44CC5Y6f5aeLIExhVGVYIOWSjCBXb3JkIOaWh+S7tuayoeacieiiq+S/ruaUueOAgg==" `
+        -English "Startup failed. The original LaTeX and Word files were not changed." `
+        -IsError
+    Write-Host "[DETAIL] $details" -ForegroundColor Red
+    Write-BilingualStatus `
+        -Code "I_BOOTSTRAP_RETRY" `
+        -ChineseBase64 "6K+35p+l55yL5LiK5pa56K+m5oOF44CC6Iul5LiL6L295Lit5pat77yM6K+35qOA5p+l572R57uc5ZCO6YeN6K+V44CC" `
+        -English "Read the detail above. If setup was interrupted, check the network and retry."
     exit 1
 }

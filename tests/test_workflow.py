@@ -239,6 +239,46 @@ def test_status_fails_closed_on_export_hash_drift(tmp_path: Path) -> None:
         review.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
+@pytest.mark.parametrize(
+    "changed",
+    ["body_text", "coverage", "status", "findings", "math", "validation", "artifact"],
+)
+def test_status_rejects_single_resealed_report_semantic_wash(
+    tmp_path: Path,
+    changed: str,
+) -> None:
+    _origin, run = _export(tmp_path)
+    report_path = run / "export/objects/export-report.json"
+
+    def mutate(payload: dict[str, Any]) -> None:
+        feature_results = cast("list[dict[str, Any]]", payload["feature_results"])
+        if changed == "body_text":
+            body = next(item for item in feature_results if item["feature"] == "body_text")
+            body["status"] = "preserved"
+        elif changed == "coverage":
+            body = next(item for item in feature_results if item["feature"] == "body_text")
+            body["output_count"] = cast("int", body["output_count"]) - 1
+        elif changed == "status":
+            payload["status"] = "success"
+        elif changed == "findings":
+            findings = cast("list[dict[str, Any]]", payload["findings"])
+            payload["findings"] = findings[:-1]
+        elif changed == "math":
+            math = next(item for item in feature_results if item["feature"] == "math")
+            math["status"] = "degraded"
+        elif changed == "validation":
+            validation = cast("dict[str, str]", payload["validation"])
+            validation["openability"] = "fail"
+        else:
+            artifact = cast("dict[str, Any]", payload["review_docx"])
+            artifact["size_bytes"] = cast("int", artifact["size_bytes"]) + 1
+
+    _rewrite_sealed_contract(report_path, mutate)
+
+    with pytest.raises(ContractError, match="SourceMap ExportReport commitment differs"):
+        workflow_status(run)
+
+
 def test_status_fails_closed_on_image_overlay_manifest_drift(tmp_path: Path) -> None:
     _origin, run = _export(tmp_path)
     manifest = run / "export/review.docx.image-overlay/image-overlay-manifest.json"

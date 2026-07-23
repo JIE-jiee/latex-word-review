@@ -323,7 +323,7 @@ def test_unknown_change_and_unknown_decision_fail_closed(changeset: dict[str, An
     assert unknown_decision.value.code is ErrorCode.SCHEMA_UNKNOWN_SECURITY_FIELD
 
 
-@pytest.mark.parametrize("operation", ["accept_all_safe", "reject_selected", "mark_manual"])
+@pytest.mark.parametrize("operation", ["accept_all_safe", "reject_selected"])
 def test_bulk_operations_reject_every_high_risk_change(
     changeset: dict[str, Any], operation: str
 ) -> None:
@@ -336,6 +336,58 @@ def test_bulk_operations_reject_every_high_risk_change(
             decided_at=TIME_1,
         )
     assert rejected.value.code is ErrorCode.PATCH_UNSAFE_KIND
+
+
+def test_bulk_mark_manual_can_reduce_authority_for_high_risk_changes(
+    changeset: dict[str, Any],
+) -> None:
+    draft = _draft(changeset)
+    high_risk_id = cast("str", _high_risk_change(changeset)["change_id"])
+
+    marked = record_bulk_decision(
+        changeset,
+        draft,
+        operation="mark_manual",
+        change_ids=[high_risk_id],
+        reason="cannot be mapped safely",
+        decided_at=TIME_1,
+        generated_at=TIME_1,
+    )
+
+    decision = marked["payload"]["decisions"][0]
+    assert decision["change_id"] == high_risk_id
+    assert decision["decision"] == "manual"
+    assert marked["payload"]["audit"]["bulk_operations"] == [
+        {"operation": "mark_manual", "change_ids": [high_risk_id], "decided_at": TIME_1}
+    ]
+
+
+def test_mark_manual_without_ids_selects_only_unsafe_undecided_changes(
+    changeset: dict[str, Any],
+) -> None:
+    marked = record_bulk_decision(
+        changeset,
+        _draft(changeset),
+        operation="mark_manual",
+        reason="not safe for automatic writeback",
+        decided_at=TIME_1,
+        generated_at=TIME_1,
+    )
+
+    decisions = marked["payload"]["decisions"]
+    expected_ids = [
+        change["change_id"]
+        for change in _changes(changeset)
+        if not (
+            change["safety_class"] == "plain_text_candidate"
+            and change["resolution"]["status"] == "exact"
+        )
+    ]
+    assert [item["change_id"] for item in decisions] == expected_ids
+    assert [item["decision"] for item in decisions] == ["manual"] * len(expected_ids)
+    assert marked["payload"]["decision_summary"]["pending"] == (
+        len(_changes(changeset)) - len(expected_ids)
+    )
 
 
 def test_accept_all_safe_is_audited_and_idempotent(changeset: dict[str, Any]) -> None:
@@ -362,6 +414,85 @@ def test_accept_all_safe_is_audited_and_idempotent(changeset: dict[str, Any]) ->
         generated_at=TIME_2,
     )
     assert retry == bulk
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_decision"),
+    [
+        ("accept_all_safe", "accepted"),
+        ("reject_selected", "rejected"),
+        ("mark_manual", "manual"),
+    ],
+)
+def test_explicit_bulk_ids_only_process_undecided_changes(
+    changeset: dict[str, Any],
+    operation: str,
+    expected_decision: str,
+) -> None:
+    safe_id = cast("str", _safe_change(changeset)["change_id"])
+    decided_id = cast("str", _high_risk_change(changeset)["change_id"])
+    prior = record_decision(
+        changeset,
+        _draft(changeset),
+        change_id=decided_id,
+        decision="rejected",
+        reason="preserve this existing decision",
+        decided_at=TIME_1,
+        generated_at=TIME_1,
+    )
+    prior_by_id = {
+        item["change_id"]: item
+        for item in cast("list[dict[str, Any]]", prior["payload"]["decisions"])
+    }
+
+    updated = record_bulk_decision(
+        changeset,
+        prior,
+        operation=cast("Any", operation),
+        change_ids=[decided_id, safe_id],
+        reason="bulk only the undecided item",
+        decided_at=TIME_2,
+        generated_at=TIME_2,
+    )
+    updated_by_id = {
+        item["change_id"]: item
+        for item in cast("list[dict[str, Any]]", updated["payload"]["decisions"])
+    }
+
+    assert updated_by_id[decided_id] == prior_by_id[decided_id]
+    assert updated_by_id[safe_id]["decision"] == expected_decision
+    assert updated["payload"]["audit"]["bulk_operations"] == [
+        {"operation": operation, "change_ids": [safe_id], "decided_at": TIME_2}
+    ]
+
+
+@pytest.mark.parametrize("operation", ["accept_all_safe", "reject_selected", "mark_manual"])
+def test_explicit_bulk_with_only_decided_ids_is_idempotent(
+    changeset: dict[str, Any],
+    operation: str,
+) -> None:
+    safe_id = cast("str", _safe_change(changeset)["change_id"])
+    decided = record_decision(
+        changeset,
+        _draft(changeset),
+        change_id=safe_id,
+        decision="accepted_with_edit",
+        final_text="carefully edited text",
+        decided_at=TIME_1,
+        generated_at=TIME_1,
+    )
+
+    retried = record_bulk_decision(
+        changeset,
+        decided,
+        operation=cast("Any", operation),
+        change_ids=[safe_id],
+        reason="must not replace the prior decision",
+        decided_at=TIME_2,
+        generated_at=TIME_2,
+    )
+
+    assert retried == decided
 
 
 @pytest.mark.parametrize("decision", ["rejected", "manual", "accepted_with_edit"])

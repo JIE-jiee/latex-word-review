@@ -667,18 +667,20 @@ def test_post_routes_previously_unreached(monkeypatch: pytest.MonkeyPatch, tmp_p
         monkeypatch.setattr(st, "open_review_docx", lambda _k: calls.append("open"))
         monkeypatch.setattr(st, "choose_returned_word", lambda _k: None)
         monkeypatch.setattr(st, "accept_all_safe", lambda _k: calls.append("accept"))
-        monkeypatch.setattr(st, "open_results_folder", lambda _k: calls.append("folder"))
+        monkeypatch.setattr(st, "open_revised_source", lambda _k: calls.append("revised"))
+        monkeypatch.setattr(st, "open_delivery_folder", lambda _k: calls.append("delivery"))
         monkeypatch.setattr(st, "submit_retry", submit_retry)
         for path in [
             "/session/export-existing",
             "/session/open-review-docx",
             "/session/receive",
             "/approval/accept-safe",
-            "/result/open-folder",
+            "/result/open-revised",
+            "/result/open-delivery",
             "/result/retry",
         ]:
             assert _post_form(app, path, {"csrf": csrf, "session": key}, cookie=cookie)[0] == 303
-        assert calls == ["export", "open", "accept", "folder", "retry"]
+        assert calls == ["export", "open", "accept", "revised", "delivery", "retry"]
         assert (
             _post_form(
                 app,

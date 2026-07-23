@@ -67,6 +67,7 @@ _SAFETY_STATES: Final = frozenset({"safe", "manual", "conflict"})
 _DECISIONS: Final = frozenset(
     {"pending", "accepted", "accepted_with_edit", "rejected", "manual", "conflict"}
 )
+_APPROVAL_FILTERS: Final = frozenset({"all", "pending", "safe", "manual", "conflict"})
 _RESULT_STATES: Final = frozenset({"complete", "partial"})
 _FIELD_NAME_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}")
 _IMAGE_ISSUE_SUMMARY_RE: Final = re.compile(r"[1-9][0-9]{0,3}处图片写法当前无法处理")
@@ -633,6 +634,46 @@ def _render_filters(view: Mapping[str, object]) -> str:
     return '<nav class="filters" aria-label="筛选修改"><ul>' + "".join(items) + "</ul></nav>"
 
 
+def _render_pagination(view: Mapping[str, object]) -> str:
+    pagination = _as_mapping(view.get("pagination", {}), "pagination")
+    page = _integer(pagination, "page", default=1, minimum=1)
+    pages = _integer(pagination, "pages", default=1, minimum=1)
+    total = _integer(pagination, "total", default=0)
+    start = _integer(pagination, "start", default=0)
+    end = _integer(pagination, "end", default=0)
+    if page > pages:
+        raise ViewModelError("pagination page cannot exceed total pages")
+    if total == 0:
+        if start != 0 or end != 0:
+            raise ViewModelError("empty pagination must use a zero item range")
+        range_label = "当前筛选下共 0 项"
+    else:
+        if not (1 <= start <= end <= total):
+            raise ViewModelError("pagination item range is invalid")
+        range_label = f"显示第 {start}–{end} 项，共 {total} 项"
+
+    items: list[str] = []
+    previous = pagination.get("previous_href")
+    if previous is not None:
+        previous_href = _safe_local_url(previous, "pagination.previous_href")
+        items.append(
+            f'<li><a class="filter-link" href="{_escape(previous_href)}">← 上一页</a></li>'
+        )
+    items.append(
+        '<li><span class="filter-link" aria-current="page">'
+        f"第 {_escape(page)} / {_escape(pages)} 页 · {_escape(range_label)}</span></li>"
+    )
+    following = pagination.get("next_href")
+    if following is not None:
+        next_href = _safe_local_url(following, "pagination.next_href")
+        items.append(f'<li><a class="filter-link" href="{_escape(next_href)}">下一页 →</a></li>')
+    return (
+        '<nav class="filters pagination" aria-label="修改列表分页"><ul>'
+        + "".join(items)
+        + "</ul></nav>"
+    )
+
+
 def _render_change_card(
     card: Mapping[str, object],
     *,
@@ -640,6 +681,8 @@ def _render_change_card(
     action: str,
     common_fields: Mapping[str, object],
     read_only: bool,
+    return_filter: str,
+    return_page: int,
 ) -> str:
     change_id = _text(card, "change_id")
     kind_label = _text(card, "kind_label")
@@ -668,7 +711,14 @@ def _render_change_card(
     decision_form = ""
     if not read_only:
         fields_model = dict(common_fields)
-        hidden = _hidden_fields(fields_model, extra=(("change_id", change_id),))
+        hidden = _hidden_fields(
+            fields_model,
+            extra=(
+                ("change_id", change_id),
+                ("return_filter", return_filter),
+                ("return_page", return_page),
+            ),
+        )
         decision_form = (
             f'<form class="decision-form" method="post" action="{_escape(action)}">'
             f"{hidden}"
@@ -726,6 +776,12 @@ def _render_approval(view: Mapping[str, object]) -> str:
     if decided > total:
         raise ViewModelError("decided cannot exceed total")
     safe_count = _integer(view, "safe_pending_count", default=0)
+    manual_count = _integer(view, "manual_pending_count", default=0)
+    selected_filter = _choice(view, "selected_filter", _APPROVAL_FILTERS, default="all")
+    selected_page = _integer(view, "selected_page", default=1, minimum=1)
+    page_start = _integer(view, "page_start", default=1)
+    if cards and page_start < 1:
+        raise ViewModelError("non-empty approval page must start at item 1 or later")
     read_only = _boolean(view, "read_only", default=False)
     start_required = _boolean(view, "start_required", default=False)
     if start_required and not read_only:
@@ -735,6 +791,7 @@ def _render_approval(view: Mapping[str, object]) -> str:
         raise ViewModelError("can_finalize requires every change to be decided")
     decision_action = _local_url(view, "decision_action", default="/approval/decision")
     common_fields = {"form_fields": _as_mapping(view.get("form_fields", {}), "form_fields")}
+    pagination_html = _render_pagination(view)
     rendered_cards = "".join(
         _render_change_card(
             card,
@@ -742,15 +799,17 @@ def _render_approval(view: Mapping[str, object]) -> str:
             action=decision_action,
             common_fields=common_fields,
             read_only=read_only,
+            return_filter=selected_filter,
+            return_page=selected_page,
         )
-        for index, card in enumerate(cards, start=1)
+        for index, card in enumerate(cards, start=page_start if page_start else 1)
     )
     if not rendered_cards:
         rendered_cards = '<div class="empty-state"><p>当前筛选下没有修改。</p></div>'
-    bulk_form = ""
+    bulk_forms: list[str] = []
     if safe_count and not read_only:
         bulk_action = _local_url(view, "bulk_action", default="/approval/accept-safe")
-        bulk_form = (
+        bulk_forms.append(
             '<section class="bulk-card" aria-labelledby="bulk-title"><div>'
             '<h2 id="bulk-title">批量处理低风险正文</h2>'
             f"<p>仅采用 {_escape(safe_count)} 项精确映射的普通文字修改；"
@@ -758,6 +817,17 @@ def _render_approval(view: Mapping[str, object]) -> str:
             f'<form method="post" action="{_escape(bulk_action)}">{_hidden_fields(view)}'
             '<button class="button button--secondary" type="submit">'
             f"采用全部安全正文修改（{_escape(safe_count)} 项）</button></form></section>"
+        )
+    if manual_count and not read_only:
+        manual_action = _local_url(view, "manual_bulk_action", default="/approval/mark-manual")
+        bulk_forms.append(
+            '<section class="bulk-card" aria-labelledby="manual-bulk-title"><div>'
+            '<h2 id="manual-bulk-title">批量归入人工处理</h2>'
+            f"<p>将剩余 {_escape(manual_count)} 项不可安全自动回填的修改标为“留待人工”；"
+            "这些内容不会写入 LaTeX，完成审批前仍可逐项更改决定。</p></div>"
+            f'<form method="post" action="{_escape(manual_action)}">{_hidden_fields(view)}'
+            '<button class="button button--secondary" type="submit">'
+            f"将全部不可自动回填项标为人工（{_escape(manual_count)} 项）</button></form></section>"
         )
     finalize = ""
     if can_finalize and not read_only:
@@ -799,8 +869,9 @@ def _render_approval(view: Mapping[str, object]) -> str:
         f"<p>已决定 {_escape(decided)} / {_escape(total)} 项</p></div>"
         f'<progress value="{_escape(decided)}" max="{_escape(progress_max)}">'
         f"{_escape(decided)}/{_escape(total)}</progress></section>"
-        f"{readonly_notice}{start_control}{_render_filters(view)}{bulk_form}"
-        f'<section class="change-list" aria-label="修改列表">{rendered_cards}</section>{finalize}'
+        f"{readonly_notice}{start_control}{_render_filters(view)}{''.join(bulk_forms)}"
+        f'{pagination_html}<section id="approval-change-list" class="change-list" '
+        f'aria-label="修改列表">{rendered_cards}</section>{pagination_html}{finalize}'
     )
 
 
@@ -906,7 +977,8 @@ def _render_result(view: Mapping[str, object]) -> str:
                 if artifact.get("href") is not None:
                     raise ViewModelError("folder-only artifact cannot also have an href")
                 action = (
-                    '<span class="artifact-card__missing">请使用下方“打开结果文件夹”查看</span>'
+                    '<span class="artifact-card__missing">'
+                    "请使用下方“打开修订后的 LaTeX 文件夹”查看</span>"
                 )
             else:
                 href = _safe_local_url(artifact.get("href"), "artifacts.href")
@@ -933,7 +1005,23 @@ def _render_result(view: Mapping[str, object]) -> str:
             + "".join(f"<li>{_escape(item)}</li>" for item in warnings)
             + "</ul></section>"
         )
-    open_folder_action = _local_url(view, "open_folder_action", default="/result/open-folder")
+    open_revised_action = _local_url(view, "open_revised_action", default="/result/open-revised")
+    open_delivery_action = _local_url(view, "open_delivery_action", default="/result/open-delivery")
+    revised_source_available = _boolean(view, "revised_source_available", default=False)
+    delivery_available = _boolean(view, "delivery_available", default=False)
+    open_actions = ""
+    if revised_source_available:
+        open_actions += (
+            f'<form method="post" action="{_escape(open_revised_action)}">'
+            f'{_hidden_fields(view)}<button class="button button--primary" type="submit">'
+            "打开修订后的 LaTeX 文件夹</button></form>"
+        )
+    if delivery_available:
+        open_actions += (
+            f'<form method="post" action="{_escape(open_delivery_action)}">'
+            f'{_hidden_fields(view)}<button class="button button--secondary" type="submit">'
+            "打开 PDF 与账本交付文件夹</button></form>"
+        )
     retry = ""
     can_retry = _boolean(view, "can_retry", default=status == "partial")
     if status == "partial" and can_retry:
@@ -973,8 +1061,7 @@ def _render_result(view: Mapping[str, object]) -> str:
         '<section aria-labelledby="artifacts-title"><h2 id="artifacts-title">交付结果</h2>'
         f"{artifact_content}</section>"
         '<div class="actions">'
-        f'<form method="post" action="{_escape(open_folder_action)}">{_hidden_fields(view)}'
-        '<button class="button button--primary" type="submit">打开结果文件夹</button></form>'
+        f"{open_actions}"
         f"{retry}"
         f'<form method="post" action="{_escape(new_action)}">{_hidden_fields(new_fields)}'
         '<button class="button button--secondary" type="submit">新建审阅</button></form>'

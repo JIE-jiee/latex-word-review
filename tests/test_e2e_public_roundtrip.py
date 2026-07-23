@@ -289,19 +289,25 @@ def test_public_roundtrip_produces_clean_marked_and_ledger_outputs(
         source_manifest_sha256=source_sha,
         review_ir_sha256=compute_payload_sha256(review_ir),
         generated_at=TIME,
+        export_report_payload=outcome.report.as_payload(),
     )
     export_report = build_export_report_document(outcome, run_id=RUN_ID, generated_at=TIME)
-    exact_mapping = next(
-        item
-        for item in cast("list[dict[str, Any]]", source_map["payload"]["mappings"])
-        if item["status"] == "exact"
-    )
-    location = cast("dict[str, Any]", exact_mapping["source_location"])
-    source_file = snapshot / cast("str", location["path"])
-    source_bytes = source_file.read_bytes()
-    start, end = cast("int", location["start_byte"]), cast("int", location["end_byte"])
-    before = source_bytes[start:end].decode("utf-8")
-    assert " is " in before
+    exact_mapping: dict[str, Any] | None = None
+    before = ""
+    for candidate in cast("list[dict[str, Any]]", source_map["payload"]["mappings"]):
+        if candidate["status"] != "exact":
+            continue
+        location = cast("dict[str, Any]", candidate["source_location"])
+        source_file = snapshot / cast("str", location["path"])
+        source_bytes = source_file.read_bytes()
+        start = cast("int", location["start_byte"])
+        end = cast("int", location["end_byte"])
+        candidate_text = source_bytes[start:end].decode("utf-8")
+        if " is " in candidate_text:
+            exact_mapping = candidate
+            before = candidate_text
+            break
+    assert exact_mapping is not None
     after = before.replace(" is ", " is carefully ", 1)
     bookmark_name = cast("str", cast("dict[str, Any]", exact_mapping["docx_anchor"])["name"])
 

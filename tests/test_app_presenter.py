@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 
+import latex_word_review.app_presenter as app_presenter_module
 from latex_word_review.app_presenter import (
     PresenterModelError,
     _is_bulk_safe,
@@ -94,12 +95,16 @@ def test_preflight_and_waiting_views_are_renderable_and_post_bound(tmp_path: Pat
     assert waiting["page"] == "waiting_word"
     assert waiting["review_docx_name"] == "review.docx"
     assert waiting["exported_at"] == TIME
-    assert waiting["export_status"] == "success"
-    assert waiting["export_warning_count"] == 0
+    assert waiting["export_status"] == "partial"
+    assert cast("int", waiting["export_warning_count"]) > 0
     notices = cast("Sequence[Mapping[str, str]]", waiting["notices"])
-    assert len(notices) == 1
-    assert notices[0]["title"] == "请先确认可自动回填的正文范围"
-    assert "不是整篇论文覆盖率" in notices[0]["message"]
+    assert [notice["title"] for notice in notices] == [
+        "审阅稿已生成，但有转换提示",
+        "请先确认可自动回填的正文范围",
+    ]
+    assert "可恢复提示" in notices[0]["message"]
+    assert "不是整篇论文覆盖率" in notices[1]["message"]
+    assert "审阅稿已生成，但有转换提示" in waiting_html
     assert "不是整篇论文覆盖率" in waiting_html
     assert waiting["title"] == "Word 审阅交接与修改稿导入"
     compatibility_counts = cast("Sequence[Mapping[str, object]]", waiting["compatibility_counts"])
@@ -219,6 +224,77 @@ def test_approval_cards_and_bulk_count_match_the_core_policy(tmp_path: Path) -> 
     } <= cards[0].keys()
     assert '<details class="technical"><summary>技术详情</summary>' in html
     assert "公式、引用、结构、移动和冲突项不会包含在内" in html
+
+
+def test_approval_presenter_pages_large_change_sets_without_rendering_every_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _review_session(tmp_path)
+    changeset = read_contract_file(
+        session.run_root / "receive/changeset.json",
+        expected_schema="ChangeSet",
+    )
+    payload = cast("dict[str, Any]", changeset["payload"])
+    template = copy.deepcopy(cast("list[dict[str, Any]]", payload["changes"])[0])
+    changes: list[dict[str, Any]] = []
+    for index in range(61):
+        change = copy.deepcopy(template)
+        change["change_id"] = f"chg_{index:03d}"
+        changes.append(change)
+    payload["changes"] = changes
+
+    def contract_artifact(
+        run_root: Path,
+        status: Mapping[str, Any],
+        key: str,
+        schema_name: str,
+    ) -> dict[str, Any]:
+        assert run_root == session.run_root
+        assert status["phase"] == "approval_required"
+        assert key == "changeset"
+        assert schema_name == "ChangeSet"
+        return changeset
+
+    monkeypatch.setattr(
+        "latex_word_review.app_presenter._contract_artifact",
+        contract_artifact,
+    )
+    built_change_ids: list[str] = []
+    original_change_card = app_presenter_module._change_card
+
+    def counted_change_card(
+        change: Mapping[str, Any], decision: Mapping[str, Any] | None
+    ) -> dict[str, object]:
+        built_change_ids.append(cast("str", change["change_id"]))
+        return original_change_card(change, decision)
+
+    monkeypatch.setattr(app_presenter_module, "_change_card", counted_change_card)
+
+    view = render_session_view(
+        session,
+        session_key="large-approval",
+        csrf_token="csrf",
+        selected_page=3,
+    )
+    html = _assert_renderable_and_path_free(view, session.run_root)
+    cards = cast("Sequence[Mapping[str, object]]", view["changes"])
+    pagination = cast("Mapping[str, object]", view["pagination"])
+
+    assert len(cards) == 11
+    assert built_change_ids == [f"chg_{index:03d}" for index in range(50, 61)]
+    assert cards[0]["change_id"] == "chg_050"
+    assert view["page_start"] == 51
+    assert pagination == {
+        "page": 3,
+        "pages": 3,
+        "total": 61,
+        "start": 51,
+        "end": 61,
+        "previous_href": "/session/large-approval?filter=all&page=2",
+    }
+    assert "修改 51" in html
+    assert "修改 1</p>" not in html
 
 
 def test_bulk_count_excludes_safe_changes_already_decided(tmp_path: Path) -> None:
@@ -516,7 +592,14 @@ def test_result_exposes_only_status_allowed_artifact_routes(tmp_path: Path) -> N
         assert href.startswith("/artifact/results-1/")
         assert href.rsplit("/", 1)[-1] in allowed
     assert "/artifact/results-1/revised_source" not in html
-    assert "请使用下方“打开结果文件夹”查看" in html
+    assert "请使用下方“打开修订后的 LaTeX 文件夹”查看" in html
+    assert view["revised_source_available"] is True
+    assert view["open_revised_action"] == "/result/open-revised"
+    assert view["delivery_available"] is False
+    assert view["open_delivery_action"] == "/result/open-delivery"
+    assert 'action="/result/open-revised"' in html
+    assert 'action="/result/open-delivery"' not in html
+    assert "/result/open-folder" not in html
     assert "source_manifest" not in html
     assert "C:/private" not in html
     exit_form = html.split('action="/app/exit"', 1)[1].split("</form>", 1)[0]
@@ -634,7 +717,7 @@ def test_image_diagnostics_become_a_visible_path_free_error_summary() -> None:
         ("install_tool", "link", "/session/session_safe"),
         ("retry", "link", "/preflight/selection_safe"),
         ("start_new_round", "post", "/new"),
-        ("open_results", "post", "/result/open-folder"),
+        ("open_results", "post", "/result/open-revised"),
         ("create_support_bundle", "post", "/support/export"),
     ),
 )

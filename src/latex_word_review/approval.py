@@ -47,11 +47,11 @@ _BULK_DECISIONS: Final[dict[str, str]] = {
     "reject_selected": "rejected",
     "mark_manual": "manual",
 }
-_INTERFACE_VERSION: Final = "approval-v1alpha1"
+_INTERFACE_VERSION: Final = "approval-v1alpha2"
 _CONFIGURATION_SHA256: Final = sha256_canonical(
     {
         "state_machine": "immutable-approval-revisions-v1",
-        "bulk_policy": "exact-plain-text-candidate-only-v1",
+        "bulk_policy": "accept-exact-text-or-explicitly-reduce-to-manual-v2",
     }
 )
 
@@ -371,7 +371,7 @@ def record_bulk_decision(
     decided_at: str | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
-    """Apply one audited bulk decision only to exact plain-text candidates."""
+    """Apply one audited bulk decision without increasing unsafe change authority."""
 
     desired = _BULK_DECISIONS.get(operation)
     if desired is None:
@@ -380,19 +380,32 @@ def record_bulk_decision(
     timestamp = _require_time(decided_at)
     order, prior_decisions, payload = _validated_current(changeset, approval)
     _, _, _, changes = _changeset_context(changeset)
+
+    def is_exact_plain_text(change_id: str) -> bool:
+        change = changes[change_id]
+        resolution = cast("Mapping[str, Any]", change["resolution"])
+        return bool(
+            change["safety_class"] == "plain_text_candidate" and resolution["status"] == "exact"
+        )
+
     if change_ids is None:
-        if operation != "accept_all_safe":
+        if operation == "accept_all_safe":
+            selected = tuple(
+                change_id
+                for change_id in order
+                if is_exact_plain_text(change_id) and change_id not in prior_decisions
+            )
+        elif operation == "mark_manual":
+            selected = tuple(
+                change_id
+                for change_id in order
+                if not is_exact_plain_text(change_id) and change_id not in prior_decisions
+            )
+        else:
             raise ContractError(
                 ErrorCode.SCHEMA_INVALID,
                 "selected bulk operation requires explicit change_ids",
             )
-        selected = tuple(
-            change_id
-            for change_id in order
-            if changes[change_id]["safety_class"] == "plain_text_candidate"
-            and cast("Mapping[str, Any]", changes[change_id]["resolution"])["status"] == "exact"
-            and change_id not in prior_decisions
-        )
     else:
         selected_set = set(change_ids)
         if len(selected_set) != len(change_ids):
@@ -403,10 +416,16 @@ def record_bulk_decision(
                 ErrorCode.APPROVAL_CHANGE_UNKNOWN,
                 "bulk operation references an unknown change",
             )
-        selected = tuple(change_id for change_id in order if change_id in selected_set)
+        selected = tuple(
+            change_id
+            for change_id in order
+            if change_id in selected_set and change_id not in prior_decisions
+        )
 
     for change_id in selected:
         change = changes[change_id]
+        if operation == "mark_manual":
+            continue
         resolution = cast("Mapping[str, Any]", change["resolution"])
         if change["safety_class"] != "plain_text_candidate" or resolution["status"] != "exact":
             raise ContractError(

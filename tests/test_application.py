@@ -350,15 +350,11 @@ def test_redirect_decisions_defer_only_the_full_status_rebuild(
         generated_at=TIME,
     )
     assert calls == 3
-    approval_r3 = read_contract_file(
-        session.run_root / "approvals/approval-r3.json",
-        expected_schema="ApprovalSet",
-    )
-    assert approval_r3["payload"]["revision"] == 3
+    assert not (session.run_root / "approvals/approval-r3.json").exists()
 
     redirected_bulk_status = session.status()
     assert calls == 4
-    assert redirected_bulk_status["approval"]["revision"] == 3
+    assert redirected_bulk_status["approval"]["revision"] == 2
 
     public_status = session.decide(
         change_id=change_id,
@@ -367,7 +363,7 @@ def test_redirect_decisions_defer_only_the_full_status_rebuild(
         generated_at=TIME,
     )
     assert calls == 6
-    assert public_status["approval"]["revision"] == 4
+    assert public_status["approval"]["revision"] == 3
 
 
 def test_redirect_decision_detects_corruption_during_publish_readback(

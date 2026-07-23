@@ -920,6 +920,130 @@ def test_session_keys_are_exact_and_valid_sessions_resolve_under_runs_root(
     assert loaded[0].parent == state.runs_root
 
 
+def test_session_view_validates_and_forwards_selected_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AppState(tmp_path / "app")
+    session_key = f"session_{'d' * 32}"
+    sentinel = object()
+    rendered: list[tuple[object, str, int]] = []
+
+    monkeypatch.setattr(state, "load_session", lambda _key: cast("Any", sentinel))
+
+    def fake_render(
+        session: object,
+        *,
+        session_key: str,
+        csrf_token: str,
+        selected_filter: str,
+        selected_page: int,
+    ) -> dict[str, object]:
+        del csrf_token
+        rendered.append((session, selected_filter, selected_page))
+        return {"page": "session", "session_key": session_key}
+
+    monkeypatch.setattr(app_server_module, "render_session_view", fake_render)
+    try:
+        view = state.session_view(
+            session_key,
+            selected_filter="pending",
+            selected_page=7,
+        )
+        for invalid_page in (0, -1, True, 1_000_000_000, cast("Any", "1")):
+            with pytest.raises(ContractError) as raised:
+                state.session_view(session_key, selected_page=invalid_page)
+            assert raised.value.code is ErrorCode.SCHEMA_INVALID
+    finally:
+        state.close()
+
+    assert view == {"page": "session", "session_key": session_key}
+    assert rendered == [(sentinel, "pending", 7)]
+
+
+def test_mark_all_manual_delegates_only_the_explicit_downgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AppState(tmp_path / "app")
+    session_key = f"session_{'e' * 32}"
+    calls: list[dict[str, object]] = []
+
+    class BulkSession:
+        def decide_bulk_without_status(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        state,
+        "_action_session",
+        lambda _key: cast("Any", BulkSession()),
+    )
+    try:
+        state.mark_all_manual(session_key)
+    finally:
+        state.close()
+
+    assert calls == [
+        {
+            "operation": "mark_manual",
+            "reason": "not eligible for exact automatic LaTeX writeback",
+        }
+    ]
+
+
+def test_session_get_accepts_only_strict_filter_and_bounded_page_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = f"session_{'f' * 32}"
+    calls: list[tuple[str, str, int]] = []
+
+    with _running_server(tmp_path / "app") as server:
+
+        def session_view(
+            key: str,
+            *,
+            selected_filter: str,
+            selected_page: int,
+        ) -> dict[str, object]:
+            calls.append((key, selected_filter, selected_page))
+            return server.app_state.home_view()
+
+        monkeypatch.setattr(server.app_state, "session_view", session_view)
+        cookie, _csrf, _body, _headers = _credentials(server)
+        headers = {"Host": server.expected_host, "Cookie": cookie}
+        base = f"/session/{session_key}"
+        valid = [
+            _request(server, "GET", base, headers=headers),
+            _request(server, "GET", f"{base}?filter=pending", headers=headers),
+            _request(
+                server,
+                "GET",
+                f"{base}?filter=manual&page=7",
+                headers=headers,
+            ),
+        ]
+        invalid_paths = [
+            f"{base}?page=1",
+            f"{base}?filter=all&page=0",
+            f"{base}?filter=all&page=-1",
+            f"{base}?filter=all&page=",
+            f"{base}?filter=all&page=1234567890",
+            f"{base}?filter=unknown",
+            f"{base}?filter=all&page=1&unexpected=1",
+            f"{base}?filter=all&filter=pending",
+        ]
+        invalid = [_request(server, "GET", path, headers=headers) for path in invalid_paths]
+
+    assert [response[0] for response in valid] == [HTTPStatus.OK] * 3
+    assert [response[0] for response in invalid] == [HTTPStatus.BAD_REQUEST] * len(invalid_paths)
+    assert calls == [
+        (session_key, "all", 1),
+        (session_key, "pending", 1),
+        (session_key, "manual", 7),
+    ]
+
+
 def test_session_resolution_fails_closed_if_real_path_escapes_runs_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -999,6 +1123,162 @@ def test_artifact_route_enforces_status_paths_and_explicit_allowlist(
     with pytest.raises(ContractError) as raised:
         state.downloadable_artifact(session_key, "audit_bundle")
     assert raised.value.code is ErrorCode.PATH_TRAVERSAL
+
+
+def test_result_folder_actions_open_the_exact_verified_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    state = AppState(tmp_path / "app", path_opener=opened.append)
+    session_key = f"session_{'f' * 32}"
+    run_root = tmp_path / "sealed-run"
+    revised_source = run_root / "revised-clean"
+    delivery = run_root / "delivery"
+    revised_source.mkdir(parents=True)
+    delivery.mkdir()
+    (delivery / "run-manifest.json").write_text("{}", encoding="utf-8")
+    session = _ArtifactSession(
+        run_root,
+        {
+            "revised_source": "revised-clean",
+            "run_manifest": "delivery/run-manifest.json",
+        },
+    )
+    monkeypatch.setattr(state, "load_session", lambda _key: cast("Any", session))
+    server = AppHTTPServer((LOOPBACK_HOST, 0), state)
+
+    with _serving(server):
+        cookie, csrf, _body, _headers = _credentials(server)
+        revised_response = _post_form(
+            server,
+            "/result/open-revised",
+            {"csrf": csrf, "session": session_key},
+            cookie=cookie,
+        )
+        delivery_response = _post_form(
+            server,
+            "/result/open-delivery",
+            {"csrf": csrf, "session": session_key},
+            cookie=cookie,
+        )
+
+    assert revised_response[0] == HTTPStatus.SEE_OTHER
+    assert delivery_response[0] == HTTPStatus.SEE_OTHER
+    assert opened == [revised_source.resolve(), delivery.resolve()]
+
+
+def test_result_folder_actions_fail_closed_for_unverified_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    state = AppState(tmp_path / "app", path_opener=opened.append)
+    run_root = tmp_path / "sealed-run"
+    delivery = run_root / "delivery"
+    objects = run_root / "objects"
+    delivery.mkdir(parents=True)
+    objects.mkdir()
+    (objects / "run-manifest.json").write_text("{}", encoding="utf-8")
+    artifacts: dict[str, object] = {
+        "revised_source": "missing-revised",
+        "run_manifest": "objects/run-manifest.json",
+    }
+    session = _ArtifactSession(run_root, artifacts)
+    monkeypatch.setattr(state, "load_session", lambda _key: cast("Any", session))
+
+    try:
+        with pytest.raises(ContractError) as missing_source:
+            state.open_revised_source(f"session_{'a' * 32}")
+        with pytest.raises(ContractError) as misplaced_manifest:
+            state.open_delivery_folder(f"session_{'a' * 32}")
+
+        artifacts["run_manifest"] = "delivery/run-manifest.json"
+        with pytest.raises(ContractError) as missing_manifest:
+            state.open_delivery_folder(f"session_{'a' * 32}")
+    finally:
+        state.close()
+
+    assert [
+        missing_source.value.code,
+        misplaced_manifest.value.code,
+        missing_manifest.value.code,
+    ] == [
+        ErrorCode.SCHEMA_INVALID,
+        ErrorCode.SCHEMA_INVALID,
+        ErrorCode.SCHEMA_INVALID,
+    ]
+    assert opened == []
+
+
+def test_result_folder_actions_reject_reparse_and_escape_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    state = AppState(tmp_path / "app", path_opener=opened.append)
+    session_key = f"session_{'b' * 32}"
+    run_root = tmp_path / "sealed-run"
+    revised_source = run_root / "revised-clean"
+    delivery = run_root / "delivery"
+    revised_source.mkdir(parents=True)
+    delivery.mkdir()
+    run_manifest = delivery / "run-manifest.json"
+    run_manifest.write_text("{}", encoding="utf-8")
+    artifacts: dict[str, object] = {
+        "revised_source": "revised-clean",
+        "run_manifest": "delivery/run-manifest.json",
+    }
+    session = _ArtifactSession(run_root, artifacts)
+    monkeypatch.setattr(state, "load_session", lambda _key: cast("Any", session))
+    original_probe = app_server_module._is_link_or_junction
+    reparse_targets: set[str] = set()
+
+    def fake_link_or_junction(path: Path) -> bool:
+        return path.name in reparse_targets or original_probe(path)
+
+    monkeypatch.setattr(app_server_module, "_is_link_or_junction", fake_link_or_junction)
+    errors: list[ContractError] = []
+    try:
+        reparse_targets.add("revised-clean")
+        with pytest.raises(ContractError) as revised_link:
+            state.open_revised_source(session_key)
+        errors.append(revised_link.value)
+
+        reparse_targets.clear()
+        reparse_targets.add("delivery")
+        with pytest.raises(ContractError) as delivery_link:
+            state.open_delivery_folder(session_key)
+        errors.append(delivery_link.value)
+
+        reparse_targets.clear()
+        reparse_targets.add("run-manifest.json")
+        with pytest.raises(ContractError) as manifest_link:
+            state.open_delivery_folder(session_key)
+        errors.append(manifest_link.value)
+
+        reparse_targets.clear()
+        artifacts["revised_source"] = "../outside"
+        with pytest.raises(ContractError) as revised_escape:
+            state.open_revised_source(session_key)
+        errors.append(revised_escape.value)
+
+        artifacts["revised_source"] = "revised-clean"
+        artifacts["run_manifest"] = "../outside/run-manifest.json"
+        with pytest.raises(ContractError) as manifest_escape:
+            state.open_delivery_folder(session_key)
+        errors.append(manifest_escape.value)
+    finally:
+        state.close()
+
+    assert [error.code for error in errors] == [
+        ErrorCode.PATH_LINK_ESCAPE,
+        ErrorCode.PATH_LINK_ESCAPE,
+        ErrorCode.PATH_LINK_ESCAPE,
+        ErrorCode.PATH_TRAVERSAL,
+        ErrorCode.PATH_TRAVERSAL,
+    ]
+    assert opened == []
 
 
 class _FakeJobs:
@@ -1094,6 +1374,117 @@ def test_recovery_endpoints_are_explicit_posts_with_exact_fields(
     assert plan[0] == HTTPStatus.SEE_OTHER
     assert plan[1]["location"] == f"/jobs/{plan_job.job_id}"
     assert unknown[0] == HTTPStatus.BAD_REQUEST
+
+
+def test_approval_posts_validate_return_target_before_mutation_and_mark_manual(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = f"session_{'8' * 32}"
+    decision_calls: list[dict[str, str]] = []
+    manual_calls: list[str] = []
+
+    with _running_server(tmp_path / "app") as server:
+
+        def decide(key: str, **kwargs: str) -> None:
+            decision_calls.append({"session": key, **kwargs})
+
+        def mark_manual(key: str) -> None:
+            manual_calls.append(key)
+
+        monkeypatch.setattr(server.app_state, "decide", decide)
+        monkeypatch.setattr(server.app_state, "mark_all_manual", mark_manual)
+        cookie, csrf, _body, _headers = _credentials(server)
+        fields = {
+            "csrf": csrf,
+            "session": session_key,
+            "change_id": f"chg_{'a' * 32}",
+            "decision": "manual",
+            "final_text": "",
+            "reason": "requires author review",
+            "risk_acknowledgement": "",
+            "return_filter": "pending",
+            "return_page": "3",
+        }
+        accepted = _post_form(
+            server,
+            "/approval/decision",
+            fields,
+            cookie=cookie,
+        )
+        invalid = [
+            _post_form(
+                server,
+                "/approval/decision",
+                fields | {"return_filter": "unknown"},
+                cookie=cookie,
+            ),
+            _post_form(
+                server,
+                "/approval/decision",
+                fields | {"return_page": "0"},
+                cookie=cookie,
+            ),
+            _post_form(
+                server,
+                "/approval/decision",
+                fields | {"return_page": "1234567890"},
+                cookie=cookie,
+            ),
+            _post_form(
+                server,
+                "/approval/decision",
+                {name: value for name, value in fields.items() if name != "return_page"},
+                cookie=cookie,
+            ),
+            _post_form(
+                server,
+                "/approval/decision",
+                fields | {"unexpected": "1"},
+                cookie=cookie,
+            ),
+        ]
+        marked = _post_form(
+            server,
+            "/approval/mark-manual",
+            {"csrf": csrf, "session": session_key},
+            cookie=cookie,
+        )
+        mark_unknown = _post_form(
+            server,
+            "/approval/mark-manual",
+            {"csrf": csrf, "session": session_key, "unexpected": "1"},
+            cookie=cookie,
+        )
+        get_mark = _request(
+            server,
+            "GET",
+            "/approval/mark-manual",
+            headers={"Host": server.expected_host, "Cookie": cookie},
+        )
+
+    assert accepted[0] == HTTPStatus.SEE_OTHER
+    assert accepted[1]["location"] == (
+        f"/session/{session_key}?filter=pending&page=3#approval-change-list"
+    )
+    assert [response[0] for response in invalid] == [HTTPStatus.BAD_REQUEST] * len(invalid)
+    assert decision_calls == [
+        {
+            "session": session_key,
+            "change_id": f"chg_{'a' * 32}",
+            "decision": "manual",
+            "final_text": "",
+            "reason": "requires author review",
+            "risk_acknowledgement": "",
+        }
+    ]
+    assert marked[0] == HTTPStatus.SEE_OTHER
+    assert marked[1]["location"] == (
+        f"/session/{session_key}?filter=pending&page=1#approval-change-list"
+    )
+    assert manual_calls == [session_key]
+    assert mark_unknown[0] == HTTPStatus.BAD_REQUEST
+    assert get_mark[0] == HTTPStatus.NOT_FOUND
 
 
 def test_blocked_plan_revise_post_reopens_draft_and_invalidates_old_token(
@@ -1251,10 +1642,13 @@ def test_blocked_plan_revise_post_reopens_draft_and_invalidates_old_token(
                 "final_text": "",
                 "reason": "requires author review",
                 "risk_acknowledgement": "",
+                "return_filter": "all",
+                "return_page": "1",
             },
             cookie=cookie,
         )
         assert decision[0] == HTTPStatus.SEE_OTHER
+        assert decision[1]["location"] == (f"{session_href}?filter=all&page=1#approval-change-list")
         changed = ApplicationSession.load(session.run_root).status()
         assert changed["approval"]["revision"] == 5
 

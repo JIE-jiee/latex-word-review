@@ -75,6 +75,7 @@ def test_builders_seal_the_real_e0_export_chain(tmp_path: Path) -> None:
         source_manifest_sha256=source_receipt.payload_sha256,
         review_ir_sha256=compute_payload_sha256(review_ir),
         generated_at=TIME,
+        export_report_payload=outcome.report.as_payload(),
     )
     export_report = build_export_report_document(outcome, run_id=RUN_ID, generated_at=TIME)
     revision_reader = build_revision_reader_capabilities_document(
@@ -94,7 +95,11 @@ def test_builders_seal_the_real_e0_export_chain(tmp_path: Path) -> None:
     assert outcome.report.source_map_sha256 == compute_payload_sha256(source_map)
     assert outcome.report.backend_capabilities_sha256 == compute_payload_sha256(capabilities)
     bindings = bookmark_bindings_from_source_map(source_map)
-    assert len(bindings) == 2
+    assert bindings
+    assert len(bindings) == outcome.anchoring.coverage["exact"]
+    assert {binding.unit_id for binding in bindings.values()} == {
+        mapping.unit.unit_id for mapping in outcome.anchoring.mappings if mapping.status == "exact"
+    }
     assert all(name.startswith("lwr_") for name in bindings)
 
 

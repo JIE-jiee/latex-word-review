@@ -15,6 +15,7 @@ from latex_word_review.contracts import make_envelope, validate_contract
 from latex_word_review.discovery import ProjectDiscovery
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import AnchoringResult, ExportOutcome
+from latex_word_review.export_models import export_report_commitment
 from latex_word_review.hashing import digest_file
 from latex_word_review.ids import derive_artifact_id, derive_source_manifest_id, stable_id
 from latex_word_review.paths import validate_relative_path
@@ -23,6 +24,10 @@ from latex_word_review.revisions import BookmarkBinding
 from latex_word_review.source_units import TextProvenanceSegment, review_ir_payload
 
 Confidentiality = Literal["public_fixture", "local_private", "derived_private"]
+SOURCE_MANIFEST_INTERFACE_VERSION = "source-manifest-builder-v2"
+SOURCE_MAP_INTERFACE_VERSION = "source-map-builder-v2"
+EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v2"
+LEGACY_SOURCE_MAP_INTERFACE_VERSION = "source-map-builder-v1"
 RunPhase = Literal[
     "initialized",
     "snapshotted",
@@ -284,7 +289,7 @@ def build_source_manifest_document(
         object_id=source_manifest_id,
         run_id=run_id,
         generated_at=generated_at or utc_now(),
-        producer=producer_identity("source-manifest-builder-v1"),
+        producer=producer_identity(SOURCE_MANIFEST_INTERFACE_VERSION),
         payload=payload,
     )
 
@@ -457,10 +462,32 @@ def build_source_map_document(
     run_id: str,
     source_manifest_sha256: str,
     review_ir_sha256: str,
+    export_report_payload: Mapping[str, Any] | None = None,
+    interface_version: str = SOURCE_MAP_INTERFACE_VERSION,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
+    if interface_version == SOURCE_MAP_INTERFACE_VERSION:
+        if export_report_payload is None:
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "SourceMap v2 requires an ExportReport payload commitment",
+            )
+        commitment = export_report_commitment(export_report_payload)
+    elif interface_version == LEGACY_SOURCE_MAP_INTERFACE_VERSION:
+        if export_report_payload is not None:
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "legacy SourceMap cannot contain an ExportReport commitment",
+            )
+        commitment = None
+    else:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "unsupported SourceMap producer interface",
+        )
     payload = anchoring.source_map_payload(
         source_manifest_sha256=source_manifest_sha256,
+        report_commitment=commitment,
         review_ir_sha256=review_ir_sha256,
     )
     object_id = stable_id("map_", payload)
@@ -469,7 +496,7 @@ def build_source_map_document(
         object_id=object_id,
         run_id=run_id,
         generated_at=generated_at or utc_now(),
-        producer=producer_identity("source-map-builder-v1"),
+        producer=producer_identity(interface_version),
         payload=payload,
     )
 
@@ -487,14 +514,18 @@ def build_export_report_document(
         object_id=object_id,
         run_id=run_id,
         generated_at=generated_at or utc_now(),
-        producer=producer_identity("export-report-builder-v1"),
+        producer=producer_identity(EXPORT_REPORT_INTERFACE_VERSION),
         payload=payload,
     )
 
 
 __all__ = [
     "Confidentiality",
+    "EXPORT_REPORT_INTERFACE_VERSION",
+    "LEGACY_SOURCE_MAP_INTERFACE_VERSION",
     "RunPhase",
+    "SOURCE_MANIFEST_INTERFACE_VERSION",
+    "SOURCE_MAP_INTERFACE_VERSION",
     "build_backend_capabilities_document",
     "build_export_report_document",
     "build_revision_reader_capabilities_document",

@@ -1,5 +1,8 @@
 * text=auto eol=lf
 
+# cmd.exe consumes this file directly from GitHub source archives.
+Start-Latex-Word-Review.cmd -text !eol whitespace=cr-at-eol
+
 *.docx binary
 *.docm binary
 *.pdf binary

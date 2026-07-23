@@ -266,17 +266,26 @@ def test_full_e0_pipeline_adds_only_exact_source_bookmarks(tmp_path: Path) -> No
         ),
     )
 
-    assert outcome.report.status == "success"
+    assert outcome.report.status == "partial"
     assert outcome.anchoring is not None
     assert outcome.anchoring.coverage == {
-        "total": 2,
-        "exact": 2,
+        "total": 23,
+        "exact": 19,
         "degraded": 0,
         "unmapped": 0,
-        "conflict": 0,
+        "conflict": 4,
     }
     assert outcome.inspection is not None
-    assert outcome.inspection.bookmarks == 11
+    assert outcome.inspection.bookmarks == 28
+    assert {feature.feature: feature.status for feature in outcome.report.feature_results} == {
+        "body_text": "degraded",
+        "images": "preserved",
+        "tables": "preserved",
+        "math": "preserved",
+        "references": "preserved",
+        "labels": "preserved",
+        "citations": "unsupported",
+    }
     assert output.is_file()
     with zipfile.ZipFile(output) as package:
         styles = ET.fromstring(package.read("word/styles.xml"))

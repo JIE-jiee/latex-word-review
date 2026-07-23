@@ -10,6 +10,8 @@ public entry points are:
   `ExportBackend` protocol;
 - `Tex2WordBackend` and `PandocBackend`;
 - `scan_source_units()` for conservative byte spans;
+- `scan_source_features()` and `reconcile_source_features()` for bounded
+  pre-conversion inventory and post-conversion structural accounting;
 - `build_image_overlay()` for a source-bound, derived image working tree;
 - `anchor_source_units()` and `export_review_docx()` for never-guess source
   mapping and atomic publication;
@@ -141,18 +143,48 @@ requires exactly this security-relevant shape: `status`, `manifest` (`ArtifactRe
 `ExportReport.image_overlay` are required; the binding cannot be omitted on a
 successful v1alpha export.
 
-After conversion, structural inspection counts drawing/image instances. Export
-fails with `E_EXPORT_SILENT_LOSS` when the DOCX contains fewer image instances
-than the LaTeX source contained `\includegraphics` occurrences. This is a
-fail-closed lower-bound count check, not a claim of one-to-one DOCX relationship
-mapping, visual equality, or pixel equality for every Word image. The overlay
-manifest remains the per-source-occurrence evidence.
+## Bounded complex-structure accounting
+
+Before conversion, `scan_source_features()` builds a source-tree-bound,
+bounded lower-bound inventory across the already discovered UTF-8 TeX files.
+After conversion, `reconcile_source_features()` independently compares that
+inventory with DOCX structure and locked-backend counters:
+
+- images: `\includegraphics` instances versus DOCX drawing instances;
+- equivalent `tabular` tables versus Word tables, with non-equivalent table
+  environments reported as degraded;
+- recognized math objects versus final-DOCX OMML objects; backend image/raw
+  counters can only add a degraded warning and never fill an OMML deficit;
+- static references versus final-DOCX `REF`/`PAGEREF` fields; a field deficit
+  blocks handoff because a backend warning does not prove visible fallback text;
+- static labels versus version-gated tex2word bookmark names;
+- citations, which are inventoried but currently marked `unsupported` rather
+  than claimed structurally equivalent.
+
+A provable deficit in a supported count produces non-recoverable
+`E_EXPORT_SILENT_LOSS` and prevents reviewer handoff. An independently
+present backend math fallback, dynamic/colliding label, or non-equivalent
+construct produces recoverable
+`E_EXPORT_DEGRADED` for manual inspection. The checks are lower bounds, not
+claims of visual or semantic equivalence. Inventory version, counts, feature
+results, and diagnostic IDs are sealed into `ExportReport` and revalidated
+both before workflow publication and when sealed state is reloaded. The image
+overlay manifest remains the stronger per-occurrence evidence for images.
+
+Dynamic conditional regions such as `\ifthenelse`, `\IfFileExists`, and
+`\InputIfFileExists` are skipped as complete regions. Their contents do not
+contribute to the inventory and therefore do not participate in a claim that a
+structure was preserved. Primitive TeX conditionals are handled with the same
+fail-closed boundary.
 
 ## Conservative source units
 
-The v1 scanner accepts only complete UTF-8 prose paragraphs. It records the
-half-open byte span, exact slice SHA-256, line/column evidence, normalized text
-hash, source-tree binding, and a stable C2 `unit_id`. Normalization collapses
+The v2 scanner keeps the v1 complete UTF-8 prose paragraphs and additionally
+emits byte-exact plain-text islands on a single source line around explicitly
+bounded inline constructs. This expands useful body-text coverage without
+treating a whole LaTeX line as plain text. Every unit records the half-open byte
+span, exact slice SHA-256, line/column evidence, normalized-text hash,
+source-tree binding, and a stable C2 `unit_id`. Normalization still collapses
 whitespace only; it does not case-fold or apply implicit Unicode normalization.
 
 Every `SourceMap` mapping also carries `text_provenance`: a profile, normalized
@@ -163,11 +195,16 @@ narrowed to the exact local insertion/deletion/replacement. Collapsed
 whitespace is explicitly lossy and therefore never made automatically
 patchable merely because the surrounding bookmark matched.
 
-The scanner rejects the whole paragraph when it encounters comments, commands,
-labels, references, citations, math delimiters, TeX-special characters, TeX
-quote/dash substitutions, or content inside a non-document environment. It is
-therefore intentionally incomplete. Excluded content is not silently promoted
-to a low-risk source unit.
+Island scanning recognizes only a fixed list of commands with a bounded number
+of balanced groups. It may expose the inner prose of simple text-formatting
+commands such as `textbf` or `emph`, but only when that inner slice is itself
+plain text. Math, labels, reference/citation keys, URLs, image arguments,
+structural commands, and TeX-special content are skipped. An unknown,
+unbalanced, cross-line, or differently shaped command disables all v2 island
+discovery for that file rather than guessing; already recognized v1 complete
+safe paragraphs may remain. Comments, structural environments, command
+definitions, and unsafe quote/dash substitutions remain excluded. Excluded
+content is never silently promoted to a low-risk source unit.
 
 ## Never-guess bookmark mapping
 
@@ -244,18 +281,23 @@ claim that Microsoft Word was launched. A separate Windows-only Microsoft Word
 COM contract harness covers real save/reopen and tracked-edit negative cases;
 it does not turn package inspection into an Office sandbox. The final pipeline
 publishes only after overlay creation, backend conversion, bookmark/Track
-Changes insertion, image-count reconciliation, and package/structure
-acceptance all succeed.
+Changes insertion, complete source-feature reconciliation, and
+package/structure acceptance all succeed.
 
 ## E0 contract evidence
 
 With tex2word 1.0.5, the public E0 source produces 34 total paragraphs, 5 OMML
 objects, 1 image, 1 table, 9 upstream bookmarks, and 11 live fields (5 `SEQ`,
-6 `REF`, 0 `PAGEREF`). The conservative scanner exposes two unique plain-text
-units; the integrated pipeline maps both exactly, produces 11 bookmarks in the
-final review DOCX, and enables Track Changes. Separate synthetic tests cover a
-multi-page PDF with page selection/crop/rotation, cache and pixel hashes,
-original-source immutability, manual image paths, and DOCX image-count loss.
+6 `REF`, 0 `PAGEREF`). The v2 scanner exposes 23 byte-exact plain-text units:
+19 receive exact Word anchors and 4 deliberately remain ambiguous with
+`E_MAP_AMBIGUOUS`, so the export is honestly `partial` rather than guessed.
+
+The structure inventory reconciles images 1/1, tables 1/1, math 5/5,
+references 6/6, and static labels 8/8 as `preserved`; citations remain
+explicitly `unsupported`. The final DOCX enables Track Changes. Separate
+synthetic tests cover missing images, tables, math, references, and labels,
+visible fallbacks, non-equivalent structures, bounded inventory behavior, a
+multi-page PDF with crop/rotation, cache/pixel hashes, and source immutability.
 
 The local Pandoc contract test is skipped with the reason `pandoc executable
 not available` when the tool is absent. Unit tests still exercise forced cwd,

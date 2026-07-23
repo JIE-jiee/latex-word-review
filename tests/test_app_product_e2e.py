@@ -325,11 +325,13 @@ def test_local_app_full_product_journey_survives_restart(
                 "final_text": "",
                 "reason": "public E0 product journey",
                 "risk_acknowledgement": "",
+                "return_filter": "all",
+                "return_page": "1",
             },
             cookie=cookie,
         )
         assert decision[0] == HTTPStatus.SEE_OTHER
-        assert decision[1]["location"] == session_href
+        assert decision[1]["location"] == f"{session_href}?filter=all&page=1#approval-change-list"
         decided = _private_get(server, session_href, cookie=cookie)
         decided_page = decided[2].decode("utf-8")
         assert "已决定 1 / 1 项" in decided_page

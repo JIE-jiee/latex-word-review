@@ -98,6 +98,107 @@ jobs:
             (Join-Path $env:SOURCE_ROOT "Start-Latex-Word-Review.cmd")
           if ($LASTEXITCODE -ne 0) { throw "offline repeat preparation failed" }
 
+      - name: Launch the prepared application and use the protected exit
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $runtime = Join-Path $env:SOURCE_ROOT ".lwr-runtime"
+          $dataRoot = Join-Path $env:SOURCE_ROOT ".lwr-ci-data"
+          $bootstrap = Join-Path $env:SOURCE_ROOT "scripts\bootstrap-windows.ps1"
+          [IO.Directory]::CreateDirectory($dataRoot) | Out-Null
+
+          $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+          $portProbe.Start()
+          $port = ([Net.IPEndPoint]$portProbe.LocalEndpoint).Port
+          $portProbe.Stop()
+          $origin = "http://127.0.0.1:$port"
+
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File $bootstrap `
+            -RuntimeRoot $runtime `
+            -DataRoot $dataRoot `
+            -NoBrowser `
+            -Port $port
+          if ($LASTEXITCODE -ne 0) { throw "source bootstrap application launch failed" }
+
+          $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+          $homeResponse = $null
+          $readyDeadline = [DateTime]::UtcNow.AddSeconds(20)
+          while ($null -eq $homeResponse -and [DateTime]::UtcNow -lt $readyDeadline) {
+            try {
+              $homeResponse = Invoke-WebRequest `
+                -Uri "$origin/" `
+                -WebSession $session `
+                -TimeoutSec 3 `
+                -UseBasicParsing
+            }
+            catch {
+              Start-Sleep -Milliseconds 250
+            }
+          }
+          if ($null -eq $homeResponse -or $homeResponse.StatusCode -ne 200) {
+            throw "the bootstrapped application did not become HTTP-reachable"
+          }
+          if ($homeResponse.Content -notmatch 'name="csrf" value="([A-Za-z0-9_-]+)"') {
+            throw "the application home page did not expose its CSRF form token"
+          }
+          $csrf = $Matches[1]
+          $cookies = @($session.Cookies.GetCookies([Uri]$origin))
+          if ($cookies.Count -ne 1 -or $cookies[0].Name -ne "lwr_app_session_$port") {
+            throw "the application did not issue the expected port-scoped session cookie"
+          }
+
+          $blocked = Invoke-WebRequest `
+            -Uri "$origin/app/exit" `
+            -Method Post `
+            -WebSession $session `
+            -Headers @{ Origin = "http://127.0.0.1:1"; "Sec-Fetch-Site" = "same-origin" } `
+            -ContentType "application/x-www-form-urlencoded" `
+            -Body @{ csrf = $csrf } `
+            -TimeoutSec 3 `
+            -SkipHttpErrorCheck `
+            -UseBasicParsing
+          if ($blocked.StatusCode -ne 403) { throw "cross-origin exit was not rejected" }
+
+          $stillRunning = Invoke-WebRequest `
+            -Uri "$origin/" `
+            -WebSession $session `
+            -TimeoutSec 3 `
+            -UseBasicParsing
+          if ($stillRunning.StatusCode -ne 200) {
+            throw "the rejected exit request stopped the application"
+          }
+
+          $exit = Invoke-WebRequest `
+            -Uri "$origin/app/exit" `
+            -Method Post `
+            -WebSession $session `
+            -Headers @{ Origin = $origin; "Sec-Fetch-Site" = "same-origin" } `
+            -ContentType "application/x-www-form-urlencoded" `
+            -Body @{ csrf = $csrf } `
+            -TimeoutSec 3 `
+            -UseBasicParsing
+          if ($exit.StatusCode -ne 200) {
+            throw "the protected exit request was not accepted"
+          }
+
+          $stopped = $false
+          $exitDeadline = [DateTime]::UtcNow.AddSeconds(20)
+          while (-not $stopped -and [DateTime]::UtcNow -lt $exitDeadline) {
+            try {
+              Invoke-WebRequest `
+                -Uri "$origin/" `
+                -TimeoutSec 1 `
+                -UseBasicParsing | Out-Null
+              Start-Sleep -Milliseconds 250
+            }
+            catch {
+              $stopped = $true
+            }
+          }
+          if (-not $stopped) { throw "the protected exit did not release the HTTP listener" }
+
       - name: Write text-only bootstrap evidence
         shell: pwsh
         run: |
@@ -110,6 +211,9 @@ jobs:
             source_archive_without_git = $true
             first_run_passed = $true
             offline_repeat_passed = $true
+            application_http_reachable = $true
+            cross_origin_exit_rejected = $true
+            protected_exit_passed = $true
             runtime_identity_sha256 = $evidence.identity_sha256
             uv_version = $evidence.uv_version
             uv_archive_sha256 = $evidence.uv_archive_sha256
