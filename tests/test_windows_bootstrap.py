@@ -24,6 +24,8 @@ def _ascii_text(path: Path) -> str:
 def test_double_click_launcher_is_utf8_bilingual_and_bounded() -> None:
     data = LAUNCHER.read_bytes()
     assert not data.startswith(b"\xef\xbb\xbf")
+    assert data.count(b"\r\n") == data.count(b"\n")
+    assert b"\r" not in data.replace(b"\r\n", b"")
     text = data.decode("utf-8")
 
     assert "chcp 65001 >nul" in text
