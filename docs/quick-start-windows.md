@@ -1,7 +1,8 @@
 # Windows Quick Start
 
-LaTeX Word Review `0.2.0b1` turns the auditable CLI workflow into a four-step local Windows
-application:
+LaTeX Word Review `0.2.0b1` is a local Windows application for authors who write in LaTeX and
+collaborate with people who review in Word. It brings approved edits back into a new LaTeX copy in
+four steps:
 
 1. choose `main.tex`;
 2. generate a Word review and select the returned `.docx`;
@@ -11,82 +12,38 @@ application:
 The original LaTeX project and the returned Word original remain immutable. For the complete Chinese
 walkthrough, see [`guide.zh-CN.md`](guide.zh-CN.md).
 
-> [!WARNING]
-> There is no GitHub Release or PyPI publication yet. The installer and portable ZIP pass local
-> build, static, and frozen-runtime checks; this final installer was not installed or uninstalled in
-> the current rehearsal. Public binary redistribution remains blocked while the lxml Windows
-> static-native dependency license and relinking evidence remains incomplete. The repository
-> currently publishes source, build scripts, and CI evidence only. See the
-> [Windows binary license audit](reviews/windows-binary-license-audit-2026-07.md).
+> [!IMPORTANT]
+> The current download is a beta source ZIP, not a signed installer. Download it only from this
+> repository, keep a backup of your paper, and inspect every generated result.
 
-## Run the application now
+## Start from the GitHub source ZIP
 
-### Maintainer workspace shortcut, when present
+The public bootstrap requires 64-bit Windows capable of running x64
+applications and 64-bit Windows PowerShell. The included CMD launcher selects
+the system Windows PowerShell automatically. Other operating systems and
+32-bit shells are not supported.
 
-If the repository root already contains
-`LaTeX Word Review（双击启动）.lnk`, double-click it. The fallback is
-`output\local-windows\Start-Latex-Word-Review.cmd`. This workspace-only delivery needs no
-Python, uv, or Git and keeps the application, review data, and `TEMP/TMP` below
-`output\local-windows`. It is ignored by Git and is not a published GitHub binary.
+You do not need to install Python, Git, uv, or use administrator permission.
 
-### Public source route
+1. Download the [current source ZIP](https://github.com/JIE-jiee/latex-word-review/archive/refs/heads/main.zip).
+2. In File Explorer, choose **Extract All**. Do not run the project inside the ZIP preview.
+3. Open the extracted folder and double-click **`Start-Latex-Word-Review.cmd`**.
+4. Keep this window open and stay online during the first setup. The local page opens automatically
+   when preparation finishes. Later, double-click the same file to start again.
 
-Pin a source commit you reviewed, install the locked runtime with PDF preview support, and open the
-local application:
+The first start downloads and verifies a private Python runtime and the locked application
+dependencies inside the extracted project folder. It does not install them system-wide. If setup is
+interrupted, note the stable error code shown in the window, check the network connection, and
+double-click the launcher again.
 
-```powershell
-git clone https://github.com/JIE-jiee/latex-word-review.git
-Set-Location latex-word-review
-$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
-git checkout --detach $ReviewedCommit
-if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
-uv sync --frozen --extra pdf-figures --python 3.12
-uv run --frozen latex-word-review --version
-uv run --frozen latex-word-review doctor
-uv run --frozen latex-word-review app
-```
+The application binds only to a random `127.0.0.1` port. The browser is a local interface, not a
+cloud upload page. Keep the extracted folder if you want later starts to reuse the prepared runtime.
 
-Replace the placeholder with the exact 40-character commit SHA you reviewed. It is intentionally
-invalid so the command fails instead of silently following a moving branch.
+> [!NOTE]
+> The application interface is currently Simplified Chinese. The Chinese, English, and Japanese
+> README links switch the GitHub documentation only.
 
-The application binds only to a random `127.0.0.1` port and opens the default browser. The browser
-is a local view, not a cloud upload surface.
-
-## Installer and portable behavior
-
-After the binary-license hold is closed, the intended public options are:
-
-| Option | How to start | Python/Git required |
-|---|---|---:|
-| Per-user installer | Launch at setup completion, then desktop or Start menu | No |
-| Portable ZIP | Extract, then run `LatexWordReview.exe` | No |
-| Source checkout | `uv run --frozen latex-word-review app` | Yes |
-
-The installer requests no administrator privileges and creates no CLI shortcut. Both formal binary
-forms use the same verified PyInstaller onedir bytes and store review sessions in
-`%LOCALAPPDATA%\LatexWordReview`, not in the installation or extraction directory. The
-workspace-only launcher deliberately overrides this with `output\local-windows\user-data`.
-
-The final local `0.2.0b1` Windows x64 rebuild on 2026-07-20 measured:
-
-| Asset | Measured size | SHA-256 |
-|---|---:|---|
-| setup executable | **21,444,947 bytes (20.45 MiB)** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
-| portable ZIP | **33,421,203 bytes (31.87 MiB)** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
-| installed/extracted application | **65,767,086 bytes (62.72 MiB)** (438 files) | — |
-
-That candidate is frozen with exact 64-bit CPython 3.12.13; the source/library test range remains
-Python 3.12/3.13. Sizes vary with the application, PyInstaller, PDFium, and dependency versions. The
-frozen application includes Python, this project, tex2word, Pillow, PDFium, Schemas, and UI assets.
-It does not bundle Word, MiKTeX/TeX Live, Pandoc, Playwright browsers, or development tools.
-
-The final local Windows regression completed with **1023 passed and 9 skipped**; Ruff, formatting,
-and strict mypy checks also passed. This is local candidate evidence and does not lift the binary
-licensing publication hold described above.
-
-If a future beta is not Authenticode-signed, Windows SmartScreen may report an unknown publisher.
-Verify the GitHub Release SHA-256, tag/commit, and stated signing status before running it. Do not
-obtain a same-named executable from a third-party mirror.
+## Complete one review in four steps
 
 ## Step 1: choose the project
 
@@ -139,6 +96,13 @@ confidence, safety class, and diagnostics. Record one of:
 The restricted **accept all safe text** action fills only still-undecided exact
 `plain_text_candidate` changes. It never overwrites an existing decision, and it excludes formulas,
 references, structure, moves, formatting, comments, low-confidence mappings, and conflicts.
+
+For long reviews, cards are paginated at 25 items per page and can be filtered
+without changing the ledger. The bulk **mark risky undecided items
+as manual** action affects only still-undecided non-exact-safe items. It never
+overwrites a decision, accepts an edit, or makes an automatic source change;
+those entries are thereby resolved as manual for approval, remain excluded
+from automatic writeback, and can still be changed individually before finalization.
 
 Select **Finish approval and preview patch** only after every item has a decision. This is the first
 human gate. It seals intent and produces a dry-run preview; it does not change LaTeX.
@@ -220,6 +184,58 @@ MiKTeX location. `latexmk` and `latexdiff` must belong to that same installation
 Perl executable must also resolve from an absolute `PATH` entry. The verifier creates private
 MiKTeX config/data, HOME, and temporary directories and does not install or update packages.
 TeX Live, mixed roots, missing packages, or missing Perl remain explicit partial/blocked results.
+
+## Advanced setup and maintainer notes
+
+The ordinary source-ZIP path above is the supported public starting point. The options below are for
+people who need a reviewed commit, development tools, or local release-candidate testing.
+
+### Pin and run a reviewed source commit
+
+Install Git and uv, then replace the placeholder with the exact 40-character commit SHA you have
+reviewed:
+
+```powershell
+git clone https://github.com/JIE-jiee/latex-word-review.git
+Set-Location latex-word-review
+$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
+git checkout --detach $ReviewedCommit
+if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
+uv sync --frozen --extra pdf-figures --python 3.12
+uv run --frozen latex-word-review --version
+uv run --frozen latex-word-review doctor
+uv run --frozen latex-word-review app
+```
+
+The placeholder is intentionally invalid so the command fails instead of silently following a
+moving branch.
+
+### Workspace-only frozen candidate
+
+A maintainer workspace may contain `LaTeX Word Review（双击启动）.lnk`, with
+`output\local-windows\Start-Latex-Word-Review.cmd` as its fallback. This ignored local delivery
+keeps the frozen application, review data, and temporary files below `output\local-windows`. It is
+not part of the public source ZIP and does not represent a published GitHub binary.
+
+### Binary publication status
+
+There is no GitHub Release, PyPI publication, signed installer, or public portable binary yet. Local
+installer and portable candidates have passed build and runtime checks, but public redistribution
+remains blocked while native-library licensing and relinking evidence is incomplete. See the
+[Windows binary license audit](reviews/windows-binary-license-audit-2026-07.md).
+
+One historical local `0.2.0b1` Windows x64 candidate built on 2026-07-20 measured:
+
+| Asset | Measured size | SHA-256 |
+|---|---:|---|
+| setup executable | **21,444,947 bytes (20.45 MiB)** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
+| portable ZIP | **33,421,203 bytes (31.87 MiB)** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
+| installed/extracted application | **65,767,086 bytes (62.72 MiB)** (438 files) | — |
+
+A future installer is intended to be per-user and require no administrator permission. A future
+portable ZIP is intended to start with `LatexWordReview.exe`. Neither option is available for public
+download today. If a future beta is not Authenticode-signed, verify the GitHub Release checksum and
+signing status before running it. Do not obtain a same-named executable from a third-party mirror.
 
 ## Codex Skill and advanced CLI
 

@@ -76,9 +76,39 @@ def test_cli_builds_a_hash_bound_ingest_chain_without_mutating_inputs(
         == 0
     )
     export_stdout = capsys.readouterr().out
-    assert '"status":"success"' in export_stdout
+    assert '"status":"partial"' in export_stdout
+    export_report = read_contract_file(
+        export_objects / "export-report.json",
+        expected_schema="ExportReport",
+    )
+    report_payload = cast("dict[str, Any]", export_report["payload"])
+    assert report_payload["status"] == "partial"
+    feature_results = cast("list[dict[str, Any]]", report_payload["feature_results"])
+    body_text = next(item for item in feature_results if item["feature"] == "body_text")
+    assert (
+        body_text["source_count"],
+        body_text["output_count"],
+        body_text["status"],
+    ) == (23, 19, "degraded")
+    findings = cast("list[dict[str, Any]]", report_payload["findings"])
+    ambiguous = [item for item in findings if item["code"] == ErrorCode.MAP_AMBIGUOUS.value]
+    assert len(ambiguous) == 4
+    assert all(item["recoverable"] is True for item in ambiguous)
+    citations = next(item for item in feature_results if item["feature"] == "citations")
+    assert (citations["source_count"], citations["output_count"], citations["status"]) == (
+        1,
+        None,
+        "unsupported",
+    )
+    citation_ids = set(cast("list[str]", citations["diagnostic_ids"]))
+    citation_findings = [item for item in findings if item["diagnostic_id"] in citation_ids]
+    assert len(citation_findings) == 1
+    assert citation_findings[0]["code"] == ErrorCode.EXPORT_DEGRADED.value
+    assert citation_findings[0]["recoverable"] is True
     source_map_path = export_objects / "source-map.json"
     source_map = read_contract_file(source_map_path, expected_schema="SourceMap")
+    coverage = cast("dict[str, int]", source_map["payload"]["coverage"])
+    assert (coverage["total"], coverage["exact"], coverage["conflict"]) == (23, 19, 4)
     exported_sha = cast("str", cast("dict[str, Any]", source_map["payload"])["review_docx_sha256"])
     mapping = next(
         item

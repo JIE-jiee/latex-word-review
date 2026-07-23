@@ -23,12 +23,13 @@ from latex_word_review.contracts import load_contract_json
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
-from latex_word_review.export_models import ExportReport
+from latex_word_review.export_models import ExportReport, export_report_commitment
 from latex_word_review.hashing import FileDigest, digest_file, read_stable_bytes
 from latex_word_review.ids import new_run_id
 from latex_word_review.image_materializer import SealedImageCacheVerifier
 from latex_word_review.image_overlay import IMAGE_OVERLAY_FORMAT, IMAGE_OVERLAY_MANIFEST
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
+from latex_word_review.inspection import inspect_docx
 from latex_word_review.jsonio import read_contract_file, write_new_json
 from latex_word_review.paths import (
     ensure_disjoint_roots,
@@ -38,7 +39,16 @@ from latex_word_review.paths import (
 )
 from latex_word_review.revisions import build_changeset
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
+from latex_word_review.source_features import (
+    INVENTORY_PROFILE_VERSION,
+    independently_observed_label_count,
+    scan_source_features,
+)
 from latex_word_review.workflow_objects import (
+    EXPORT_REPORT_INTERFACE_VERSION,
+    LEGACY_SOURCE_MAP_INTERFACE_VERSION,
+    SOURCE_MANIFEST_INTERFACE_VERSION,
+    SOURCE_MAP_INTERFACE_VERSION,
     bookmark_bindings_from_source_map,
     build_backend_capabilities_document,
     build_export_report_document,
@@ -66,6 +76,40 @@ _CHANGESET = "receive/changeset.json"
 _STAGING = ".lwr-staging"
 _MAX_DOCX_BYTES = 128 * 1024 * 1024
 _MAX_CONTRACT_BYTES = 16 * 1024 * 1024
+_LEGACY_EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v1"
+_LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION = "source-manifest-builder-v1"
+_SOURCE_FEATURE_METRICS = {
+    "images": "image_instances",
+    "math": "math_objects",
+    "tables": "table_instances",
+    "references": "reference_instances",
+    "labels": "label_instances",
+    "citations": "citation_instances",
+}
+_SOURCE_FEATURE_AUX_METRICS = {
+    "tables": ("non_equivalent_table_instances",),
+    "references": ("non_equivalent_reference_instances",),
+    "labels": ("dynamic_label_instances",),
+}
+_REQUIRED_SOURCE_FEATURE_METRICS = frozenset(
+    {
+        "source_feature_inventory_version",
+        "source_tex_files",
+        "inline_math_instances",
+        "display_math_instances",
+        "skipped_dynamic_regions",
+        *_SOURCE_FEATURE_METRICS.values(),
+        *(key for values in _SOURCE_FEATURE_AUX_METRICS.values() for key in values),
+    }
+)
+_CURRENT_SOURCE_FEATURE_MARKER_METRICS = _REQUIRED_SOURCE_FEATURE_METRICS - {
+    "source_feature_inventory_version",
+    "image_instances",
+}
+_CURRENT_SOURCE_FEATURE_RESULT_MARKERS = frozenset(
+    {"math", "tables", "references", "labels", "citations"}
+)
+_CRITICAL_SOURCE_FEATURES = frozenset({"images", "math", "tables", "references", "labels"})
 _STAGE_PREFIXES = (
     ".lwr-stage-export-",
     ".lwr-stage-receive-",
@@ -467,6 +511,13 @@ def _write_export_objects(
                 "finding_count": len(outcome.report.findings),
             },
         )
+    _validate_source_feature_report_payload(
+        cast("dict[str, Any]", outcome.report.as_payload()),
+        source_manifest_interface_version=SOURCE_MANIFEST_INTERFACE_VERSION,
+        expected_source_metrics=outcome.report.source_metrics,
+        expected_output_metrics=outcome.report.output_metrics,
+        producer_interface_version=EXPORT_REPORT_INTERFACE_VERSION,
+    )
     review_ir = build_review_ir_document(
         core.discovery,
         outcome,
@@ -480,6 +531,7 @@ def _write_export_objects(
         source_manifest_sha256=core.source_manifest_sha256,
         review_ir_sha256=compute_payload_sha256(review_ir),
         generated_at=timestamp,
+        export_report_payload=cast("dict[str, Any]", outcome.report.as_payload()),
     )
     write_new_json(objects / "review-ir.json", review_ir, contract=True)
     write_new_json(objects / "source-map.json", source_map, contract=True)
@@ -600,6 +652,71 @@ def export_workflow(
             _remove_owned_tree(stage, stage.parent, prefixes=(".lwr-stage-export-",))
 
 
+def _source_manifest_interface_version(core: _CoreState) -> str:
+    producer = core.source_manifest.get("producer")
+    if not isinstance(producer, dict):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source manifest producer is invalid",
+        )
+    interface_version = producer.get("interface_version")
+    if interface_version not in {
+        _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION,
+        SOURCE_MANIFEST_INTERFACE_VERSION,
+    }:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source manifest producer interface is unsupported",
+        )
+    return cast("str", interface_version)
+
+
+def _validate_export_generation(
+    core: _CoreState,
+    source_map: dict[str, Any],
+    report: dict[str, Any],
+    map_payload: dict[str, Any],
+    report_payload: dict[str, Any],
+) -> None:
+    map_producer = source_map.get("producer")
+    report_producer = report.get("producer")
+    if not isinstance(map_producer, dict) or not isinstance(report_producer, dict):
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export producer is invalid")
+    generation = (
+        _source_manifest_interface_version(core),
+        map_producer.get("interface_version"),
+        report_producer.get("interface_version"),
+    )
+    current = (
+        SOURCE_MANIFEST_INTERFACE_VERSION,
+        SOURCE_MAP_INTERFACE_VERSION,
+        EXPORT_REPORT_INTERFACE_VERSION,
+    )
+    legacy = (
+        _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION,
+        LEGACY_SOURCE_MAP_INTERFACE_VERSION,
+        _LEGACY_EXPORT_REPORT_INTERFACE_VERSION,
+    )
+    if generation == current:
+        if map_payload.get("export_report_commitment") != export_report_commitment(report_payload):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "SourceMap ExportReport commitment differs",
+            )
+        return
+    if generation == legacy:
+        if "export_report_commitment" in map_payload:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy SourceMap unexpectedly contains a report commitment",
+            )
+        return
+    raise ContractError(
+        ErrorCode.HASH_SOURCE_MISMATCH,
+        "export object producer generations differ or are unsupported",
+    )
+
+
 def _validate_export(core: _CoreState) -> _ExportState:
     export_root = _require_real_directory(core.root / _EXPORT, "workflow export")
     _tree_entries_without_links(export_root)
@@ -625,13 +742,14 @@ def _validate_export(core: _CoreState) -> _ExportState:
     review_payload = cast("dict[str, Any]", review_ir["payload"])
     map_payload = cast("dict[str, Any]", source_map["payload"])
     report_payload = cast("dict[str, Any]", report["payload"])
+    _validate_export_generation(core, source_map, report, map_payload, report_payload)
     if review_payload["source_manifest_sha256"] != core.source_manifest_sha256:
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "ReviewIR source binding differs")
     if map_payload["source_manifest_sha256"] != core.source_manifest_sha256 or map_payload[
         "review_ir_sha256"
     ] != compute_payload_sha256(review_ir):
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "SourceMap binding differs")
-    _validate_image_overlay(core, export_root, map_payload, report_payload)
+    source_image_instances = _validate_image_overlay(core, export_root, map_payload, report_payload)
     review_digest = digest_file(paths["review"], max_bytes=_MAX_DOCX_BYTES)
     artifact = cast("dict[str, Any]", report_payload["review_docx"])
     expected_review = FileDigest(
@@ -650,6 +768,40 @@ def _validate_export(core: _CoreState) -> _ExportState:
         or map_payload["review_docx_sha256"] != review_digest.sha256
     ):
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export object binding differs")
+    inspection = inspect_docx(paths["review"])
+    if not inspection.package_valid or not inspection.structure_inspected:
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "sealed review DOCX failed independent structure inspection",
+        )
+    inventory = scan_source_features(
+        core.root / _SNAPSHOT,
+        core.discovery,
+        image_instances=source_image_instances,
+    )
+    tool = cast("dict[str, Any]", capabilities_payload["tool"])
+    label_output_count = independently_observed_label_count(
+        inventory,
+        inspection,
+        backend_id=cast("str", capabilities_payload["backend_id"]),
+        tool_name=cast("str", tool["name"]),
+        tool_version=cast("str | None", tool["version"]),
+        interface_version=cast("str | None", tool["interface_version"]),
+    )
+    expected_locations: dict[str, dict[str, object] | None] = {}
+    for feature in _SOURCE_FEATURE_METRICS:
+        location = inventory.location_for(cast("Any", feature))
+        expected_locations[feature] = None if location is None else location.as_contract()
+    report_producer = cast("dict[str, Any]", report["producer"])
+    _validate_source_feature_report_payload(
+        report_payload,
+        producer_interface_version=report_producer.get("interface_version"),
+        source_manifest_interface_version=_source_manifest_interface_version(core),
+        expected_source_metrics=inventory.as_metrics(),
+        expected_output_metrics=inspection.as_metrics(),
+        expected_feature_locations=expected_locations,
+        expected_feature_output_counts={"labels": label_output_count},
+    )
     coverage = cast("dict[str, int]", map_payload["coverage"])
     counts = {
         "source_files": len(core.discovery.files),
@@ -662,6 +814,382 @@ def _validate_export(core: _CoreState) -> _ExportState:
         source_map_sha256=compute_payload_sha256(source_map),
         counts=counts,
     )
+
+
+def _has_current_source_feature_markers(
+    source_metrics: dict[str, Any],
+    raw_results: object,
+) -> bool:
+    if _CURRENT_SOURCE_FEATURE_MARKER_METRICS.intersection(source_metrics):
+        return True
+    if not isinstance(raw_results, list):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("feature") in _CURRENT_SOURCE_FEATURE_RESULT_MARKERS
+        for item in raw_results
+    )
+
+
+def _validate_source_feature_report_payload(
+    report_payload: dict[str, Any],
+    *,
+    producer_interface_version: object,
+    source_manifest_interface_version: object | None = None,
+    expected_source_metrics: dict[str, int] | None = None,
+    expected_output_metrics: dict[str, int] | None = None,
+    expected_feature_locations: dict[str, dict[str, object] | None] | None = None,
+    expected_feature_output_counts: dict[str, int | None] | None = None,
+) -> None:
+    """Recheck report semantics against an independently sealed evidence generation."""
+
+    independent_evidence_required = source_manifest_interface_version is not None
+    if source_manifest_interface_version is None:
+        source_manifest_interface_version = (
+            SOURCE_MANIFEST_INTERFACE_VERSION
+            if producer_interface_version == EXPORT_REPORT_INTERFACE_VERSION
+            else _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION
+        )
+    if source_manifest_interface_version not in {
+        _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION,
+        SOURCE_MANIFEST_INTERFACE_VERSION,
+    }:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source manifest producer interface is unsupported",
+        )
+    current_source_evidence = source_manifest_interface_version == SOURCE_MANIFEST_INTERFACE_VERSION
+    current_report = producer_interface_version == EXPORT_REPORT_INTERFACE_VERSION
+    if current_source_evidence != current_report:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source manifest and export report evidence generations differ",
+        )
+
+    supported_interfaces = {
+        _LEGACY_EXPORT_REPORT_INTERFACE_VERSION,
+        EXPORT_REPORT_INTERFACE_VERSION,
+    }
+    if producer_interface_version not in supported_interfaces:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "export report producer interface is unsupported",
+        )
+    metrics = report_payload.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metrics are invalid")
+    source = metrics.get("source")
+    output = metrics.get("output")
+    if not isinstance(source, dict) or not isinstance(output, dict):
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metric groups are invalid")
+    raw_results = report_payload.get("feature_results")
+    version = source.get("source_feature_inventory_version")
+    if not current_source_evidence:
+        if version is not None or _has_current_source_feature_markers(source, raw_results):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy export report contains current source feature evidence",
+            )
+        return
+    if version is None:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "current source feature report cannot be downgraded to legacy evidence",
+        )
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != INVENTORY_PROFILE_VERSION
+    ):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source feature inventory version is unsupported",
+        )
+
+    raw_findings = report_payload.get("findings")
+    if independent_evidence_required and (
+        expected_source_metrics is None or expected_output_metrics is None
+    ):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "current export report lacks independent source or DOCX evidence",
+        )
+    if expected_source_metrics is not None:
+        for metric, expected in expected_source_metrics.items():
+            if source.get(metric) != expected or isinstance(source.get(metric), bool):
+                raise ContractError(
+                    ErrorCode.HASH_SOURCE_MISMATCH,
+                    "export source metrics differ from the sealed snapshot inventory",
+                    details={"metric": metric},
+                )
+    if expected_output_metrics is not None:
+        for metric, expected in expected_output_metrics.items():
+            if output.get(metric) != expected or isinstance(output.get(metric), bool):
+                raise ContractError(
+                    ErrorCode.HASH_SOURCE_MISMATCH,
+                    "export output metrics differ from the final DOCX inspection",
+                    details={"metric": metric},
+                )
+    if not isinstance(raw_results, list) or not isinstance(raw_findings, list):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source feature reconciliation evidence is invalid",
+        )
+    findings_by_id: dict[str, dict[str, Any]] = {}
+    for finding in raw_findings:
+        if not isinstance(finding, dict):
+            continue
+        diagnostic_id = finding.get("diagnostic_id")
+        if not isinstance(diagnostic_id, str):
+            continue
+        if diagnostic_id in findings_by_id:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature diagnostic is duplicated",
+                details={"diagnostic_id": diagnostic_id},
+            )
+        findings_by_id[diagnostic_id] = finding
+    finding_ids = set(findings_by_id)
+    indexed: dict[str, dict[str, Any]] = {}
+    for item in raw_results:
+        if not isinstance(item, dict):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature result is invalid",
+            )
+        feature = item.get("feature")
+        if not isinstance(feature, str) or feature not in _SOURCE_FEATURE_METRICS:
+            continue
+        if feature in indexed:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature result is duplicated",
+                details={"feature": feature},
+            )
+        indexed[feature] = item
+    missing = sorted(set(_SOURCE_FEATURE_METRICS).difference(indexed))
+    if missing:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "source feature reconciliation evidence is incomplete",
+            details={"missing_features": ",".join(missing)},
+        )
+
+    def metric_count(container: dict[str, Any], key: str) -> int:
+        value = container.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature metric is missing or invalid",
+                details={"metric": key},
+            )
+        return value
+
+    for source_metric in sorted(
+        _REQUIRED_SOURCE_FEATURE_METRICS - {"source_feature_inventory_version"}
+    ):
+        metric_count(source, source_metric)
+    skipped_dynamic_regions = metric_count(source, "skipped_dynamic_regions")
+    dynamic_results = [
+        item
+        for item in raw_results
+        if isinstance(item, dict) and item.get("feature") == "dynamic_regions"
+    ]
+    if len(dynamic_results) != (1 if skipped_dynamic_regions else 0):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "dynamic source-region reconciliation evidence is incomplete",
+        )
+    dynamic_partial_required = False
+    if skipped_dynamic_regions:
+        dynamic_result = dynamic_results[0]
+        dynamic_ids = dynamic_result.get("diagnostic_ids")
+        if (
+            dynamic_result.get("status") != "degraded"
+            or dynamic_result.get("source_count") != skipped_dynamic_regions
+            or dynamic_result.get("output_count") is not None
+            or not isinstance(dynamic_ids, list)
+            or len(dynamic_ids) != 1
+            or not isinstance(dynamic_ids[0], str)
+            or dynamic_ids[0] not in findings_by_id
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "dynamic source-region reconciliation evidence differs",
+            )
+        dynamic_finding = findings_by_id[dynamic_ids[0]]
+        if (
+            dynamic_finding.get("code") != ErrorCode.EXPORT_DEGRADED.value
+            or dynamic_finding.get("phase") != "inspect"
+            or dynamic_finding.get("recoverable") is not True
+            or dynamic_finding.get("source_location") is not None
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "dynamic source-region diagnostic binding differs",
+            )
+        dynamic_partial_required = True
+    expected_output_counts: dict[str, int | None] = {
+        "images": metric_count(output, "image_instances"),
+        "math": metric_count(output, "omml_objects"),
+        "tables": metric_count(output, "tables"),
+        "references": metric_count(output, "ref_fields") + metric_count(output, "pageref_fields"),
+    }
+    partial_required = dynamic_partial_required
+    unsupported_critical_features: list[str] = []
+    diagnostic_owners: dict[str, str] = {}
+    if expected_feature_output_counts is not None:
+        expected_output_counts.update(expected_feature_output_counts)
+    for feature, source_metric in _SOURCE_FEATURE_METRICS.items():
+        result = indexed[feature]
+        expected_source_count = metric_count(source, source_metric)
+        auxiliary_source_count = sum(
+            metric_count(source, metric) for metric in _SOURCE_FEATURE_AUX_METRICS.get(feature, ())
+        )
+        source_count = result.get("source_count")
+        if source_count != expected_source_count or isinstance(source_count, bool):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature count differs from inventory metrics",
+                details={"feature": feature},
+            )
+        output_count = result.get("output_count")
+        if feature in expected_output_counts:
+            if output_count != expected_output_counts[feature] or isinstance(output_count, bool):
+                raise ContractError(
+                    ErrorCode.HASH_SOURCE_MISMATCH,
+                    "source feature count differs from DOCX metrics",
+                    details={"feature": feature},
+                )
+        elif output_count is not None and (
+            isinstance(output_count, bool) or not isinstance(output_count, int) or output_count < 0
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature output count is invalid",
+                details={"feature": feature},
+            )
+        expected_output_count = expected_output_counts.get(feature)
+        if expected_output_count is not None and expected_output_count < expected_source_count:
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "source feature output count is lower than the inventory count",
+                details={"feature": feature},
+            )
+
+        status = result.get("status")
+        if status not in {"preserved", "degraded", "unsupported", "failed"}:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature status is invalid",
+                details={"feature": feature},
+            )
+        if feature == "citations" and expected_source_count > 0 and status != "unsupported":
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "source citations cannot be marked preserved without count-equivalent evidence",
+                details={"feature": feature},
+            )
+        diagnostic_ids = result.get("diagnostic_ids")
+        if not isinstance(diagnostic_ids, list) or any(
+            not isinstance(item, str) for item in diagnostic_ids
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature diagnostics are invalid",
+                details={"feature": feature},
+            )
+        if not set(diagnostic_ids).issubset(finding_ids):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature diagnostics are not bound to report findings",
+                details={"feature": feature},
+            )
+        if status == "failed":
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "source feature reconciliation contains a blocking loss",
+                details={"feature": feature},
+            )
+        if status in {"degraded", "unsupported"}:
+            partial_required = True
+        requires_diagnostic = status in {"degraded", "unsupported"}
+        if requires_diagnostic and not diagnostic_ids:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "non-preserved source feature lacks an explicit diagnostic",
+                details={"feature": feature},
+            )
+        if requires_diagnostic and any(
+            findings_by_id[diagnostic_id].get("recoverable") is not True
+            for diagnostic_id in diagnostic_ids
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "non-preserved source feature lacks a recoverable finding",
+                details={"feature": feature},
+            )
+        if requires_diagnostic and len(diagnostic_ids) != len(set(diagnostic_ids)):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "source feature repeats a diagnostic binding",
+                details={"feature": feature},
+            )
+        if requires_diagnostic:
+            expected_code = ErrorCode.EXPORT_DEGRADED.value
+            for diagnostic_id in diagnostic_ids:
+                finding = findings_by_id[diagnostic_id]
+                owner = diagnostic_owners.get(diagnostic_id)
+                if owner is not None and owner != feature:
+                    raise ContractError(
+                        ErrorCode.HASH_SOURCE_MISMATCH,
+                        "source feature diagnostic is bound to multiple features",
+                        details={"feature": feature, "other_feature": owner},
+                    )
+                diagnostic_owners[diagnostic_id] = feature
+                if finding.get("code") != expected_code or finding.get("phase") != "inspect":
+                    raise ContractError(
+                        ErrorCode.HASH_SOURCE_MISMATCH,
+                        "source feature diagnostic code or inspection phase differs",
+                        details={"feature": feature},
+                    )
+                if expected_feature_locations is not None and finding.get(
+                    "source_location"
+                ) != expected_feature_locations.get(feature):
+                    raise ContractError(
+                        ErrorCode.HASH_SOURCE_MISMATCH,
+                        "source feature diagnostic evidence differs from the sealed snapshot",
+                        details={"feature": feature},
+                    )
+        if status == "unsupported" and feature in _CRITICAL_SOURCE_FEATURES:
+            unsupported_critical_features.append(feature)
+        if status == "preserved" and auxiliary_source_count > 0:
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "source feature marked preserved despite non-equivalent source constructs",
+                details={"feature": feature},
+            )
+        if (
+            status == "preserved"
+            and expected_source_count > 0
+            and (output_count is None or output_count < expected_source_count)
+        ):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "source feature marked preserved despite a lower output count",
+                details={"feature": feature},
+            )
+
+    if partial_required and report_payload.get("status") != "partial":
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "non-preserved source features require a partial export status",
+        )
+    if unsupported_critical_features:
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "critical source feature cannot be unsupported",
+            details={"features": ",".join(unsupported_critical_features)},
+        )
 
 
 def _is_reviewable_export_payload(report_payload: dict[str, Any]) -> bool:
@@ -686,7 +1214,7 @@ def _validate_image_overlay(
     export_root: Path,
     map_payload: dict[str, Any],
     report_payload: dict[str, Any],
-) -> None:
+) -> int:
     """Recompute the sealed image-overlay evidence used by the DOCX export."""
 
     map_binding = cast("dict[str, Any]", map_payload["image_overlay"])
@@ -793,6 +1321,17 @@ def _validate_image_overlay(
             entry,
             sealed_image_verifier,
         )
+    source_image_instances = counts.get("source_image_instances")
+    if (
+        isinstance(source_image_instances, bool)
+        or not isinstance(source_image_instances, int)
+        or source_image_instances < 0
+    ):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "image-overlay source count is invalid",
+        )
+    return source_image_instances
 
 
 def _validate_materialized_image(

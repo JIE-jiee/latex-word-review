@@ -2,16 +2,53 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from latex_word_review.errors import ErrorCode
+from latex_word_review.canonical import sha256_canonical
+from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.hashing import digest_file
 from latex_word_review.ids import derive_artifact_id, derive_diagnostic_id
 from latex_word_review.paths import validate_relative_path
 
 Severity = Literal["info", "warning", "error", "fatal"]
+EXPORT_REPORT_COMMITMENT_PROFILE_NAME = "export-report-payload-source-map-null"
+EXPORT_REPORT_COMMITMENT_PROFILE_VERSION = "1"
+
+
+def normalized_export_report_payload(report_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize only the self-cyclic SourceMap hash before commitment hashing."""
+
+    normalized = dict(report_payload)
+    if "source_map_sha256" not in normalized:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "ExportReport commitment requires source_map_sha256",
+        )
+    normalized["source_map_sha256"] = None
+    return normalized
+
+
+def export_report_commitment(report_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Commit to the complete ExportReport payload using a fixed JCS profile."""
+
+    profile_configuration = {
+        "canonicalization": "RFC8785",
+        "normalization": "source_map_sha256=null",
+        "scope": "complete-export-report-payload",
+    }
+    return {
+        "profile": {
+            "name": EXPORT_REPORT_COMMITMENT_PROFILE_NAME,
+            "version": EXPORT_REPORT_COMMITMENT_PROFILE_VERSION,
+            "configuration_sha256": sha256_canonical(profile_configuration),
+        },
+        "payload_sha256": sha256_canonical(normalized_export_report_payload(report_payload)),
+    }
+
+
 Phase = Literal["export", "inspect"]
 
 
@@ -165,9 +202,13 @@ class ExportReport:
 
 
 __all__ = [
+    "EXPORT_REPORT_COMMITMENT_PROFILE_NAME",
+    "EXPORT_REPORT_COMMITMENT_PROFILE_VERSION",
     "ExportFeatureResult",
     "ExportFinding",
     "ExportReport",
     "ExportValidation",
     "ReviewDocxArtifact",
+    "export_report_commitment",
+    "normalized_export_report_payload",
 ]

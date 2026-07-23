@@ -28,6 +28,7 @@ from latex_word_review.export_models import (
     ExportReport,
     ExportValidation,
     ReviewDocxArtifact,
+    export_report_commitment,
 )
 from latex_word_review.hashing import read_stable_bytes
 from latex_word_review.image_overlay import (
@@ -40,6 +41,10 @@ from latex_word_review.image_overlay import (
 from latex_word_review.inspection import DocxInspection, inspect_docx
 from latex_word_review.paths import ensure_disjoint_roots, validate_relative_path
 from latex_word_review.review_layout import apply_review_layout
+from latex_word_review.source_features import (
+    reconcile_source_features,
+    scan_source_features,
+)
 from latex_word_review.source_units import (
     SourceUnit,
     review_ir_payload,
@@ -196,13 +201,14 @@ class AnchoringResult:
         *,
         source_manifest_sha256: str,
         review_ir_sha256: str,
+        report_commitment: dict[str, object] | None = None,
     ) -> dict[str, object]:
         if self.image_overlay is None:
             raise ContractError(
                 ErrorCode.INTERNAL_INVARIANT,
                 "SourceMap requires an image-overlay binding",
             )
-        return {
+        payload: dict[str, object] = {
             "source_manifest_sha256": source_manifest_sha256,
             "review_ir_sha256": review_ir_sha256,
             "review_docx_sha256": self.docx_sha256,
@@ -223,6 +229,9 @@ class AnchoringResult:
             "coverage": self.coverage,
             "diagnostics": [finding.as_diagnostic() for finding in self.findings],
         }
+        if report_commitment is not None:
+            payload["export_report_commitment"] = dict(report_commitment)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -667,6 +676,15 @@ def export_review_docx(
         confidentiality=bindings.confidentiality,
     )
     source_image_instances = image_overlay.source_image_instances
+    feature_inventory = scan_source_features(
+        source_root,
+        discovery,
+        image_instances=source_image_instances,
+    )
+    source_metrics = {
+        "paragraphs": len(units),
+        **feature_inventory.as_metrics(),
+    }
     review_payload = review_ir_payload(
         discovery,
         units,
@@ -706,10 +724,7 @@ def export_review_docx(
                 source_map_sha256=None,
                 review_docx=None,
                 image_overlay=image_overlay_binding,
-                source_metrics={
-                    "paragraphs": len(units),
-                    "image_instances": source_image_instances,
-                },
+                source_metrics=source_metrics,
                 output_metrics={},
                 feature_results=(),
                 findings=backend_result.findings,
@@ -768,10 +783,7 @@ def export_review_docx(
                 source_map_sha256=None,
                 review_docx=None,
                 image_overlay=image_overlay_binding,
-                source_metrics={
-                    "paragraphs": len(units),
-                    "image_instances": source_image_instances,
-                },
+                source_metrics=source_metrics,
                 output_metrics=inspection.as_metrics(),
                 feature_results=(),
                 findings=findings,
@@ -786,24 +798,13 @@ def export_review_docx(
                 None,
                 image_overlay,
             )
-        if inspection.image_instances < source_image_instances:
-            image_finding = ExportFinding(
-                code=ErrorCode.EXPORT_SILENT_LOSS,
-                severity="error",
-                phase="inspect",
-                message="one or more LaTeX image instances are absent from the review DOCX",
-                recoverable=False,
-                fingerprint=sha256_canonical(
-                    {
-                        "source_image_instances": source_image_instances,
-                        "output_image_instances": inspection.image_instances,
-                    }
-                ),
-                remediation=(
-                    "install the pdf-figures extra or resolve the reported image conversion"
-                ),
-            )
-            findings += (image_finding,)
+        feature_reconciliation = reconcile_source_features(
+            feature_inventory,
+            inspection,
+            backend_result,
+        )
+        findings += feature_reconciliation.findings
+        if feature_reconciliation.failed:
             report = ExportReport(
                 status="failed",
                 source_manifest_sha256=bindings.source_manifest_sha256,
@@ -812,20 +813,9 @@ def export_review_docx(
                 source_map_sha256=None,
                 review_docx=None,
                 image_overlay=image_overlay_binding,
-                source_metrics={
-                    "paragraphs": len(units),
-                    "image_instances": source_image_instances,
-                },
+                source_metrics=source_metrics,
                 output_metrics=inspection.as_metrics(),
-                feature_results=(
-                    ExportFeatureResult(
-                        feature="images",
-                        status="failed",
-                        source_count=source_image_instances,
-                        output_count=inspection.image_instances,
-                        diagnostic_ids=(image_finding.diagnostic_id,),
-                    ),
-                ),
+                feature_results=feature_reconciliation.feature_results,
                 findings=findings,
                 validation=inspection.validation,
             )
@@ -838,11 +828,6 @@ def export_review_docx(
                 None,
                 image_overlay,
             )
-        source_map_payload = anchoring.source_map_payload(
-            source_manifest_sha256=bindings.source_manifest_sha256,
-            review_ir_sha256=review_ir_sha256,
-        )
-        source_map_sha256 = sha256_canonical(source_map_payload)
         artifact = ReviewDocxArtifact.from_file(
             anchored_stage,
             artifact_path=bindings.artifact_path,
@@ -861,13 +846,10 @@ def export_review_docx(
             source_manifest_sha256=bindings.source_manifest_sha256,
             backend_capabilities_sha256=backend_result.capabilities.payload_sha256,
             review_ir_sha256=review_ir_sha256,
-            source_map_sha256=source_map_sha256,
+            source_map_sha256=None,
             review_docx=artifact,
             image_overlay=image_overlay_binding,
-            source_metrics={
-                "paragraphs": len(units),
-                "image_instances": source_image_instances,
-            },
+            source_metrics=source_metrics,
             output_metrics=inspection.as_metrics(),
             feature_results=(
                 ExportFeatureResult(
@@ -877,16 +859,18 @@ def export_review_docx(
                     output_count=exact,
                     diagnostic_ids=feature_ids,
                 ),
-                ExportFeatureResult(
-                    feature="images",
-                    status="preserved",
-                    source_count=source_image_instances,
-                    output_count=inspection.image_instances,
-                ),
+                *feature_reconciliation.feature_results,
             ),
             findings=findings,
             validation=inspection.validation,
         )
+        source_map_payload = anchoring.source_map_payload(
+            source_manifest_sha256=bindings.source_manifest_sha256,
+            review_ir_sha256=review_ir_sha256,
+            report_commitment=export_report_commitment(report.as_payload()),
+        )
+        source_map_sha256 = sha256_canonical(source_map_payload)
+        report = replace(report, source_map_sha256=source_map_sha256)
         outcome = ExportOutcome(
             backend_result,
             report,

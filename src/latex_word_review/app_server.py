@@ -80,6 +80,8 @@ _SUPPORT_TOKEN_RE: Final = re.compile(
 _ARTIFACT_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _FILTERS: Final = frozenset({"all", "pending", "safe", "manual", "conflict"})
 _DECISIONS: Final = frozenset({"accepted", "accepted_with_edit", "rejected", "manual", "conflict"})
+_MAX_APPROVAL_PAGE_DIGITS: Final = 9
+_MAX_APPROVAL_PAGE: Final = 10**_MAX_APPROVAL_PAGE_DIGITS - 1
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
 _FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x0400
 _GRACEFUL_DRAIN_BYTES: Final = MAX_FORM_BYTES + 1
@@ -164,6 +166,8 @@ def _is_link_or_junction(path: Path) -> bool:
             or bool(junction_probe is not None and junction_probe())
             or bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
         )
+    except FileNotFoundError:
+        return False
     except OSError as exc:
         raise ContractError(ErrorCode.PATH_LINK_ESCAPE, "path link status is unavailable") from exc
 
@@ -295,6 +299,8 @@ def _remove_validated_delete_tree(
 
 
 def _require_real_directory(path: Path, label: str) -> Path:
+    if not path.exists() and not path.is_symlink():
+        raise ContractError(ErrorCode.SCHEMA_INVALID, f"{label} is unavailable")
     if _is_link_or_junction(path):
         raise ContractError(ErrorCode.PATH_LINK_ESCAPE, f"{label} cannot be a link")
     try:
@@ -806,14 +812,22 @@ class AppState:
         session_key: str,
         *,
         selected_filter: str = "all",
+        selected_page: int = 1,
     ) -> dict[str, object]:
         if selected_filter not in _FILTERS:
             raise ContractError(ErrorCode.SCHEMA_INVALID, "unknown approval filter")
+        if (
+            not isinstance(selected_page, int)
+            or isinstance(selected_page, bool)
+            or not 1 <= selected_page <= _MAX_APPROVAL_PAGE
+        ):
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "invalid approval page")
         view = render_session_view(
             self.load_session(session_key),
             session_key=session_key,
             csrf_token=self.csrf_token,
             selected_filter=selected_filter,
+            selected_page=selected_page,
         )
         self.bind_support_action(
             view,
@@ -1193,7 +1207,19 @@ class AppState:
     def accept_all_safe(self, session_key: str) -> None:
         self._action_session(session_key).decide_bulk_without_status(operation="accept_all_safe")
 
-    def _artifact_path(self, session_key: str, artifact_key: str) -> Path:
+    def mark_all_manual(self, session_key: str) -> None:
+        self._action_session(session_key).decide_bulk_without_status(
+            operation="mark_manual",
+            reason="not eligible for exact automatic LaTeX writeback",
+        )
+
+    def _artifact_path(
+        self,
+        session_key: str,
+        artifact_key: str,
+        *,
+        must_exist: bool = True,
+    ) -> Path:
         if _ARTIFACT_KEY_RE.fullmatch(artifact_key) is None:
             raise ContractError(ErrorCode.SCHEMA_INVALID, "invalid artifact key")
         session = self.load_session(session_key)
@@ -1203,7 +1229,26 @@ class AppState:
         if not isinstance(relative_value, str):
             raise ContractError(ErrorCode.SCHEMA_INVALID, "artifact is unavailable")
         relative = validate_relative_path(relative_value)
-        return resolve_within(session.run_root, relative)
+        run_root = _require_real_directory(session.run_root, "review session")
+
+        def reject_link_components() -> None:
+            current = run_root
+            for part in relative.split("/"):
+                current /= part
+                junction_probe = getattr(current, "is_junction", None)
+                is_junction = bool(junction_probe is not None and junction_probe())
+                if not (current.exists() or current.is_symlink() or is_junction):
+                    break
+                if _is_link_or_junction(current):
+                    raise ContractError(
+                        ErrorCode.PATH_LINK_ESCAPE,
+                        "artifact path cannot contain a link or junction",
+                    )
+
+        reject_link_components()
+        resolved = resolve_within(run_root, relative, must_exist=must_exist)
+        reject_link_components()
+        return resolved
 
     def open_review_docx(self, session_key: str) -> None:
         path = self._artifact_path(session_key, "review_docx")
@@ -1211,11 +1256,21 @@ class AppState:
             raise ContractError(ErrorCode.SCHEMA_INVALID, "review Word is unavailable")
         self._path_opener(path)
 
-    def open_results_folder(self, session_key: str) -> None:
+    def open_revised_source(self, session_key: str) -> None:
+        revised_source = self._artifact_path(session_key, "revised_source", must_exist=False)
+        self._path_opener(_require_real_directory(revised_source, "revised LaTeX folder"))
+
+    def open_delivery_folder(self, session_key: str) -> None:
+        run_manifest = self._artifact_path(session_key, "run_manifest", must_exist=False)
         session = self.load_session(session_key)
-        delivery = session.run_root / "delivery"
-        target = delivery if delivery.exists() else session.run_root
-        self._path_opener(_require_real_directory(target, "results folder"))
+        delivery = _require_real_directory(session.run_root / "delivery", "delivery folder")
+        if not run_manifest.exists() and not run_manifest.is_symlink():
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "delivery manifest is unavailable")
+        if _is_link_or_junction(run_manifest) or not run_manifest.is_file():
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "delivery manifest is unavailable")
+        if run_manifest.parent != delivery:
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "delivery manifest is misplaced")
+        self._path_opener(delivery)
 
     def downloadable_artifact(self, session_key: str, artifact_key: str) -> tuple[Path, str]:
         if artifact_key not in _DOWNLOADABLE_ARTIFACTS:
@@ -1530,6 +1585,18 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 index += 1
         return True
 
+    @staticmethod
+    def _approval_page(value: str) -> int | None:
+        if (
+            not value
+            or len(value) > _MAX_APPROVAL_PAGE_DIGITS
+            or not value.isascii()
+            or not value.isdigit()
+        ):
+            return None
+        page = int(value)
+        return page if 1 <= page <= _MAX_APPROVAL_PAGE else None
+
     def _query(self, encoded: str, expected_fields: set[str]) -> dict[str, str] | None:
         if not encoded:
             return {} if not expected_fields else None
@@ -1717,16 +1784,31 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 return
             if session_match is not None:
                 request_session_key = session_match.group(1)
-                fields = self._query(query, {"filter"} if query else set())
-                if fields is None:
+                fields: dict[str, str] | None
+                if not query:
+                    fields = {}
+                else:
+                    fields = self._query(query, {"filter"})
+                    if fields is None:
+                        fields = self._query(query, {"filter", "page"})
+                if fields is None or fields.get("filter", "all") not in _FILTERS:
                     self._send_error(HTTPStatus.BAD_REQUEST, ErrorCode.SCHEMA_INVALID)
                     return
                 selected_filter = fields.get("filter", "all")
+                selected_page = 1
+                page_value = fields.get("page")
+                if page_value is not None:
+                    parsed_page = self._approval_page(page_value)
+                    if parsed_page is None:
+                        self._send_error(HTTPStatus.BAD_REQUEST, ErrorCode.SCHEMA_INVALID)
+                        return
+                    selected_page = parsed_page
                 self._send_page(
                     HTTPStatus.OK,
                     self.app_server.app_state.session_view(
                         request_session_key,
                         selected_filter=selected_filter,
+                        selected_page=selected_page,
                     ),
                 )
                 return
@@ -1844,8 +1926,11 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 "final_text",
                 "reason",
                 "risk_acknowledgement",
+                "return_filter",
+                "return_page",
             },
             "/approval/accept-safe": {"csrf", "session"},
+            "/approval/mark-manual": {"csrf", "session"},
             "/approval/start": {"csrf", "session"},
             "/approval/revise": {"csrf", "session", "patch_plan_sha256"},
             "/approval/finalize": {"csrf", "session"},
@@ -1856,7 +1941,8 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 "patch_plan_sha256",
                 "confirm_apply",
             },
-            "/result/open-folder": {"csrf", "session"},
+            "/result/open-revised": {"csrf", "session"},
+            "/result/open-delivery": {"csrf", "session"},
             "/result/retry": {"csrf", "session"},
             "/support/export": {"csrf", "session", "support_token"},
         }
@@ -1926,6 +2012,13 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 self._redirect(f"/jobs/{job.job_id}")
                 return
             if path == "/approval/decision":
+                return_filter = form["return_filter"]
+                return_page = self._approval_page(form["return_page"])
+                if return_filter not in _FILTERS or return_page is None:
+                    raise ContractError(
+                        ErrorCode.SCHEMA_INVALID,
+                        "invalid approval return target",
+                    )
                 state.decide(
                     session_key,
                     change_id=form["change_id"],
@@ -1934,7 +2027,9 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                     reason=form["reason"],
                     risk_acknowledgement=form["risk_acknowledgement"],
                 )
-                self._redirect(session_href)
+                self._redirect(
+                    f"{session_href}?filter={return_filter}&page={return_page}#approval-change-list"
+                )
                 return
             if path == "/approval/start":
                 job = state.submit_begin_approval(session_key)
@@ -1951,6 +2046,10 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 state.accept_all_safe(session_key)
                 self._redirect(session_href)
                 return
+            if path == "/approval/mark-manual":
+                state.mark_all_manual(session_key)
+                self._redirect(f"{session_href}?filter=pending&page=1#approval-change-list")
+                return
             if path == "/approval/finalize":
                 job = state.submit_finalize(session_key)
                 self._redirect(f"/jobs/{job.job_id}")
@@ -1965,8 +2064,12 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 job = state.submit_generate(session_key, form["patch_plan_sha256"])
                 self._redirect(f"/jobs/{job.job_id}")
                 return
-            if path == "/result/open-folder":
-                state.open_results_folder(session_key)
+            if path == "/result/open-revised":
+                state.open_revised_source(session_key)
+                self._redirect(session_href)
+                return
+            if path == "/result/open-delivery":
+                state.open_delivery_folder(session_key)
                 self._redirect(session_href)
                 return
             if path == "/result/retry":

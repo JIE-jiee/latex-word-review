@@ -89,9 +89,13 @@ pending
 - `reject_selected` → `rejected`；
 - `mark_manual` → `manual`。
 
-无论操作结果是接受、拒绝还是人工，批量目标都必须同时满足 `safety_class=plain_text_candidate` 与 `resolution.status=exact`。move、format、comment、unknown、未匹配或冲突项不得通过批量入口处理，以 `E_PATCH_UNSAFE_KIND` 拒绝。它们仍可在逐条审阅时标记为 accepted/manual/conflict，但 accepted 只记录意图，不会提升自动补丁权限。
+三种批量操作都只处理尚未决定的项目，绝不覆盖既有决定。传入显式 `change_ids` 时，函数会先拒绝重复或未知 ID，再从中排除已有决定；主动改判仍只能逐项调用 `record_decision`。如果过滤后没有可处理 ID，则幂等返回原 ApprovalSet，不增加 revision 或审计记录。
 
-每次非幂等批量操作都进入 `audit.bulk_operations`，包含精确 change ID 集合和带时区时间。
+`accept_all_safe` 未传 ID 时只选择尚未决定的 exact `plain_text_candidate`；`reject_selected` 必须显式给出 ID，且实际处理的尚未决定项也必须满足同一 exact 普通正文条件。move、format、comment、unknown、未匹配或冲突项不能经这两种操作接受或拒绝，否则以 `E_PATCH_UNSAFE_KIND` 拒绝。
+
+`mark_manual` 是单向降权操作：未传 ID 时只选择尚未决定且不满足 exact 普通正文条件的项目；显式给出 ID 时可以把任何尚未决定项目标为 manual。它不会接受文字、提升补丁权限或写入 LaTeX。
+
+每次非幂等批量操作都进入 `audit.bulk_operations`，但只记录本次实际处理的 change ID 和带时区时间；已决定而被跳过的 ID 不进入审计集合。
 
 ## 写盘边界
 
@@ -114,6 +118,6 @@ pending
 | `E_APPROVAL_CHANGE_UNKNOWN` | 决定引用未知/遗漏 change |
 | `E_APPROVAL_FINAL_TEXT_REQUIRED` | `accepted_with_edit` 的 `final_text` 为 `null` |
 | `E_APPROVAL_NOT_FINAL` | 存在 pending change 却请求 final |
-| `E_PATCH_UNSAFE_KIND` | 批量目标不是 exact plain-text candidate |
+| `E_PATCH_UNSAFE_KIND` | 批量接受或拒绝的实际目标不是 exact plain-text candidate |
 
 输出必须通过包内 `ApprovalSet` JSON Schema 和 C2 语义校验；未知决定、decision source 或批量操作 fail closed，不做 best effort 映射。

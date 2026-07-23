@@ -1,17 +1,14 @@
 # Windows 完整使用指南
 
-本指南面向第一次使用 LaTeX Word Review 的论文作者。`0.2.0b1` 把普通用户入口收敛为
-一个本机中文界面：选择 `main.tex`、生成 Word、导入返回 Word、逐条审批、核对 diff，再
-确认生成结果。完整 CLI 只留给自动化、开发和异常恢复。
+本指南面向第一次使用 LaTeX Word Review 的论文作者。你可以把 LaTeX 论文变成便于审阅的
+Word，交给不熟悉 LaTeX 的合作者；拿回带修订的 Word 后，再逐条决定哪些改动写入新的
+LaTeX 副本。
 
 项目只支持 Windows。原 LaTeX 与导师返回的 Word 原件保持不变；自动修改只写入新的副本。
 
-> [!WARNING]
-> 当前 `0.2.0b1` 是源码 beta 候选，没有 GitHub Release 或 PyPI 发布。安装器和 portable
-> 已完成本地构建、静态校验与冻结程序运行验收；本轮未执行最终安装器的安装/卸载。由于
-> lxml Windows 静态原生依赖的许可证材料和可重链接路径尚未
-> 闭环，当前不能公开上传这些二进制。请勿从第三方下载冒名安装包。审计记录见
-> [Windows 二进制许可证审计](reviews/windows-binary-license-audit-2026-07.md)。
+> [!IMPORTANT]
+> 当前 `0.2.0b1` 是 beta 源码 ZIP，不是签名安装包。请只从本仓库下载，保留论文备份，并
+> 检查每一次生成结果。
 
 ## 1. 先理解这套工作流
 
@@ -34,134 +31,45 @@
 3. 审批决定不等于写入。第一道闸门只密封意图。
 4. 只有第二次确认的精确计划才能写入全新 LaTeX 副本；已有目录不会覆盖。
 
-## 2. 选择安装方式
+## 2. 下载源码 ZIP，双击启动
 
-### 当前维护者工作区便携入口（若已生成）
+公开双击入口要求 **64 位 Windows** 和 **64 位 Windows PowerShell**。启动器会自动选择
+系统自带的 64 位 Windows PowerShell；不支持 32 位 Windows、32 位 PowerShell 或其他系统。
 
-如果仓库根目录已有 `LaTeX Word Review（双击启动）.lnk`，直接双击它。快捷方式失效时，
-双击 `output\local-windows\Start-Latex-Word-Review.cmd`。这两个入口不需要 Python、
-uv 或 Git；应用、任务数据以及 `TEMP/TMP` 都留在 `output\local-windows`。该目录和
-根快捷方式受 Git 忽略，只是本机验收交付，不代表 GitHub 已公开二进制。
-维护者重建冻结候选后，可运行 `scripts\deploy-local-windows.ps1` 原子更新本机 `app`；脚本
-会逐项验证候选清单并保留 `user-data`、启动器、使用说明和根快捷方式。普通使用者不需要运行
-构建或部署脚本。
+普通用户不需要预先安装 Python、Git 或 uv，也不需要管理员权限。
 
-### 安装器（未来普通用户首选）
+1. 下载本仓库的 [源码 ZIP](https://github.com/JIE-jiee/latex-word-review/archive/refs/heads/main.zip)。
+2. 在资源管理器中选择“全部解压”。不要直接在 ZIP 预览窗口里运行。
+3. 打开解压后的文件夹，双击 **`Start-Latex-Word-Review.cmd`**。
+4. 第一次启动时保持联网，不要关闭命令窗口。准备完成后，浏览器会自动打开本机页面。
+   以后继续双击同一个文件即可启动。
 
-许可证阻断解除并正式上传后，下载
-`latex-word-review-<版本>-windows-x64-setup.exe`，核对发布页 SHA-256，再双击安装。
-安装器：
+首次启动会在解压目录内下载并校验专用 Python 环境和已锁定的应用依赖，不会安装到系统
+目录。若下载或准备中断，请记下窗口里的稳定错误码，检查网络后再次双击。保留整个解压目录，
+下次启动就能复用已经准备好的环境。
 
-- 只为当前 Windows 用户安装；
-- 默认进入 `%LOCALAPPDATA%\Programs\LatexWordReview`；
-- 不请求管理员权限；
-- 在开始菜单建立 **LaTeX Word Review** GUI 入口；
-- 默认勾选创建桌面快捷方式；
-- 安装完成页可立即启动 GUI；
-- 不创建双击后易闪退、容易被误解的 CLI 快捷方式；
-- 卸载时删除程序，不删除论文和审阅任务。
+浏览器页面只连接随机端口的 `127.0.0.1`，不是云端网站。应用界面目前仍是简体中文；GitHub
+首页的中文、English、日本語链接只切换说明文档，不会切换应用界面。
 
-当前没有可供公开下载的 setup，请不要把本节理解为下载链接。
+## 3. 使用前要准备什么
 
-### Portable ZIP（未来免安装选择）
+首次启动只准备应用自己的私有运行环境，不会静默安装 Word、TeX 发行版或论文宏包。完成
+整套审阅时，请留意以下条件：
 
-许可证阻断解除并正式上传后，下载 portable ZIP、核对 SHA-256、解压到普通本机目录，然后
-双击：
+- 审阅者需要 Microsoft Word for Windows，用原生“修订”功能编辑返回稿；
+- 若审阅稿含 `SEQ`、`REF`、`PAGEREF` 等活字段，运行应用的电脑也需要 Word 来刷新字段；
+- 生成干净 PDF 需要能编译原论文的 TeX 环境和 `latexmk`；
+- 生成带修改标记的 PDF 还需要 `latexdiff`；
+- 自动 PDF 核验目前按一套完整 MiKTeX 工具链验证，不会混用多个 TeX 安装。
 
-```text
-LatexWordReview.exe
-```
-
-不要直接在 ZIP 内运行。未来正式 portable 默认仍把任务数据放在
-`%LOCALAPPDATA%\LatexWordReview`，不会把论文写进解压目录。目录中的
-`latex-word-review.exe` 是高级命令行入口。维护者工作区的一键启动器则显式使用
-`output\local-windows\user-data`。
-
-### 当前可用：从源码启动同一界面
-
-需要：
-
-- Windows；
-- Git；
-- [uv](https://docs.astral.sh/uv/)；
-- CPython 3.12 或 3.13。
-
-固定到自己审核过的完整 commit：
-
-```powershell
-git clone https://github.com/JIE-jiee/latex-word-review.git
-Set-Location latex-word-review
-$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
-git checkout --detach $ReviewedCommit
-if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
-uv sync --frozen --extra pdf-figures --python 3.12
-uv run --frozen latex-word-review --version
-uv run --frozen latex-word-review doctor
-uv run --frozen latex-word-review app
-```
-
-把 `$ReviewedCommit` 替换为实际审核过的 40 位 SHA。占位值会故意失败，避免静默跟随
-`main`。`pdf-figures` extra 为 PDF 页面预览安装 Pillow/PDFium。
-
-源码控制台需要保持运行。浏览器自动打开后，后续正常流程都在中文界面完成。
-
-## 3. 体积和外部依赖
-
-本地 `0.2.0b1` Windows x64 最终重建（2026-07-20）的实测体积为：
-
-| 资产 | 实测大小 | SHA-256 |
-|---|---:|---|
-| setup | **21,444,947 bytes（20.45 MiB）** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
-| portable ZIP | **33,421,203 bytes（31.87 MiB）** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
-| 安装或解压后的程序目录 | **65,767,086 bytes（62.72 MiB）**（438 个文件） | — |
-
-该候选由固定的 64 位 CPython 3.12.13 冻结；源码与库仍按 Python 3.12/3.13 测试。体积会随
-版本、PyInstaller、PDFium 和依赖更新而变化。
-
-本轮完整 Windows 本地回归为 **1023 passed、9 skipped**；Ruff、格式检查与 strict mypy
-同时通过。该结果是当前本地候选的验证证据，不代表二进制许可证阻断已经解除。
-
-安装包计划内置：
-
-- Python 运行时；
-- LaTeX Word Review；
-- `tex2word`；
-- Pillow 与 PDFium；
-- JSON Schema、样式和必要元数据。
-
-它不会捆绑或静默安装：
-
-- Microsoft Word；
-- MiKTeX、TeX Live 或其他 TeX 发行版；
-- `latexmk`、`latexdiff`、Pandoc；
-- Playwright 浏览器或开发工具。
-
-审阅者必须使用 Microsoft Word for Windows 产生原生修订证据，也可以在另一台 Windows
-电脑上完成审阅。对于含 `SEQ`、`REF`、`PAGEREF` 等活字段的通常论文，生成端也需要本机
-Word 来刷新并冻结字段；无活字段稿可跳过该自动化。程序不会捆绑或安装 Word，缺失时会
-明确阻断，不会交付字段结果陈旧的审阅稿；导入返回 DOCX 的只读解析不启动 Word。
-
-如果要得到 `revised-clean.pdf` 和 `latexdiff.pdf`，运行程序的电脑还需要论文对应的
-TeX 引擎、宏包、字体、`latexmk` 与 `latexdiff`。缺少它们不会抹掉已经安全生成的 LaTeX；
-界面会显示部分完成，并允许在工具补齐后创建新的核验尝试。
-
-便携程序的自动 PDF 核验当前只支持 MiKTeX，并会先使用 PATH 中的同一套 MiKTeX 工具。若
-MiKTeX 没有加入 PATH，还会检查 Windows 当前
-用户的标准 MiKTeX 安装位置，无需手工填写个人目录。`latexmk` 与 `latexdiff` 必须来自同一
-安装根；此外还需要 PATH 中可解析为绝对普通文件的 Perl。程序不会安装或更新宏包；MiKTeX
-的配置、数据、HOME 与临时目录只在该次任务的私有工作区中创建，现有安装树仅作为只读
-依赖。若缺包/Perl、检测到 TeX Live 或混合工具链，PDF 核验会明确失败或显示部分完成，
-已生成的 LaTeX 副本仍保留。
+没有 TeX 工具时，Word 导出、返回稿读取、逐条审批和新 LaTeX 副本仍可继续。结果页会明确
+列出未生成的 PDF 或核验材料，不会把部分完成冒充全部成功。
 
 ## 4. 启动、数据目录和隐私
 
-安装器可在安装完成页立即启动；以后从桌面或开始菜单打开。正式 portable 双击
-`LatexWordReview.exe`；维护者工作区双击根目录快捷方式（备用为
-`output\local-windows\Start-Latex-Word-Review.cmd`）；源码运行：
-
-```powershell
-uv run --frozen latex-word-review app
-```
+当前公开入口是源码 ZIP：打开解压目录，双击根目录中的
+`Start-Latex-Word-Review.cmd`。命令窗口会负责准备或复用私有运行环境，然后打开本机页面。
+请不要只复制这个启动文件，也不要把它移出解压后的项目目录。
 
 应用只绑定随机端口的 `127.0.0.1`，默认浏览器只是本机界面，不是云网站。程序不会主动上传
 论文。
@@ -294,6 +202,14 @@ PDF 不同，发送前应在 Word 中浏览公式、图片、表格和特殊字�
 “采用全部安全正文修改”只使用核心的 `accept_all_safe` 规则：它只为尚未决定且属于 exact
 `plain_text_candidate` 的项目填写“采用”，不会覆盖任何已有决定。公式、引用、结构、move、
 格式、批注、低置信度和冲突项不会被混入。
+
+修改较多时，页面每次只渲染 25 项。筛选“待决定 / 可自动 / 需人工 / 冲突”后翻页；
+保存单项决定会回到原筛选和原页，不必重新从第一项查找。
+
+“将全部不可自动回填项标为人工”只使用核心的 `mark_manual` 降权规则：它仅处理尚未
+决定、且不满足 exact 普通正文条件的项目，不会覆盖已有决定，也不会采用这些文字或写入
+LaTeX。完成审批前仍可逐项更改决定。它适合先收拢大量公式、引用、结构和冲突项，再集中
+人工处理。
 
 每个决定都会生成新的不可变审批版本。所有项目决定后，点击
 **完成审批并预览补丁**。这是第一道闸门：
@@ -434,7 +350,64 @@ Authenticode 签名，Windows 可能显示 SmartScreen“未知发布者”。�
 
 不要关闭系统安全功能，也不要从网盘或第三方镜像取得同名 EXE。
 
-## 13. 高级 CLI 与异常恢复
+## 13. 高级启动方式与未来发布计划
+
+以下内容面向需要固定源码版本、参与开发或验收本地冻结候选的用户。普通用户按第 2 节双击
+启动即可。
+
+### 固定并运行审核过的 commit
+
+先安装 Git 与 [uv](https://docs.astral.sh/uv/)，再把占位值替换为自己审核过的完整 40 位 SHA：
+
+```powershell
+git clone https://github.com/JIE-jiee/latex-word-review.git
+Set-Location latex-word-review
+$ReviewedCommit = "PASTE_THE_REVIEWED_40_CHARACTER_COMMIT_SHA_HERE"
+git checkout --detach $ReviewedCommit
+if ((git rev-parse HEAD).Trim() -ne $ReviewedCommit) { throw "Commit verification failed" }
+uv sync --frozen --extra pdf-figures --python 3.12
+uv run --frozen latex-word-review --version
+uv run --frozen latex-word-review doctor
+uv run --frozen latex-word-review app
+```
+
+占位值会故意失败，避免静默跟随变化中的 `main`。源码控制台需要保持运行。
+
+### 维护者工作区入口
+
+维护者本机可能有 `LaTeX Word Review（双击启动）.lnk`，备用入口为
+`output\local-windows\Start-Latex-Word-Review.cmd`。该交付受 Git 忽略，只用于本机冻结候选
+验收，不在公开源码 ZIP 中，也不代表 GitHub 已发布二进制。维护者可用
+`scripts\deploy-local-windows.ps1` 更新候选；普通用户不需要运行构建或部署脚本。
+
+### 安装器和 portable 的状态
+
+当前没有 GitHub Release、PyPI 发布、签名安装器或公开 portable 包。二进制候选虽已完成
+本地构建和运行检查，但原生依赖的许可证与可重链接证据尚未闭环，因此不能公开分发。详情见
+[Windows 二进制许可证审计](reviews/windows-binary-license-audit-2026-07.md)。
+
+阻断解除后，计划提供两种普通用户入口：
+
+| 计划入口 | 启动方式 | 需要 Python、Git 或 uv |
+|---|---|---:|
+| 当前用户安装器 | 安装完成后从桌面或开始菜单启动 | 否 |
+| Portable ZIP | 全部解压后双击 `LatexWordReview.exe` | 否 |
+
+计划中的安装器不会请求管理员权限；卸载程序时不会删除论文和审阅任务。计划中的 portable
+也必须先完整解压，不能在 ZIP 预览窗口内运行。请勿把这些计划描述理解为当前下载链接。
+
+本地 `0.2.0b1` Windows x64 候选在 2026-07-20 的实测体积为：
+
+| 资产 | 实测大小 | SHA-256 |
+|---|---:|---|
+| setup | **21,444,947 bytes（20.45 MiB）** | `6028a469f571f29c92219c36e23f2bd47d85515b99065ca50c9d82ef6d532904` |
+| portable ZIP | **33,421,203 bytes（31.87 MiB）** | `e95f5b6bb90017c0f0f25f811b3f25b0c882dbe5bfb876ee253304f5d9fe13dd` |
+| 安装或解压后的程序目录 | **65,767,086 bytes（62.72 MiB）**（438 个文件） | — |
+
+该候选由固定的 64 位 CPython 3.12.13 冻结。体积会随版本和依赖更新而变化。这些本地数据
+不代表公开发布，也不解除许可证阻断。
+
+## 14. 高级 CLI 与异常恢复
 
 普通审阅不要复制旧版十几条命令。以下情况才使用 CLI：
 
@@ -469,7 +442,7 @@ latex-word-review workflow clean <run-root> --execute
 verify → ledger → run-manifest → bundle → verify-bundle` 的完整契约见
 [CLI 与运行目录](reference/cli.md)。不要猜参数，也不要编辑密封 JSON 绕过失败。
 
-## 14. Codex Skill 的边界
+## 15. Codex Skill 的边界
 
 `$latex-word-review` Skill 默认只启动 `latex-word-review app`，把文件选择、逐条决定和
 第二次确认留给用户在本机界面完成。只有用户明确要求 CLI/Agent 编排或异常恢复时，Skill
@@ -487,7 +460,7 @@ Skill：
 before/after、作者或批注。敏感论文应先判断适用政策；不希望 Agent 接触内容时，只用本机
 界面。`local_private` 是分类，不是加密或网络隔离。
 
-## 15. 常见问题
+## 16. 常见问题
 
 ### 返回 Word 后生成的 LaTeX 有修订标记吗
 
@@ -524,7 +497,7 @@ exact 普通正文候选，绝不覆盖已有决定。公式、结构、move、�
 
 不能。Schema、payload hash、run ID 和跨对象绑定会重新验证。修改决定应生成新的审批版本。
 
-## 16. 报告问题
+## 17. 报告问题
 
 公开 Issue 不要上传私人论文、返回 Word、审稿人信息或未脱敏账本。建议提供：
 

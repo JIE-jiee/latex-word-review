@@ -9,6 +9,9 @@
 
 LaTeX で書いた論文を Word で見てもらい、返ってきた修正を確認しながら新しい LaTeX コピーへ戻す Windows 用ツールです。
 
+> [!IMPORTANT]
+> **システム要件：64 ビット版 Windows と 64 ビット版 Windows PowerShell 5.1 のみをサポートします。PowerShell 7（`pwsh`）、32 ビット版 Windows、32 ビット版 Windows PowerShell はサポート対象外です。** ダブルクリック起動ファイルが必要な Windows PowerShell を自動的に選びます。
+
 ## こんな場面のために作りました
 
 論文の著者は LaTeX を使っているのに、指導教員や共同執筆者は Word の変更履歴とコメントを使いたい。これは珍しくありません。

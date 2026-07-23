@@ -36,6 +36,7 @@ _SUPPORT_TOKEN_RE: Final = re.compile(
 _MAX_DIFF_BYTES: Final = 16 * 1024 * 1024
 _APPROVAL_FILTERS: Final = ("all", "pending", "safe", "manual", "conflict")
 
+_APPROVAL_PAGE_SIZE: Final = 25
 _KIND_LABELS: Final[dict[str, str]] = {
     "insertion": "插入文字",
     "deletion": "删除文字",
@@ -178,7 +179,7 @@ def build_error_recovery_control(
     if action == "choose_returned_word":
         return post("/session/receive", fields)
     if action == "open_results":
-        return post("/result/open-folder", fields)
+        return post("/result/open-revised", fields)
     if action == "create_support_bundle":
         if support_token is None:
             return None
@@ -527,7 +528,10 @@ def _approval_view(
     csrf_token: str,
     session_key: str,
     selected_filter: str,
+    selected_page: int,
 ) -> dict[str, object]:
+    if isinstance(selected_page, bool) or selected_page < 1:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "approval page must be a positive integer")
     changeset = _contract_artifact(run_root, status, "changeset", "ChangeSet")
     changeset_payload = _mapping(changeset.get("payload"), "ChangeSet.payload")
     changes = [
@@ -547,13 +551,6 @@ def _approval_view(
             resolve_within(run_root, approval_path), expected_schema="ApprovalSet"
         )
     decisions = _decision_map(approval)
-    cards = [
-        _change_card(
-            change,
-            decisions.get(_string(change.get("change_id"), "change_id")),
-        )
-        for change in changes
-    ]
     safety_by_id = {
         _string(change.get("change_id"), "change_id"): _card_safety(
             change,
@@ -565,13 +562,19 @@ def _approval_view(
     }
     filter_name = selected_filter if selected_filter in _APPROVAL_FILTERS else "all"
     if filter_name == "pending":
-        shown = [card for card in cards if cast("str", card["change_id"]) not in decisions]
+        shown_changes = [
+            change
+            for change in changes
+            if _string(change.get("change_id"), "change_id") not in decisions
+        ]
     elif filter_name in {"safe", "manual", "conflict"}:
-        shown = [
-            card for card in cards if safety_by_id[cast("str", card["change_id"])] == filter_name
+        shown_changes = [
+            change
+            for change in changes
+            if safety_by_id[_string(change.get("change_id"), "change_id")] == filter_name
         ]
     else:
-        shown = cards
+        shown_changes = changes
     counts = {
         "all": len(changes),
         "pending": len(changes) - len(decisions),
@@ -579,11 +582,40 @@ def _approval_view(
         "manual": sum(1 for value in safety_by_id.values() if value == "manual"),
         "conflict": sum(1 for value in safety_by_id.values() if value == "conflict"),
     }
+    filtered_total = len(shown_changes)
+    page_count = max(1, (filtered_total + _APPROVAL_PAGE_SIZE - 1) // _APPROVAL_PAGE_SIZE)
+    page = min(selected_page, page_count)
+    page_offset = (page - 1) * _APPROVAL_PAGE_SIZE
+    page_changes = shown_changes[page_offset : page_offset + _APPROVAL_PAGE_SIZE]
+    page_cards = [
+        _change_card(
+            change,
+            decisions.get(_string(change.get("change_id"), "change_id")),
+        )
+        for change in page_changes
+    ]
+    page_start = page_offset + 1 if page_cards else 0
+    page_end = page_offset + len(page_cards)
+
+    def page_href(page_number: int, *, filter_value: str = filter_name) -> str:
+        return f"/session/{session_key}?" + urlencode({"filter": filter_value, "page": page_number})
+
+    pagination: dict[str, object] = {
+        "page": page,
+        "pages": page_count,
+        "total": filtered_total,
+        "start": page_start,
+        "end": page_end,
+    }
+    if page > 1:
+        pagination["previous_href"] = page_href(page - 1)
+    if page < page_count:
+        pagination["next_href"] = page_href(page + 1)
     filters = [
         {
             "label": _FILTER_LABELS[name],
             "count": counts[name],
-            "href": f"/session/{session_key}?" + urlencode({"filter": name}),
+            "href": page_href(1, filter_value=name),
             "current": name == filter_name,
         }
         for name in _APPROVAL_FILTERS
@@ -610,6 +642,16 @@ def _approval_view(
     can_finalize = (
         approval is not None and approval_status == "draft" and len(decisions) == len(changes)
     )
+    safe_pending_count = sum(
+        1
+        for change in changes
+        if _is_bulk_safe(change) and cast("str", change["change_id"]) not in decisions
+    )
+    manual_pending_count = sum(
+        1
+        for change in changes
+        if not _is_bulk_safe(change) and cast("str", change["change_id"]) not in decisions
+    )
     view = _base_view(status, csrf_token=csrf_token, session_key=session_key) | {
         "page": "approval",
         "title": "逐项审批 Word 修改",
@@ -617,20 +659,22 @@ def _approval_view(
         "decided": len(decisions),
         # Mirror the core's no-overwrite bulk selector: only undecided exact
         # plain-text candidates can be accepted by the one-click action.
-        "safe_pending_count": sum(
-            1
-            for change in changes
-            if _is_bulk_safe(change) and cast("str", change["change_id"]) not in decisions
-        ),
+        "safe_pending_count": safe_pending_count,
+        "manual_pending_count": manual_pending_count,
         "read_only": start_required or approval_status == "final",
         "start_required": start_required,
         "can_finalize": can_finalize,
         "start_action": "/approval/start",
         "decision_action": "/approval/decision",
         "bulk_action": "/approval/accept-safe",
+        "manual_bulk_action": "/approval/mark-manual",
         "finalize_action": "/approval/finalize",
         "filters": filters,
-        "changes": shown,
+        "selected_filter": filter_name,
+        "selected_page": page,
+        "page_start": page_start,
+        "pagination": pagination,
+        "changes": page_cards,
     }
     if approval is None:
         notices.append(
@@ -847,9 +891,8 @@ def _result_view(
             "available": True,
         }
         if key == "revised_source":
-            # This artifact is a directory, not a downloadable file.  Keep it
-            # visible but route the user through the existing results-folder
-            # action instead of emitting an invalid /artifact URL.
+            # This artifact is a directory, not a downloadable file. Keep it
+            # visible without emitting an invalid /artifact URL.
             card["open_in_folder"] = True
         else:
             card["href"] = f"/artifact/{session_key}/{key}"
@@ -870,7 +913,10 @@ def _result_view(
         "status": "complete" if complete else "partial",
         "artifacts": artifacts,
         "warnings": [] if complete else _warning_messages(status, phase),
-        "open_folder_action": "/result/open-folder",
+        "revised_source_available": "revised_source" in status_artifacts,
+        "open_revised_action": "/result/open-revised",
+        "delivery_available": "run_manifest" in status_artifacts,
+        "open_delivery_action": "/result/open-delivery",
         "retry_action": "/result/retry",
         "can_retry": retry_label is not None,
         "retry_label": retry_label or "重试缺失结果",
@@ -929,6 +975,7 @@ def render_session_view(
     session_key: str,
     csrf_token: str,
     selected_filter: str = "all",
+    selected_page: int = 1,
 ) -> dict[str, object]:
     """Build the current render-ready view without mutating ``session``.
 
@@ -971,6 +1018,7 @@ def render_session_view(
                 csrf_token=csrf_token,
                 session_key=safe_key,
                 selected_filter=selected_filter,
+                selected_page=selected_page,
             )
         if phase in {"ready_to_plan", "plan_blocked", "awaiting_apply_confirmation"}:
             return _patch_view(

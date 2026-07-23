@@ -9,6 +9,9 @@
 
 **Let reviewers work in Word, then bring only approved and safely located text changes into a new LaTeX copy.**
 
+> [!IMPORTANT]
+> **System requirement: 64-bit Windows and 64-bit Windows PowerShell 5.1 only. PowerShell 7 (`pwsh`), 32-bit Windows, and 32-bit Windows PowerShell are not supported.** The double-click launcher selects the required Windows PowerShell automatically.
+
 ## The real problem
 
 You write a paper in LaTeX, but your supervisor, coauthor, or editor prefers Microsoft Word. You send a Word copy and receive it back with Track Changes and comments.

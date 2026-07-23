@@ -3,7 +3,7 @@
   "schema_version": "1.0.0-alpha.1",
   "common": {
     "file": "common.schema.json",
-    "sha256": "56e4d46e1bf9c4b08c4b8c7daf615a8392530cf814f474aea83361984128e798"
+    "sha256": "48aaa117972297be911913eae27d198aa2d3b16444c63e689a6bd79db77b725a"
   },
   "objects": [
     {

@@ -11,6 +11,9 @@
 
 LaTeX Word Review 是一个只在 Windows 本机运行的论文审阅助手。它不要求审阅者学习 LaTeX，也不会用修改后的 Word 重建整篇论文。
 
+> [!IMPORTANT]
+> **系统要求：仅支持 64 位 Windows 与 64 位 Windows PowerShell 5.1。PowerShell 7（`pwsh`）、32 位 Windows 和 32 位 Windows PowerShell 均不受支持。** 双击启动器会自动调用正确的 Windows PowerShell，无需手动选择命令行。
+
 ## 你是否遇到过这种情况
 
 你用 LaTeX 写论文，导师或合作者却只习惯 Microsoft Word。

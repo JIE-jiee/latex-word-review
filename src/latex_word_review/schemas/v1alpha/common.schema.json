@@ -619,6 +619,15 @@
         "conflict": {"type": "integer", "minimum": 0}
       }
     },
+    "ExportReportCommitment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "payload_sha256"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/Profile"},
+        "payload_sha256": {"$ref": "#/$defs/Sha256"}
+      }
+    },
     "SourceMapPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -634,7 +643,8 @@
         "image_overlay": {"$ref": "#/$defs/ImageOverlayBinding"},
         "mappings": {"type": "array", "items": {"$ref": "#/$defs/SourceMapping"}},
         "coverage": {"$ref": "#/$defs/Coverage"},
-        "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/Diagnostic"}}
+        "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/Diagnostic"}},
+        "export_report_commitment": {"$ref": "#/$defs/ExportReportCommitment"}
       }
     },
     "MetricCounts": {

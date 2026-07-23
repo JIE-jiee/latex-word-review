@@ -94,10 +94,16 @@ def _approval() -> dict[str, object]:
         "total": 1,
         "decided": 1,
         "safe_pending_count": 1,
+        "manual_pending_count": 2,
         "can_finalize": True,
         "decision_action": "/approval/decision",
         "bulk_action": "/approval/accept-safe",
+        "manual_bulk_action": "/approval/mark-manual",
         "finalize_action": "/approval/finalize",
+        "selected_filter": "all",
+        "selected_page": 1,
+        "page_start": 1,
+        "pagination": {"page": 1, "pages": 1, "total": 1, "start": 1, "end": 1},
         "filters": [
             {"label": PAYLOAD, "count": 1, "href": "/approval?filter=<all>&x=1", "current": True}
         ],
@@ -150,7 +156,10 @@ def _result() -> dict[str, object]:
             },
         ],
         "warnings": [PAYLOAD],
-        "open_folder_action": "/result/open-folder",
+        "revised_source_available": True,
+        "open_revised_action": "/result/open-revised",
+        "delivery_available": False,
+        "open_delivery_action": "/result/open-delivery",
         "retry_action": "/result/retry",
         "new_action": "/new",
     }
@@ -298,6 +307,13 @@ def test_approval_cards_keep_technical_evidence_collapsed_and_preserve_first_gat
     assert "逐项审批 Word 修改" in page
     assert "审批不会直接修改任何 LaTeX 文件" in page
     assert "采用全部安全正文修改（1 项）" in page
+    assert "将全部不可自动回填项标为人工（2 项）" in page
+    assert 'method="post" action="/approval/mark-manual"' in page
+    assert 'name="return_filter" value="all"' in page
+    assert 'name="return_page" value="1"' in page
+    assert 'aria-label="修改列表分页"' in page
+    assert "第 1 / 1 页" in page
+    assert 'id="approval-change-list"' in page
     assert '<details class="technical"><summary>技术详情</summary>' in page
     assert "修改前" in page and "修改后" in page
     assert "采用" in page and "修改后采用" in page and "不采用" in page
@@ -309,6 +325,44 @@ def test_approval_cards_keep_technical_evidence_collapsed_and_preserve_first_gat
     assert "这一步只保存你的决定，不会修改 LaTeX" in page
     assert PAYLOAD not in page
     assert page.count(ESCAPED_PAYLOAD) >= 10
+
+
+def test_approval_pagination_validates_ranges_and_same_origin_links() -> None:
+    model = _approval()
+    model["pagination"] = {
+        "page": 1,
+        "pages": 2,
+        "total": 26,
+        "start": 1,
+        "end": 25,
+        "next_href": "/session/session_safe?filter=all&page=2",
+    }
+
+    page = render_app_page(model)
+
+    assert "显示第 1–25 项，共 26 项" in page
+    assert "/session/session_safe?filter=all&amp;page=2" in page
+
+    model["pagination"] = {
+        "page": 1,
+        "pages": 1,
+        "total": 1,
+        "start": 0,
+        "end": 1,
+    }
+    with pytest.raises(ViewModelError, match="item range"):
+        render_app_page(model)
+
+    model["pagination"] = {
+        "page": 1,
+        "pages": 2,
+        "total": 26,
+        "start": 1,
+        "end": 25,
+        "next_href": "https://example.com/",
+    }
+    with pytest.raises(ViewModelError, match="same-origin"):
+        render_app_page(model)
 
 
 def test_patch_summary_requires_explicit_second_gate_confirmation() -> None:
@@ -343,12 +397,14 @@ def test_partial_result_is_honest_and_supports_targeted_retry() -> None:
     assert "尚未完成的内容" in page
     assert "未生成" in page
     assert "重试缺失结果" in page
+    assert 'method="post" action="/result/open-revised"' in page
+    assert 'method="post" action="/result/open-delivery"' not in page
     assert 'method="post" action="/app/exit"' in page
     assert PAYLOAD not in page
     assert "/artifact/revised?name=&lt;paper&gt;&amp;x=1" in page
 
 
-def test_result_folder_artifact_uses_results_folder_instead_of_invalid_href() -> None:
+def test_revised_source_artifact_uses_its_explicit_folder_action() -> None:
     model = _result()
     model["artifacts"] = [
         {
@@ -362,9 +418,11 @@ def test_result_folder_artifact_uses_results_folder_instead_of_invalid_href() ->
     page = render_app_page(model)
 
     assert "修订后的 LaTeX 副本" in page
-    assert "请使用下方“打开结果文件夹”查看" in page
+    assert "请使用下方“打开修订后的 LaTeX 文件夹”查看" in page
     assert "/artifact/" not in page
-    assert 'method="post" action="/result/open-folder"' in page
+    assert 'method="post" action="/result/open-revised"' in page
+    assert 'method="post" action="/result/open-delivery"' not in page
+    assert "/result/open-folder" not in page
 
     folder_artifact = cast(list[dict[str, object]], model["artifacts"])[0]
     folder_artifact["href"] = "/artifact/invalid-directory"
@@ -376,11 +434,16 @@ def test_complete_result_does_not_offer_retry() -> None:
     model = _result()
     model["status"] = "complete"
     model["warnings"] = []
+    model["delivery_available"] = True
     page = render_app_page(model)
 
     assert "新 LaTeX 副本与全部结果已生成" in page
     assert "原稿未被覆盖" in page
     assert "重试缺失结果" not in page
+    assert 'method="post" action="/result/open-revised"' in page
+    assert 'method="post" action="/result/open-delivery"' in page
+    assert "打开修订后的 LaTeX 文件夹" in page
+    assert "打开 PDF 与账本交付文件夹" in page
 
 
 def test_shutdown_page_explains_active_job_drain_without_followup_actions() -> None:

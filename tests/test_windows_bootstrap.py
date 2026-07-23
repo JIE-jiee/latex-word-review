@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 
@@ -7,6 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "Start-Latex-Word-Review.cmd"
 BOOTSTRAP = ROOT / "scripts" / "bootstrap-windows.ps1"
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-source-bootstrap.yml"
+READMES = (
+    ROOT / "README.md",
+    ROOT / "README.en.md",
+    ROOT / "README.ja.md",
+)
 
 
 def _ascii_text(path: Path) -> str:
@@ -15,11 +21,25 @@ def _ascii_text(path: Path) -> str:
     return data.decode("ascii")
 
 
-def test_double_click_launcher_is_ascii_and_bounded() -> None:
-    text = _ascii_text(LAUNCHER)
+def test_double_click_launcher_is_utf8_bilingual_and_bounded() -> None:
+    data = LAUNCHER.read_bytes()
+    assert not data.startswith(b"\xef\xbb\xbf")
+    text = data.decode("utf-8")
+
+    assert "chcp 65001 >nul" in text
     assert "%~dp0scripts\\bootstrap-windows.ps1" in text
     assert "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" in text
     assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in text
+    for code in (
+        "E_LAUNCHER_BOOTSTRAP_FAILED",
+        "E_LAUNCHER_FILES_MISSING",
+        "E_LAUNCHER_POWERSHELL_MISSING",
+    ):
+        assert text.count(f"[{code}]") == 2
+    assert "启动未完成" in text
+    assert "Startup did not finish" in text
+    assert "项目文件不完整" in text
+    assert "Project files are incomplete" in text
     assert "%*" not in text
     assert "Invoke-Expression" not in text
 
@@ -59,6 +79,48 @@ def test_bootstrap_uses_locked_production_environment() -> None:
     assert "uv run" not in text.lower()
 
 
+def test_bootstrap_has_bilingual_status_and_stable_failure_codes() -> None:
+    text = _ascii_text(BOOTSTRAP)
+
+    assert "function Convert-FromUtf8Base64" in text
+    assert "function Write-BilingualStatus" in text
+    encoded_statuses = re.findall(r'-ChineseBase64 "([A-Za-z0-9+/=]+)"', text)
+    assert len(encoded_statuses) == 10
+    decoded_statuses = [
+        base64.b64decode(value, validate=True).decode("utf-8") for value in encoded_statuses
+    ]
+    assert all(any(ord(character) > 127 for character in value) for value in decoded_statuses)
+    chinese_messages = {
+        "5q2j5Zyo5LiL6L295bm25qCh6aqM5ZCv5Yqo5bel5YW344CC": "正在下载并校验启动工具。",
+        "5q2j5Zyo5YeG5aSH5LiT55SoIFB5dGhvbiDov5DooYznjq/looPjgII=": (
+            "正在准备专用 Python 运行环境。"
+        ),
+        "5ZCv5Yqo5aSx6LSl44CC5Y6f5aeLIExhVGVYIOWSjCBXb3JkIOaWh+S7tuayoeacieiiq+S/ruaUueOAgg==": (
+            "启动失败。原始 LaTeX 和 Word 文件没有被修改。"
+        ),
+    }
+    for encoded, expected in chinese_messages.items():
+        assert encoded in text
+        assert base64.b64decode(encoded).decode("utf-8") == expected
+
+    error_codes = (
+        "E_BOOTSTRAP_PRECHECK",
+        "E_BOOTSTRAP_UV_SETUP",
+        "E_BOOTSTRAP_PYTHON_SETUP",
+        "E_BOOTSTRAP_DEPENDENCY_SETUP",
+        "E_BOOTSTRAP_APP_START",
+    )
+    for code in error_codes:
+        assert f'"{code}"' in text
+    assert "-Code $FailureCode" in text
+    assert text.index('$FailureCode = "E_BOOTSTRAP_UV_SETUP"') < text.index(
+        "$uvExe = Get-VerifiedUv"
+    )
+    assert text.index('$FailureCode = "E_BOOTSTRAP_APP_START"') < text.index(
+        "Start-ReviewApplication `"
+    )
+
+
 def test_bootstrap_has_no_pipe_to_shell_or_unpinned_installer() -> None:
     text = _ascii_text(BOOTSTRAP)
     forbidden = (
@@ -82,3 +144,43 @@ def test_bootstrap_runtime_is_ignored_and_ci_exercises_source_archive() -> None:
     assert "LATEX_WORD_REVIEW_BOOTSTRAP_PREPARE_ONLY" in workflow
     assert "UV_OFFLINE" in workflow
     assert "bootstrap-evidence.json" in workflow
+    assert "Launch the prepared application and use the protected exit" in workflow
+    assert "scripts\\bootstrap-windows.ps1" in workflow
+    assert "WindowsPowerShell\\v1.0\\powershell.exe" in workflow
+    assert "$homeResponse = $null" in workflow
+    assert "$home = $null" not in workflow
+    assert '"http://127.0.0.1:$port"' in workflow
+    assert '"lwr_app_session_$port"' in workflow
+    assert 'Origin = "http://127.0.0.1:1"' in workflow
+    assert "Origin = $origin" in workflow
+    assert '"Sec-Fetch-Site" = "same-origin"' in workflow
+    assert '"$origin/app/exit"' in workflow
+    assert "application_http_reachable = $true" in workflow
+    assert "cross_origin_exit_rejected = $true" in workflow
+    assert "protected_exit_passed = $true" in workflow
+
+
+def test_public_readmes_frontload_the_exact_supported_windows_shell() -> None:
+    required_fragments = {
+        "README.md": (
+            "仅支持 64 位 Windows 与 64 位 Windows PowerShell 5.1",
+            "PowerShell 7",
+            "32 位 Windows PowerShell",
+        ),
+        "README.en.md": (
+            "64-bit Windows and 64-bit Windows PowerShell 5.1 only",
+            "PowerShell 7",
+            "32-bit Windows PowerShell",
+        ),
+        "README.ja.md": (
+            "64 ビット版 Windows と 64 ビット版 Windows PowerShell 5.1 のみ",
+            "PowerShell 7",
+            "32 ビット版 Windows PowerShell",
+        ),
+    }
+
+    for path in READMES:
+        text = path.read_text(encoding="utf-8")
+        first_section = text.split("\n## ", 1)[0]
+        for fragment in required_fragments[path.name]:
+            assert fragment in first_section, f"{path.name} does not frontload {fragment!r}"
