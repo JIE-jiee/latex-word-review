@@ -195,6 +195,50 @@ $alternate$ \begin{tabular}{c}hidden\end{tabular}
     assert inventory.skipped_dynamic_regions == 1
 
 
+def test_scanner_classifies_common_complex_latex_features_without_guessing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        r"""\documentclass{article}
+\begin{document}
+Inline \(a+b\), display \[c=d\], and legacy display $$e=f$$.
+\begin{longtable}{c}
+cell
+\end{longtable}
+\crefrange{sec:first}{sec:last}
+\nameref{sec:first}
+\label{bad key}
+\label{\dynamic}
+\end{document}
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+
+    inventory = scan_source_features(source, discovery, image_instances=0)
+
+    assert inventory.inline_math_instances == 1
+    assert inventory.display_math_instances == 2
+    assert inventory.math_objects == 3
+    assert inventory.table_instances == 0
+    assert inventory.non_equivalent_table_instances == 1
+    assert inventory.reference_instances == 2
+    assert inventory.non_equivalent_reference_instances == 1
+    assert inventory.label_instances == 0
+    assert inventory.dynamic_label_instances == 2
+    assert inventory.static_labels == ()
+    assert set(inventory.reference_warning_constructs) == {"\\crefrange", "\\ref"}
+    assert set(dict(inventory.first_locations)) == {
+        "labels",
+        "math",
+        "references",
+        "tables",
+    }
+
+
 def test_inventory_rejects_source_drift_after_discovery(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -249,6 +293,60 @@ def test_empty_math_inventory_does_not_require_backend_math_counters() -> None:
 
     assert not reconciliation.failed
     assert all(result.status == "preserved" for result in reconciliation.feature_results)
+
+
+def test_backend_omml_claim_cannot_exceed_the_final_docx() -> None:
+    reconciliation = reconcile_source_features(
+        _inventory(math_objects=1),
+        _inspection(omml_objects=1),
+        _backend_result(math_omml=2),
+    )
+
+    result = next(item for item in reconciliation.feature_results if item.feature == "math")
+    assert reconciliation.failed
+    assert result.status == "failed"
+    assert result.source_count == 1
+    assert result.output_count == 1
+    assert len(result.diagnostic_ids) == 1
+    finding = next(
+        item for item in reconciliation.findings if item.diagnostic_id in result.diagnostic_ids
+    )
+    assert finding.code is ErrorCode.EXPORT_SILENT_LOSS
+    assert finding.recoverable is False
+    assert finding.fingerprint is not None
+    assert "fewer OMML objects" in finding.message
+
+
+@pytest.mark.parametrize(
+    ("backend_changes", "inspection_changes"),
+    [
+        ({"math_raw": 1}, {}),
+        ({"math_image": 1}, {"image_instances": 1}),
+    ],
+)
+def test_explicit_math_fallback_is_degraded_when_final_omml_is_complete(
+    backend_changes: dict[str, object],
+    inspection_changes: dict[str, Any],
+) -> None:
+    reconciliation = reconcile_source_features(
+        _inventory(math_objects=1),
+        _inspection(omml_objects=1, **inspection_changes),
+        _backend_result(math_omml=1, **backend_changes),
+    )
+
+    result = next(item for item in reconciliation.feature_results if item.feature == "math")
+    assert not reconciliation.failed
+    assert result.status == "degraded"
+    assert result.source_count == 1
+    assert result.output_count == 1
+    assert len(result.diagnostic_ids) == 1
+    finding = next(
+        item for item in reconciliation.findings if item.diagnostic_id in result.diagnostic_ids
+    )
+    assert finding.code is ErrorCode.EXPORT_DEGRADED
+    assert finding.recoverable is True
+    assert finding.fingerprint is not None
+    assert "non-OMML fallback" in finding.message
 
 
 def test_skipped_dynamic_regions_are_explicit_recoverable_degradation() -> None:
