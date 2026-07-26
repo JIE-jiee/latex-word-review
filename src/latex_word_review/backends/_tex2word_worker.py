@@ -14,7 +14,7 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from latex_word_review.paths import windows_extended_path
 from latex_word_review.review_reference import (
@@ -22,6 +22,7 @@ from latex_word_review.review_reference import (
     REFERENCE_DOCX_SHA256,
     materialized_review_reference,
 )
+from latex_word_review.revision_macros import inject_revision_macros
 
 
 class _Severity(Protocol):
@@ -67,7 +68,31 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument(
+        "--revision-view",
+        choices=("source", "clean", "display"),
+        default="source",
+    )
+    parser.add_argument(
+        "--revision-aliases",
+        choices=("none", "add", "delete", "add,delete"),
+        default="none",
+    )
     return parser
+
+
+def _parse_revision_aliases(
+    raw: str,
+) -> tuple[Literal["add", "delete"], ...]:
+    if raw == "none":
+        return ()
+    if raw == "add":
+        return ("add",)
+    if raw == "delete":
+        return ("delete",)
+    if raw == "add,delete":
+        return ("add", "delete")
+    raise ValueError("invalid revision alias selector")
 
 
 def _write_exclusive(path: Path, data: bytes) -> None:
@@ -132,8 +157,18 @@ def _windows_image_path_compat(module: object) -> Iterator[None]:
         type.__setattr__(writer, "_resolve_image_path", original)
 
 
-def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
-    source = source_path.read_text(encoding="utf-8")
+def _run(
+    source_path: Path,
+    output_path: Path,
+    report_path: Path,
+    revision_view: Literal["source", "clean", "display"] = "source",
+    revision_aliases: tuple[Literal["add", "delete"], ...] = (),
+) -> int:
+    source = inject_revision_macros(
+        source_path.read_text(encoding="utf-8"),
+        mode=revision_view,
+        aliases=revision_aliases,
+    )
     module = importlib.import_module("tex2word")
     convert_source = cast(_ConvertSource, module.convert_source)
     with (
@@ -174,7 +209,9 @@ def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
         "reference_loaded": reference_loaded,
         "reference_profile": PROFILE_ID,
         "reference_sha256": REFERENCE_DOCX_SHA256,
+        "revision_view": revision_view,
         "warning_count": len(warnings),
+        "revision_aliases": list(revision_aliases),
         "warning_constructs": _bounded_constructs(warnings),
     }
     report_bytes = json.dumps(
@@ -198,7 +235,13 @@ def _run(source_path: Path, output_path: Path, report_path: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    return _run(Path(args.source), Path(args.output), Path(args.report))
+    return _run(
+        Path(args.source),
+        Path(args.output),
+        Path(args.report),
+        cast("Literal['source', 'clean', 'display']", args.revision_view),
+        _parse_revision_aliases(args.revision_aliases),
+    )
 
 
 if __name__ == "__main__":  # pragma: no branch - module process entry point

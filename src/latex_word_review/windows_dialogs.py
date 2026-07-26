@@ -501,11 +501,41 @@ def choose_review_copy_destination(
     return path
 
 
+def choose_existing_changes_copy_destination(
+    *,
+    initial_dir: Path | None = None,
+    suggested_name: str = "\u5df2\u6709\u6279\u6539\u5c55\u793a\u7a3f.docx",
+    picker: SaveFilePicker | None = None,
+) -> Path | None:
+    """Choose a display-only copy with an unambiguous native dialog title."""
+
+    delegate = picker or _native_save_file
+
+    def retitled_picker(
+        _title: str,
+        filter_spec: str,
+        initial: Path | None,
+        name: str,
+    ) -> Path | None:
+        title = (
+            "\u53e6\u5b58\u5df2\u6709 LaTeX "
+            "\u6279\u6539\u5c55\u793a\u7a3f\uff08\u4ec5\u4f9b\u5bf9\u7167\uff09"
+        )
+        return delegate(title, filter_spec, initial, name)
+
+    return choose_review_copy_destination(
+        initial_dir=initial_dir,
+        suggested_name=suggested_name,
+        picker=retitled_picker,
+    )
+
+
 __all__ = [
     "FileKind",
     "FilePicker",
     "SaveFilePicker",
     "MessagePresenter",
+    "choose_existing_changes_copy_destination",
     "choose_main_tex",
     "choose_review_copy_destination",
     "choose_returned_docx",

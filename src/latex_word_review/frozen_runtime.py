@@ -23,9 +23,10 @@ _DEVELOPMENT_MODULES: Final[dict[InternalWorker, str]] = {
     "image-render": "latex_word_review._image_worker",
 }
 _FIXED_FLAGS: Final[dict[InternalWorker, tuple[str, ...]]] = {
-    "tex2word": ("--source", "--output", "--report"),
+    "tex2word": ("--source", "--output", "--report", "--revision-view"),
     "image-render": ("--source", "--request", "--output", "--report"),
 }
+_TEX2WORD_ALIAS_FLAGS: Final = (*_FIXED_FLAGS["tex2word"], "--revision-aliases")
 _WINDOWS_GATED_LAUNCHER: Final[str] = """\
 import subprocess
 import sys
@@ -81,6 +82,12 @@ def validate_internal_worker_arguments(
 
     typed_worker = worker
     assert typed_worker in _FIXED_FLAGS
+    if (
+        typed_worker == "tex2word"
+        and len(normalized) == len(_TEX2WORD_ALIAS_FLAGS) * 2
+        and normalized[::2] == _TEX2WORD_ALIAS_FLAGS
+    ):
+        return normalized
     expected_flags = _FIXED_FLAGS[typed_worker]
     if len(normalized) != len(expected_flags) * 2 or normalized[::2] != expected_flags:
         raise ContractError(

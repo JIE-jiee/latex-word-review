@@ -6,6 +6,7 @@ import os
 import tempfile
 from importlib import metadata
 from pathlib import Path
+from typing import Literal
 
 from latex_word_review.canonical import sha256_canonical
 from latex_word_review.contracts import load_contract_json
@@ -18,6 +19,7 @@ from latex_word_review.review_reference import (
     REFERENCE_CONFIG_SHA256,
     REFERENCE_DOCX_SHA256,
 )
+from latex_word_review.revision_macros import REVISION_MACRO_PROFILE_ID
 from latex_word_review.runtime import minimal_environment, run_command
 
 from .base import (
@@ -36,7 +38,7 @@ from .base import (
 )
 
 SUPPORTED_TEX2WORD_VERSION = "1.0.5"
-TEX2WORD_INTERFACE_VERSION = "python-api-convert-source-v2-review-profile"
+TEX2WORD_INTERFACE_VERSION = "python-api-convert-source-v3-revision-view"
 _REPORT_PREFIX = ".lwr-t2w-report-"
 
 
@@ -63,6 +65,8 @@ def _capabilities(version: str | None) -> BackendCapabilities:
                 "embed_manifest": False,
                 "frontend": "pure",
                 "citation_mode": "static",
+                "revision_macro_profile": REVISION_MACRO_PROFILE_ID,
+                "revision_views": ["source", "clean", "display"],
                 "reference_config_sha256": REFERENCE_CONFIG_SHA256,
                 "reference_docx_sha256": REFERENCE_DOCX_SHA256,
                 "reference_profile": PROFILE_ID,
@@ -72,6 +76,20 @@ def _capabilities(version: str | None) -> BackendCapabilities:
             (
                 "body_text",
                 FeatureCapability("full", ("w:p", "w:r", "w:t"), evidence_sha256=_evidence("body")),
+            ),
+            (
+                "revision_view",
+                FeatureCapability(
+                    "partial",
+                    (
+                        "source-macros",
+                        "clean-text",
+                        "w:rPr/w:color",
+                        "w:rPr/w:strike",
+                    ),
+                    diagnostic_codes=(ErrorCode.BACKEND_CAPABILITY_MISSING,),
+                    evidence_sha256=_evidence(REVISION_MACRO_PROFILE_ID),
+                ),
             ),
             ("cjk", partial),
             ("inline_math", partial),
@@ -101,12 +119,22 @@ def _capabilities(version: str | None) -> BackendCapabilities:
                 result="pass" if version == SUPPORTED_TEX2WORD_VERSION else "blocked",
                 evidence_sha256=_evidence("34p-5omml-1image-1table-9bookmarks"),
             ),
+            TestedContract(
+                fixture="revision-view-plain-text",
+                result="pass" if version == SUPPORTED_TEX2WORD_VERSION else "blocked",
+                evidence_sha256=_evidence("revision-view-clean-display-v1"),
+            ),
         ),
         limitations=(
             CapabilityLimitation(
                 ErrorCode.BACKEND_CAPABILITY_MISSING,
                 "source_spans",
                 "conservative normalized-text bookmark anchoring",
+            ),
+            CapabilityLimitation(
+                ErrorCode.BACKEND_CAPABILITY_MISSING,
+                "revision_view_structured_content",
+                "reject unsupported structured revision macros before backend export",
             ),
         ),
         security_requirements=(
@@ -163,7 +191,12 @@ class Tex2WordBackend:
             ) from exc
 
     @staticmethod
-    def _read_report(path: Path) -> dict[str, object]:
+    def _read_report(
+        path: Path,
+        *,
+        expected_revision_view: Literal["source", "clean", "display"] = "source",
+        expected_revision_aliases: tuple[Literal["add", "delete"], ...] = (),
+    ) -> dict[str, object]:
         report = load_contract_json(read_stable_bytes(path, max_bytes=64 * 1024))
         integer_fields = (
             "entry_count",
@@ -179,6 +212,8 @@ class Tex2WordBackend:
             "reference_loaded",
             "reference_profile",
             "reference_sha256",
+            "revision_view",
+            "revision_aliases",
             "warning_constructs",
         }:
             raise ContractError(ErrorCode.BACKEND_FAILED, "worker report has unknown fields")
@@ -194,10 +229,17 @@ class Tex2WordBackend:
                 raise ContractError(
                     ErrorCode.BACKEND_FAILED, "worker report has invalid constructs"
                 )
+        revision_aliases = report["revision_aliases"]
+        if (
+            not isinstance(revision_aliases, list)
+            or tuple(revision_aliases) != expected_revision_aliases
+        ):
+            raise ContractError(ErrorCode.BACKEND_FAILED, "worker report has invalid aliases")
         if (
             not isinstance(report["reference_loaded"], bool)
             or report["reference_profile"] != PROFILE_ID
             or report["reference_sha256"] != REFERENCE_DOCX_SHA256
+            or report["revision_view"] != expected_revision_view
         ):
             raise ContractError(
                 ErrorCode.BACKEND_FAILED,
@@ -216,6 +258,7 @@ class Tex2WordBackend:
         prepared = prepare_export(request, owner="tex2word")
         report_path = self._prepare_report_path(prepared.output_path.parent)
         native_report: dict[str, object] = {}
+        revision_alias_selector = ",".join(request.revision_aliases) or "none"
         try:
             worker = internal_worker_command(
                 "tex2word",
@@ -226,6 +269,10 @@ class Tex2WordBackend:
                     os.fspath(prepared.temporary_path),
                     "--report",
                     os.fspath(report_path),
+                    "--revision-view",
+                    request.revision_view,
+                    "--revision-aliases",
+                    revision_alias_selector,
                 ),
             )
             result = run_command(
@@ -240,9 +287,17 @@ class Tex2WordBackend:
                 "duration_ms": result.duration_ms,
                 "output_sha256": result.output_sha256,
                 "output_truncated": result.output_truncated,
+                "revision_view": request.revision_view,
+                "revision_aliases": list(request.revision_aliases),
             }
             if report_path.is_file():
-                native_report.update(self._read_report(report_path))
+                native_report.update(
+                    self._read_report(
+                        report_path,
+                        expected_revision_view=request.revision_view,
+                        expected_revision_aliases=request.revision_aliases,
+                    )
+                )
             if result.timed_out or result.output_truncated or result.returncode != 0:
                 error_count = native_report.get("error_count", 0)
                 silent_loss = isinstance(error_count, int) and error_count > 0

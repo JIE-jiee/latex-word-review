@@ -16,6 +16,7 @@ import pytest
 import latex_word_review.windows_dialogs as windows_dialogs
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.windows_dialogs import (
+    choose_existing_changes_copy_destination,
     choose_review_copy_destination,
     choose_review_file,
     show_browser_open_failure,
@@ -375,6 +376,35 @@ def test_save_destination_cancel_is_a_safe_noop(tmp_path: Path) -> None:
 
     assert result is None
     assert calls == [("另存审阅 Word 副本", tmp_path, "paper-review.docx")]
+
+
+def test_display_save_destination_uses_unambiguous_title(tmp_path: Path) -> None:
+    calls: list[tuple[str, Path | None, str]] = []
+
+    def pick(
+        title: str,
+        _filter_spec: str,
+        initial: Path | None,
+        suggested_name: str,
+    ) -> Path | None:
+        calls.append((title, initial, suggested_name))
+        return None
+
+    result = choose_existing_changes_copy_destination(
+        initial_dir=tmp_path,
+        suggested_name="display.docx",
+        picker=pick,
+    )
+
+    assert result is None
+    assert calls == [
+        (
+            "\u53e6\u5b58\u5df2\u6709 LaTeX "
+            "\u6279\u6539\u5c55\u793a\u7a3f\uff08\u4ec5\u4f9b\u5bf9\u7167\uff09",
+            tmp_path,
+            "display.docx",
+        )
+    ]
 
 
 def test_save_destination_accepts_only_a_new_docx(tmp_path: Path) -> None:

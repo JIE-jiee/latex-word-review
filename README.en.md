@@ -23,6 +23,7 @@ LaTeX Word Review provides a controlled bridge. Word is the review interface, wh
 ## What it does
 
 - Creates an editable Word review copy from a LaTeX project.
+- Views change markup already present in LaTeX: recognizes `\added`, `\deleted`, and `\replaced` after a bounded static declaration check, conservatively accepts `\add` and `\delete`, and creates a separate display-only Word file in uniform `0000FF` blue.
 - Reads tracked changes and comments from the returned Word file.
 - Lets you review proposed changes before they reach LaTeX.
 - Shows the exact LaTeX diff before writing anything.
@@ -60,7 +61,7 @@ Choose the main `.tex` file. The application creates a read-only task snapshot a
 
 ### 2. Generate and receive Word
 
-Generate a review `.docx`, save an editable copy where you want, and send it to the reviewer.
+The app creates a clean review Word file. Save its exact editable copy, send that copy to the reviewer, and import the returned copy into the same task. The optional change-display Word file is for reference only and must never be imported.
 
 Ask the reviewer to:
 
@@ -79,6 +80,44 @@ Inspect the detected edits and decide which to accept, revise, reject, or leave 
 ### 4. Check the diff and create the result
 
 Review the proposed file changes. Only after a second confirmation will the application create a new LaTeX project copy. A change that cannot be located safely will not be applied automatically.
+
+## If the LaTeX source already contains change markup
+
+The app recognizes `\added{new text}`, `\deleted{old text}`, and
+`\replaced{new text}{old text}` only when a supported static `changes` package declaration is visible,
+no same-named `changes.sty` is found in the discovery-bound project tree, and no detected
+`\input@path` override can redirect package lookup. Bare canonical calls and direct or dynamic
+definitions/redefinitions fail closed before conversion. `\add` and `\delete` use stricter static
+declaration or direct-wrapper rules; a `trackchanges.sty` shadow, conflicting source, or unproven
+source stops conversion instead of being guessed.
+
+| File | Purpose |
+|---|---|
+| `review.docx` and its exact editable saved copy | The clean review document. Only a saved copy in this review role may be sent out and imported as the returned Word file |
+| `existing-changes-display.docx` | A display-only view of changes already present in LaTeX: additions are `0000FF` blue; deletions use `0000FF` blue single strikethrough; replacements show the old blue single-struck text immediately followed by the new blue text. This feature adds no highlighting |
+
+The display file does not use native Word Track Changes, must never be imported as a returned review,
+and does not participate in automatic writeback. Before either Word file becomes a formal task result,
+the app checks the source-derived text and blue/strike effects and compares non-change structures such
+as equations, images, tables, and fields. A failed check blocks both results. Blue text alone is not
+used to identify the display file, so ordinary blue tracked edits do not cause a normal review return
+to be rejected. Deleted text must also land at a boundary uniquely proven by neighboring text in the
+same paragraph. Missing or ambiguous context blocks generation instead of guessing where to place the
+strikethrough.
+
+This is a bounded syntactic check. It does not run TeX, resolve system or user TEXMF trees or
+`TEXINPUTS`, or prove the path, version, or hash of the package that TeX would ultimately load. Empty
+change payloads such as `\added{}`, `\deleted{}`, or `\replaced{}{}` cannot establish display evidence
+and fail closed with `E_SCHEMA_INVALID`.
+
+The two Word files must also preserve the exact OPC part-name set and protected style, numbering,
+font, theme, content-type, and general-settings parts. Except for explicitly permitted save identifiers
+and the exact display-role marker, drift in those parts blocks publication.
+
+This feature does not create a new SourceMap from each LaTeX call to a Word coordinate. A later edit
+may be recorded but routed to manual handling when its LaTeX location cannot be proven. See
+[Export backends and DOCX inspection](docs/reference/export-and-inspection.md) for the alias-provenance,
+scan-boundary, structured-content, artifact-role, and validation contracts.
 
 ## Windows quick start
 
@@ -100,6 +139,7 @@ The current download is a source ZIP with a double-click bootstrap. It is not a 
 - Windows is the only supported platform.
 - The current version is beta software and may still contain conversion, layout, performance, packaging, or edge-case defects.
 - The generated Word file is for readable review, not a pixel-perfect copy of the LaTeX PDF.
+- The change-display Word file is static reference-only formatting, not native Word Track Changes, and cannot be imported. Its sealed digest and embedded role marker participate in import rejection. When change macros are found, both Word files must pass source-derived text, clean/display style-delta, unique same-paragraph deletion-context, and non-revision structure validation in the same staged export before either result is published.
 - Formulas, citations, labels, references, environments, figures, moves, formatting-only edits, comments, and uncertain matches are not automatically rewritten.
 - A reviewer who accepts all revisions, turns off Track Changes, removes mapping bookmarks, or returns the wrong review round may cause the workflow to stop rather than guess.
 - The reviewer needs Microsoft Word for the normal review workflow. Some papers with live Word fields also require Word on the application computer during export.
@@ -125,6 +165,7 @@ Depending on the available Word and TeX tools, a task can produce:
 | Result | Purpose |
 | --- | --- |
 | Review Word document | The editable file sent to the reviewer |
+| `existing-changes-display.docx` | A reference-only view generated only when existing LaTeX change macros are detected |
 | Returned Word archive | A read-only copy of what was received |
 | New revised LaTeX copy | Contains only approved changes that passed safety checks |
 | Clean PDF | The revised paper when compilation succeeds |

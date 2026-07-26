@@ -98,6 +98,7 @@ class ReviewDocxArtifact:
     size_bytes: int
     sha256: str
     confidentiality: Literal["public_fixture", "local_private", "derived_private"]
+    role: Literal["review_docx", "latex_changes_display_docx"] = "review_docx"
 
     @classmethod
     def from_file(
@@ -106,6 +107,7 @@ class ReviewDocxArtifact:
         *,
         artifact_path: str,
         confidentiality: Literal["public_fixture", "local_private", "derived_private"],
+        role: Literal["review_docx", "latex_changes_display_docx"] = "review_docx",
     ) -> ReviewDocxArtifact:
         digest = digest_file(file_path, max_bytes=128 * 1024 * 1024)
         return cls(
@@ -113,6 +115,7 @@ class ReviewDocxArtifact:
             size_bytes=digest.size_bytes,
             sha256=digest.sha256,
             confidentiality=confidentiality,
+            role=role,
         )
 
     def as_contract(self) -> dict[str, object]:
@@ -120,7 +123,7 @@ class ReviewDocxArtifact:
             "artifact_id": derive_artifact_id(self.sha256),
             "path": self.path,
             "path_base": "run_root",
-            "role": "review_docx",
+            "role": self.role,
             "media_type": (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
@@ -181,15 +184,21 @@ class ExportReport:
     feature_results: tuple[ExportFeatureResult, ...]
     findings: tuple[ExportFinding, ...]
     validation: ExportValidation
+    existing_changes_display_docx: ReviewDocxArtifact | None = None
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "source_manifest_sha256": self.source_manifest_sha256,
             "backend_capabilities_sha256": self.backend_capabilities_sha256,
             "review_ir_sha256": self.review_ir_sha256,
             "source_map_sha256": self.source_map_sha256,
             "review_docx": None if self.review_docx is None else self.review_docx.as_contract(),
+            "existing_changes_display_docx": (
+                None
+                if self.existing_changes_display_docx is None
+                else self.existing_changes_display_docx.as_contract()
+            ),
             "image_overlay": dict(self.image_overlay),
             "metrics": {
                 "source": dict(sorted(self.source_metrics.items())),
@@ -199,6 +208,7 @@ class ExportReport:
             "findings": [item.as_diagnostic() for item in self.findings],
             "validation": self.validation.as_contract(),
         }
+        return payload
 
 
 __all__ = [

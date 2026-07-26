@@ -1078,6 +1078,47 @@ class _ArtifactSession:
         return {"artifacts": self._artifacts}
 
 
+def test_existing_changes_display_open_uses_the_verified_status_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    state = AppState(tmp_path / "app-display", path_opener=opened.append)
+    session_key = f"session_{'e' * 32}"
+    run_root = tmp_path / "sealed-display-run"
+    display = run_root / "export/existing-changes-display.docx"
+    display.parent.mkdir(parents=True)
+    display.write_bytes(b"display")
+    session = _ArtifactSession(
+        run_root,
+        {"existing_changes_display_docx": "export/existing-changes-display.docx"},
+    )
+    monkeypatch.setattr(
+        state,
+        "load_session",
+        lambda _key: cast("ApplicationSession", session),
+    )
+
+    try:
+        state.open_existing_changes_display(session_key)
+    finally:
+        state.close()
+
+    assert opened == [display.resolve()]
+
+    state = AppState(tmp_path / "app-display-missing", path_opener=opened.append)
+    monkeypatch.setattr(
+        state,
+        "load_session",
+        lambda _key: cast("ApplicationSession", _ArtifactSession(run_root, {})),
+    )
+    try:
+        with pytest.raises(ContractError):
+            state.open_existing_changes_display(session_key)
+    finally:
+        state.close()
+
+
 def test_artifact_route_enforces_status_paths_and_explicit_allowlist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

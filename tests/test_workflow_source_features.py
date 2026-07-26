@@ -16,11 +16,13 @@ from latex_word_review.workflow import (
 )
 from latex_word_review.workflow_objects import (
     EXPORT_REPORT_INTERFACE_VERSION,
+    PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
     SOURCE_MANIFEST_INTERFACE_VERSION,
     SOURCE_MAP_INTERFACE_VERSION,
 )
 
 LEGACY_PRODUCER = "export-report-builder-v1"
+PREVIOUS_PRODUCER = PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION
 CURRENT_PRODUCER = EXPORT_REPORT_INTERFACE_VERSION
 
 
@@ -200,6 +202,21 @@ def test_current_generation_requires_exact_commitment_but_normalizes_map_hash() 
 
     with pytest.raises(ContractError, match=ErrorCode.HASH_SOURCE_MISMATCH.value):
         _validate_generation(report_payload, {})
+
+
+def test_previous_v2_generation_remains_compatible_with_exact_commitment() -> None:
+    report_payload = _committed_report_payload()
+    map_payload = {"export_report_commitment": export_report_commitment(report_payload)}
+
+    _validate_generation(
+        report_payload,
+        map_payload,
+        report=PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
+    )
+    _validate(
+        _payload(),
+        producer=PREVIOUS_PRODUCER,
+    )
 
 
 @pytest.mark.parametrize("changed", ["manifest", "source_map", "report"])

@@ -5,8 +5,8 @@
 
 ## 开始使用
 
-- [Windows 完整使用指南](guide.zh-CN.md)：从本机四步应用、Word 审阅、两道人工确认到 PDF、账本和审计包。
-- [English Windows Quick Start](quick-start-windows.md)：面向普通用户的图形入口，以及用于自动化和恢复的高级 CLI。
+- [Windows 完整使用指南](guide.zh-CN.md)：Windows 本地安装、完整工作流、双 Word 文件分工与故障处理。
+- [English Windows Quick Start](quick-start-windows.md)：最短启动路径、双文件交接和返回稿选择。
 - [公开 E0 教程](tutorial-public-e0.md)：用自制 fixture 重跑核心或完整闭环。
 - [开发来源与 Vibe Coding 记录](development-provenance.md)：维护者与 AI 的分工、责任和验证边界。
 
@@ -14,7 +14,7 @@
 
 - [高级 CLI 与运行目录](reference/cli.md)
 - [项目发现、快照与环境诊断](reference/snapshot-and-doctor.md)
-- [导出后端与 DOCX 结构验收](reference/export-and-inspection.md)
+- [导出后端、已有 LaTeX 批改展示与 DOCX 结构验收](reference/export-and-inspection.md)
 - [返回原件归档、修订读取与 ChangeSet](reference/revision-ingest.md)
 - [ApprovalSet 审批状态机](reference/approval.md)
 - [本地审批浏览器](reference/review-server.md)

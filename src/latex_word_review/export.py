@@ -706,6 +706,8 @@ def export_review_docx(
                 expected_source_tree_sha256=image_overlay.discovery.source_tree_sha256,
                 timeout_s=request.timeout_s,
                 max_output_bytes=request.max_output_bytes,
+                revision_view=request.revision_view,
+                revision_aliases=request.revision_aliases,
             )
         )
         backend_result = replace(

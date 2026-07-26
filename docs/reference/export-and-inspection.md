@@ -68,6 +68,137 @@ only after success. A timeout, non-zero exit, invalid package, missing output,
 or tex2word error removes the stage and leaves an existing destination
 unchanged.
 
+## Existing LaTeX change markup
+
+The export stage recognizes the canonical [CTAN `changes`](https://ctan.org/pkg/changes) forms
+`\added[options]{new}`, `\deleted[options]{old}`, and `\replaced[options]{new}{old}` only when a
+supported static `changes` package declaration is visible in the discovery-bound project
+dependencies. This is a bounded syntactic provenance gate, not proof of which package file TeX
+actually loaded. One balanced optional argument is accepted and ignored for display rendering. A
+bare canonical call, a discovery-bound project-local `changes.sty`, a statically visible
+`\input@path` modification, or a direct or dynamic source-local definition/redefinition of
+`\added`, `\deleted`, or `\replaced` fails closed with `E_SCHEMA_INVALID`. The scanner does not use
+TeX load order to guess which definition would win.
+
+### Alias provenance gate
+
+`\add` and `\delete` are not accepted merely because their control-sequence names match a short
+alias. Every alias that is actually called must have exactly one accepted static semantic source:
+
+- `\add` may come from exactly one static `trackchanges` package declaration, whose documented
+  command is [`\add`](https://trackchanges.sourceforge.net/help_stylefile.html), or from exactly one
+  local direct wrapper to `\added`;
+- `\delete` may come only from exactly one local direct wrapper to `\deleted`; it is not a documented
+  `trackchanges` command;
+- a local wrapper target must independently satisfy the canonical static-`changes` declaration gate;
+- a bare call, an incompatible local definition, a source inside a dynamic conditional, conflicting
+  definitions, or multiple otherwise valid sources fails closed with `E_SCHEMA_INVALID`;
+- an optional alias argument is accepted only when the one accepted source supports it.
+
+The audit covers all discovery-bound UTF-8 `.tex`, `.sty`, and `.cls` files and recognizes only fixed
+direct forwarding shapes (including supported command-definition and direct `\let` forms). Its claim
+is limited to **a statically visible canonical package declaration plus no discovery-bound project-tree
+shadow or detected `\input@path` search override**. It does not execute TeX, run `kpsewhich`, resolve
+`TEXINPUTS`/TEXMF or system/user package trees, expand arbitrary wrappers, choose definitions by load
+order, or bind the actually loaded package path and hash. A discovery-bound `changes.sty` or
+`trackchanges.sty` is therefore treated as shadowing, not as evidence of the upstream package.
+
+### Discovery and scan boundary
+
+- Only direct, literal macro calls are recognized.
+- The main file is scanned only inside the `document` body; other discovery-bound UTF-8 `.tex` files are scanned in full.
+- TeX comments, `\verb`, `verbatim`, `verbatim*`, `Verbatim`, `minted`, and `lstlisting` are skipped. Definition bodies are inert for call discovery, while definitions of the target canonical names and aliases are still provenance-audited.
+- Every branch of a dynamic conditional region is skipped. Conditions are not evaluated.
+- Wrapper macros and `\csname` calls are not expanded.
+
+The bounded profile accepts at most 10,000 revision-macro instances, 32 levels of revision-macro
+nesting, 32 levels of argument-group nesting, and 8 KiB per optional argument. Independent Word
+matching has a document-wide budget of 100,000 candidates and 25,000,000 work units. Text searches
+stop as soon as one extra location proves ambiguity; textual candidates are reused for style checks;
+and paragraph joins, each remaining search window, per-character style checks, masks, and state writes
+reserve work before execution. Exceeding any limit fails closed.
+
+A revision argument may contain plain UTF-8 text (including CJK and emoji), ordinary source line breaks within one paragraph, nested plain groups, nested revision macros, escaped literals (`\ `, `\#`, `\$`, `\%`, `\&`, `\_`, `\{`, `\}`), and these simple inline wrappers. Blank-line paragraph breaks are rejected:
+
+`\emph`, `\textbf`, `\textit`, `\textmd`, `\textnormal`, `\textsc`, `\textsf`, `\textsl`, `\textsubscript`, `\textsuperscript`, `\texttt`, `\textrm`, `\textup`, `\underline`.
+
+Unescaped structural characters and every other control command are rejected in a directly recognized argument. In particular, mathematics, cross-references, citations, images, environments, footnotes, labels, and paragraph breaks fail closed with `E_SCHEMA_INVALID` before the conversion backend runs. Calls inside skipped dynamic regions are outside this detection guarantee.
+
+Empty change payloads such as `\added{}`, `\deleted{}`, or `\replaced{}{}` remain part of the source
+inventory, but they cannot establish non-empty display evidence. Display export therefore fails
+closed with `E_SCHEMA_INVALID` instead of treating a clean-looking Word file as a verified display.
+
+### Two conversion profiles
+
+The project injects in-memory macro definitions and wraps the locked `tex2word==1.0.5` macro expansion, intermediate representation, `textcolor` / `sout` handling, and Word writer.
+
+| Profile | Semantics | Artifact |
+|---|---|---|
+| clean | additions and replacements keep new text; deletions disappear | `review.docx` |
+| display | additions are `0000FF` blue; deletions are `0000FF` blue with single strikethrough; replacements render old blue single-struck text immediately followed by new blue text | `existing-changes-display.docx` |
+
+The display profile adds no highlighting. It emits static OOXML `w:color="0000FF"` and `w:strike`
+formatting, not native Word revision elements, and Track Changes is not enabled. In particular,
+`\replaced{new}{old}` projects to the old text with blue single strikethrough immediately followed by
+the new text in blue with strike explicitly absent; no highlight is used.
+
+The display artifact is never an accepted ingestion source. `review.docx` is the sealed clean baseline;
+only its exact editable saved copy has the review role that may be sent out and imported on return.
+After field finalization, the display package receives standard `word/settings.xml` `w:docVars`:
+
+- `LWR_ARTIFACT_ROLE=latex_changes_display_docx`;
+- `LWR_ARTIFACT_PROFILE=lwr-existing-changes-display-v1`;
+- `LWR_RUN_ID=<current run ID>`.
+
+The workflow seals the final display digest as non-returnable. Receive first rejects an exact sealed
+display digest, then reads the embedded marker and rejects a saved or ZIP-repacked copy that retains
+the display role. The review baseline must contain no reserved marker. Color is deliberately not a role
+signal: a legitimate returned review with blue tracked text remains eligible for the normal baseline
+checks. If an external tool maliciously strips the marker, that does not grant a review role; the file
+still has to pass the clean reject-view, bookmark, run, and revision-semantic gates.
+
+The clean projection does not by itself create new exact LaTeX `SourceMap` provenance for macro-derived text. A reviewer's later Word edit in such a fragment may still be recorded completely in the ledger, but it remains manual when no exact source location can be proven; this feature does not promise automatic writeback for that text.
+
+With zero recognized macros, no display artifact is generated and the optional report field does not reference one. With one or more recognized macros, `ExportReport.existing_changes_display_docx` carries an artifact whose role is `latex_changes_display_docx`. Both Word files are built and validated in the same staged export, and any failure prevents publication of the final `export/` directory.
+
+Validation uses source-derived per-instance expectations, not an aggregate style-count gate. For each
+top-level revision-macro tree, the scanner records a diagnostic source-call SHA-256 and offset, its
+visible text/strike segments, and the number of nested macro instances it covers. Coverage across
+expectations must equal the complete source inventory. The independent DOCX reader then canonicalizes
+paragraph whitespace and requires:
+
+- one non-overlapping Word interval per non-empty expectation;
+- every matched character to be `0000FF` blue and to have exactly the expected strike state;
+- repeated identical text/strike expectations to have the required multiplicity;
+- each deletion boundary to be uniquely proven by neighboring visible text in the same paragraph;
+- verified visible-text and strike-character totals to equal the source-derived totals;
+- the clean/display deltas for blue, strike, and highlight characters to equal the source profile;
+- equations, images, tables, fields, relationships, and story parts to match the clean review;
+- the exact OPC part-name set and the semantic content of `[Content_Types].xml`, `styles.xml`,
+  `numbering.xml`, `fontTable.xml`, every `word/theme/*.xml`, and general `settings.xml` to match;
+- no native revision elements and no enabled Track Changes setting.
+
+Protected-part comparison preserves real style, numbering, font, theme, content-type, and setting
+changes. It ignores only known Word save identifiers, numbering-definition identifiers after resolving
+their references, the clean/display Track Changes role difference, and the complete, exact display-role
+`docVars` triplet shown above. Missing, malformed, duplicated, or additional reserved marker values and
+all unrelated `docVars` remain evidence and fail closed when they drift.
+
+Thus insufficient non-overlapping matches, an incorrect style, a non-unique or missing same-paragraph
+deletion boundary, a clean/display style-delta mismatch, or non-revision structure loss fails with
+`E_EXPORT_SILENT_LOSS`. Unchanged blue or struck text elsewhere in the paper is present in both views
+and cannot compensate for a missing display-profile delta. The generation profile itself adds no
+highlighting. Unrelated highlighting is allowed only when it is unchanged between the clean and display
+views; highlighting is not artifact-role evidence.
+
+The deletion-context check prevents struck text from being moved to an unproven paragraph boundary.
+It still does not cryptographically bind a Word character position to a LaTeX source offset or grant
+writeback provenance. The source digest and offset remain diagnostic provenance; exact Word-to-LaTeX
+writeback still depends on the separate clean-review bookmark and SourceMap contracts.
+
+
+This is an adopt-and-wrap decision. The project does not rebuild a general TeX parser, general intermediate representation, or OMML writer; it does own the bounded scanner, safety policy, two profiles, artifact roles, and independent OOXML acceptance checks.
+
 ## Derived image overlay
 
 Before a conversion backend runs, `export_review_docx()` creates a sibling
@@ -294,8 +425,9 @@ objects, 1 image, 1 table, 9 upstream bookmarks, and 11 live fields (5 `SEQ`,
 
 The structure inventory reconciles images 1/1, tables 1/1, math 5/5,
 references 6/6, and static labels 8/8 as `preserved`; citations remain
-explicitly `unsupported`. The final DOCX enables Track Changes. Separate
-synthetic tests cover missing images, tables, math, references, and labels,
+explicitly `unsupported`. The final `review.docx` enables Track Changes;
+`existing-changes-display.docx` does not. Separate synthetic tests cover missing
+images, tables, math, references, and labels,
 visible fallbacks, non-equivalent structures, bounded inventory behavior, a
 multi-page PDF with crop/rotation, cache/pixel hashes, and source immutability.
 

@@ -51,6 +51,7 @@ from latex_word_review.user_messages import (
     user_message_for_error,
 )
 from latex_word_review.windows_dialogs import (
+    choose_existing_changes_copy_destination,
     choose_main_tex,
     choose_returned_docx,
     choose_review_copy_destination,
@@ -347,6 +348,13 @@ def _default_review_copy_picker(initial: Path | None) -> Path | None:
     return choose_review_copy_destination(initial_dir=initial)
 
 
+def _default_existing_changes_copy_picker(initial: Path | None) -> Path | None:
+    return choose_existing_changes_copy_destination(
+        initial_dir=initial,
+        suggested_name="已有批改展示稿.docx",
+    )
+
+
 def _default_path_opener(path: Path) -> None:
     if os.name != "nt":  # pragma: no cover - this distribution is Windows-only
         raise ContractError(ErrorCode.TOOL_MISSING, "opening files requires Windows")
@@ -388,6 +396,7 @@ class AppState:
         main_picker: PathPicker = _default_main_picker,
         word_picker: PathPicker = _default_word_picker,
         review_copy_picker: PathPicker = _default_review_copy_picker,
+        existing_changes_copy_picker: PathPicker = _default_existing_changes_copy_picker,
         path_opener: PathOpener = _default_path_opener,
         monotonic: Callable[[], float] = time.monotonic,
         max_workers: int = 2,
@@ -402,6 +411,7 @@ class AppState:
         self._main_picker = main_picker
         self._word_picker = word_picker
         self._review_copy_picker = review_copy_picker
+        self._existing_changes_copy_picker = existing_changes_copy_picker
         self._path_opener = path_opener
         self._monotonic = monotonic
         self._last_source_directory: Path | None = None
@@ -414,6 +424,7 @@ class AppState:
         self._selected: dict[str, SelectedProject] = {}
         self._job_routes: dict[str, _JobRoute] = {}
         self._review_copy_notices: dict[str, str] = {}
+        self._existing_changes_copy_notices: dict[str, str] = {}
         self._support_downloads: dict[str, _PendingSupportDownload] = {}
         self.jobs = JobManager(max_workers=max_workers)
 
@@ -836,6 +847,7 @@ class AppState:
         )
         with self._lock:
             saved_name = self._review_copy_notices.pop(session_key, None)
+            existing_changes_saved_name = self._existing_changes_copy_notices.pop(session_key, None)
         if saved_name is not None:
             display_name = saved_name if len(saved_name) <= 120 else saved_name[:117] + "..."
             raw_notices = view.get("notices")
@@ -852,6 +864,29 @@ class AppState:
                     "message": (
                         f"已另存副本：{display_name}。"
                         "内部密封审阅稿保持不变，可继续导入修改后的 Word。"
+                    ),
+                },
+            )
+            view["notices"] = notices
+        if existing_changes_saved_name is not None:
+            display_name = (
+                existing_changes_saved_name
+                if len(existing_changes_saved_name) <= 120
+                else existing_changes_saved_name[:117] + "..."
+            )
+            raw_notices = view.get("notices")
+            notices = (
+                list(cast("list[dict[str, str]]", raw_notices))
+                if isinstance(raw_notices, list)
+                else []
+            )
+            notices.insert(
+                0,
+                {
+                    "tone": "success",
+                    "title": "已有批改展示稿副本已保存",
+                    "message": (
+                        f"已另存展示稿：{display_name}。它仅供对照，不能作为返回 Word 导入。"
                     ),
                 },
             )
@@ -942,6 +977,24 @@ class AppState:
             saved = self._action_session(session_key).save_review_copy(selected)
             self._last_output_directory = saved.parent
             self._review_copy_notices[session_key] = saved.name
+        return True
+
+    def save_existing_changes_display_copy(self, session_key: str) -> bool:
+        """Choose and publish the visual-only display copy without a browser path."""
+
+        self._session_root(session_key, must_exist=True)
+        selected = self._existing_changes_copy_picker(self._last_output_directory)
+        if selected is None:
+            return False
+        with self._lock:
+            if self.jobs.active_for(session_key) is not None:
+                raise ContractError(
+                    ErrorCode.SCHEMA_INVALID,
+                    "an active review session cannot save a Word copy",
+                )
+            saved = self._action_session(session_key).save_existing_changes_display_copy(selected)
+            self._last_output_directory = saved.parent
+            self._existing_changes_copy_notices[session_key] = saved.name
         return True
 
     def _register_job(
@@ -1254,6 +1307,12 @@ class AppState:
         path = self._artifact_path(session_key, "review_docx")
         if _is_link_or_junction(path) or not path.is_file():
             raise ContractError(ErrorCode.SCHEMA_INVALID, "review Word is unavailable")
+        self._path_opener(path)
+
+    def open_existing_changes_display(self, session_key: str) -> None:
+        path = self._artifact_path(session_key, "existing_changes_display_docx")
+        if _is_link_or_junction(path) or not path.is_file():
+            raise ContractError(ErrorCode.SCHEMA_INVALID, "display Word is unavailable")
         self._path_opener(path)
 
     def open_revised_source(self, session_key: str) -> None:
@@ -1916,6 +1975,8 @@ class AppRequestHandler(BaseHTTPRequestHandler):
             "/session/export-existing": {"csrf", "session"},
             "/session/open-review-docx": {"csrf", "session"},
             "/session/save-review-copy": {"csrf", "session"},
+            "/session/open-existing-changes-display": {"csrf", "session"},
+            "/session/save-existing-changes-copy": {"csrf", "session"},
             "/session/receive": {"csrf", "session"},
             "/session/delete": {"csrf", "session", "confirm_delete"},
             "/approval/decision": {
@@ -2001,6 +2062,14 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/session/save-review-copy":
                 state.save_review_copy(session_key)
+                self._redirect(session_href)
+                return
+            if path == "/session/open-existing-changes-display":
+                state.open_existing_changes_display(session_key)
+                self._redirect(session_href)
+                return
+            if path == "/session/save-existing-changes-copy":
+                state.save_existing_changes_display_copy(session_key)
                 self._redirect(session_href)
                 return
             if path == "/session/receive":
@@ -2149,6 +2218,7 @@ def create_app_server(
     main_picker: PathPicker = _default_main_picker,
     word_picker: PathPicker = _default_word_picker,
     review_copy_picker: PathPicker = _default_review_copy_picker,
+    existing_changes_copy_picker: PathPicker = _default_existing_changes_copy_picker,
     path_opener: PathOpener = _default_path_opener,
 ) -> AppHTTPServer:
     """Create, but do not start, the fixed-origin local application server."""
@@ -2165,6 +2235,7 @@ def create_app_server(
         main_picker=main_picker,
         word_picker=word_picker,
         review_copy_picker=review_copy_picker,
+        existing_changes_copy_picker=existing_changes_copy_picker,
         path_opener=path_opener,
     )
     try:

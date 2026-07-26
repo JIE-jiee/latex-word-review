@@ -160,6 +160,215 @@ def test_export_uses_fixed_paths_is_read_only_and_rejects_reentry(tmp_path: Path
     assert not list((run / ".lwr-staging").iterdir())
 
 
+def test_export_validates_stage_before_publish_and_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _initialize(tmp_path)
+    real_write = workflow_module._write_export_objects
+    real_validate = workflow_module._validate_export
+
+    def write_placeholder(_core: object, payload: Path, **_kwargs: object) -> dict[str, int]:
+        (payload / "placeholder.txt").write_text("staged", encoding="utf-8")
+        return {}
+
+    def reject_stage(_core: object, *, export_root: Path | None = None) -> object:
+        assert export_root is not None
+        assert export_root != run / "export"
+        assert not (run / "export").exists()
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "synthetic staged export rejection")
+
+    monkeypatch.setattr(workflow_module, "_write_export_objects", write_placeholder)
+    monkeypatch.setattr(workflow_module, "_validate_export", reject_stage)
+    with pytest.raises(ContractError, match=ErrorCode.HASH_SOURCE_MISMATCH.value):
+        export_workflow(run, confidentiality="public_fixture", generated_at=TIME)
+    assert not (run / "export").exists()
+    assert not list((run / ".lwr-staging").iterdir())
+
+    monkeypatch.setattr(workflow_module, "_write_export_objects", real_write)
+    monkeypatch.setattr(workflow_module, "_validate_export", real_validate)
+    result = export_workflow(run, confidentiality="public_fixture", generated_at=TIME)
+    assert result["phase"] == "exported"
+
+
+def test_export_success_survives_post_commit_stage_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _initialize(tmp_path)
+    real_remove = workflow_module._remove_owned_tree
+
+    def reject_cleanup(path: Path, parent: Path, *, prefixes: tuple[str, ...]) -> None:
+        assert (run / "export").is_dir()
+        assert path.parent == parent
+        assert prefixes == (".lwr-stage-export-",)
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "synthetic cleanup conflict")
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", reject_cleanup)
+    result = export_workflow(run, confidentiality="public_fixture", generated_at=TIME)
+
+    assert result["phase"] == "exported"
+    assert workflow_status(run)["phase"] == "exported"
+    stale = list((run / ".lwr-staging").glob(".lwr-stage-export-*"))
+    assert len(stale) == 1
+    assert not (stale[0] / "payload").exists()
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", real_remove)
+    cleaned = clean_workflow(run, execute=True)
+    assert cleaned["removed_count"] == 1
+    assert not stale[0].exists()
+    assert (run / "export/review.docx").is_file()
+
+
+def test_export_primary_failure_survives_stage_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _initialize(tmp_path)
+    real_remove = workflow_module._remove_owned_tree
+
+    def reject_export(*_args: object, **_kwargs: object) -> None:
+        raise ContractError(ErrorCode.EXPORT_SILENT_LOSS, "synthetic primary export failure")
+
+    def reject_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "synthetic cleanup conflict")
+
+    monkeypatch.setattr(workflow_module, "_write_export_objects", reject_export)
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", reject_cleanup)
+    with pytest.raises(ContractError) as raised:
+        export_workflow(run, confidentiality="public_fixture", generated_at=TIME)
+
+    assert raised.value.code is ErrorCode.EXPORT_SILENT_LOSS
+    assert not (run / "export").exists()
+    assert len(list((run / ".lwr-staging").glob(".lwr-stage-export-*"))) == 1
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", real_remove)
+    assert clean_workflow(run, execute=True)["removed_count"] == 1
+
+
+def test_receive_validates_stage_before_publish_and_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _export(tmp_path)
+    returned = tmp_path / "returned.docx"
+    _make_returned(run, returned)
+    real_validate = workflow_module._validate_receive
+
+    def reject_stage(
+        _core: object,
+        _export_state: object,
+        *,
+        receive_root: Path | None = None,
+    ) -> dict[str, int]:
+        assert receive_root is not None
+        assert receive_root != run / "receive"
+        assert not (run / "receive").exists()
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "synthetic staged receive rejection")
+
+    monkeypatch.setattr(workflow_module, "_validate_receive", reject_stage)
+    with pytest.raises(ContractError) as raised:
+        receive_workflow(
+            run,
+            returned,
+            confidentiality="public_fixture",
+            generated_at=TIME,
+        )
+
+    assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
+    assert not (run / "receive").exists()
+    assert not list((run / ".lwr-staging").glob(".lwr-stage-receive-*"))
+
+    monkeypatch.setattr(workflow_module, "_validate_receive", real_validate)
+    result = receive_workflow(
+        run,
+        returned,
+        confidentiality="public_fixture",
+        generated_at=TIME,
+    )
+    assert result["phase"] == "ingested"
+
+
+def test_receive_success_survives_post_commit_stage_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _export(tmp_path)
+    returned = tmp_path / "returned.docx"
+    _make_returned(run, returned)
+    real_remove = workflow_module._remove_owned_tree
+
+    def reject_cleanup(path: Path, parent: Path, *, prefixes: tuple[str, ...]) -> None:
+        assert (run / "receive").is_dir()
+        assert path.parent == parent
+        assert prefixes == (".lwr-stage-receive-",)
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "synthetic cleanup conflict")
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", reject_cleanup)
+    result = receive_workflow(
+        run,
+        returned,
+        confidentiality="public_fixture",
+        generated_at=TIME,
+    )
+
+    assert result["phase"] == "ingested"
+    assert workflow_status(run)["phase"] == "ingested"
+    stale = list((run / ".lwr-staging").glob(".lwr-stage-receive-*"))
+    assert len(stale) == 1
+    assert not (stale[0] / "payload").exists()
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", real_remove)
+    assert clean_workflow(run, execute=True)["removed_count"] == 1
+    assert not stale[0].exists()
+    assert (run / "receive/changeset.json").is_file()
+
+
+def test_receive_primary_failure_survives_stage_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _origin, run = _export(tmp_path)
+    returned = tmp_path / "returned.docx"
+    _make_returned(run, returned)
+    real_remove = workflow_module._remove_owned_tree
+
+    def reject_receive(
+        _core: object,
+        _export_state: object,
+        *,
+        receive_root: Path | None = None,
+    ) -> dict[str, int]:
+        assert receive_root is not None
+        assert receive_root != run / "receive"
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "synthetic primary receive failure",
+        )
+
+    def reject_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise ContractError(ErrorCode.INTERNAL_INVARIANT, "synthetic cleanup conflict")
+
+    monkeypatch.setattr(workflow_module, "_validate_receive", reject_receive)
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", reject_cleanup)
+    with pytest.raises(ContractError) as raised:
+        receive_workflow(
+            run,
+            returned,
+            confidentiality="public_fixture",
+            generated_at=TIME,
+        )
+
+    assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
+    assert not (run / "receive").exists()
+    stale = list((run / ".lwr-staging").glob(".lwr-stage-receive-*"))
+    assert len(stale) == 1
+
+    monkeypatch.setattr(workflow_module, "_remove_owned_tree", real_remove)
+    assert clean_workflow(run, execute=True)["removed_count"] == 1
+    assert not stale[0].exists()
+
+
 def test_receive_archives_original_without_approving_or_applying(tmp_path: Path) -> None:
     origin, run = _export(tmp_path)
     origin_before = _bytes_by_path(origin)

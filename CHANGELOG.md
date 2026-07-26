@@ -18,6 +18,14 @@ native dependency license/relink evidence described below is complete.
 
 ### Added
 
+- Add a separate `existing-changes-display.docx` when supported LaTeX change markup is present.
+  `\added`, `\deleted`, and `\replaced` require an accepted static `changes` package declaration;
+  `\add` and `\delete` retain conservative static-declaration or direct-wrapper rules. Additions are
+  uniform `0000FF` blue, deletions are blue single-struck text, and replacements show old blue
+  single-struck text immediately followed by new blue text. The display profile adds no highlighting
+  and does not create native Word Track Changes.
+- Add a dedicated Windows application card for opening or saving the existing-change display copy
+  while keeping the clean editable review copy as the only reviewer handoff and return path.
 - Add a deterministic, code-generated `academic-review-v1` Word reference profile through
   tex2word 1.0.5's public `reference_doc` API, with pinned hashes, fail-closed load evidence,
   A4 single-column typography, compact tables, and bounded non-upscaled images.
@@ -85,6 +93,17 @@ native dependency license/relink evidence described below is complete.
 
 ### Security
 
+- Treat the change-display Word as non-returnable reference material. Seal its digest, embed a
+  standard document-variable role marker, and reject the exact artifact or marked saved/repacked
+  copies before review import.
+- Require a statically visible standard `changes` declaration for canonical calls; reject bare
+  canonical calls, discovery-bound project-tree `changes.sty`/`trackchanges.sty` shadowing, detected
+  `\input@path` overrides, and direct or dynamic canonical redefinitions. This syntactic gate does
+  not resolve system/user TEXMF or `TEXINPUTS`, or bind the finally loaded package path, version, or hash.
+- Validate source-derived visible text and strike expectations, clean/display blue-strike-highlight
+  deltas, unique same-paragraph context for every deletion position, non-change DOCX structures, the
+  exact OPC part-name set, and protected style, numbering, font, theme, content-type, and settings
+  parts before publishing either staged Word result. This is not an automatic-writeback SourceMap.
 - Keep task deletion and review-copy publication inside the application lock and recheck active jobs
   after native dialogs return; publish review copies atomically without clobbering existing files.
 
@@ -94,6 +113,14 @@ native dependency license/relink evidence described below is complete.
 
 ### Known limitations
 
+- Existing-change rendering is intentionally limited to direct, static, safe inline calls. Dynamic
+  conditionals are skipped, while unsupported structured arguments, a missing accepted static
+  declaration, local package shadowing, detected package-search overrides, canonical redefinitions,
+  ambiguous alias provenance, and non-unique deletion context fail closed. Macro-derived text does not automatically gain an exact
+  LaTeX SourceMap.
+
+- Empty change payloads such as `\added{}`, `\deleted{}`, or `\replaced{}{}` are inventoried but
+  cannot provide display evidence, so display export fails closed with `E_SCHEMA_INVALID`.
 - Public frozen Windows binaries are held back pending acceptable static-native `lxml`
   license/relink evidence; source installation and non-binary project publication are not blocked.
 - Local Windows candidates are unsigned, so Windows SmartScreen may warn. Users must verify a

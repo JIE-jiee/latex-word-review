@@ -79,6 +79,7 @@ class PandocBackend:
             ),
             features=(
                 ("body_text", partial),
+                ("revision_view", none),
                 ("cjk", partial),
                 ("inline_math", partial),
                 ("display_math", partial),
@@ -157,6 +158,13 @@ class PandocBackend:
     def export(self, request: BackendRequest) -> BackendResult:
         prepared = prepare_export(request, owner="pandoc")
         try:
+            if request.revision_view != "source":
+                return failed_result(
+                    self.capabilities(),
+                    code=ErrorCode.BACKEND_CAPABILITY_MISSING,
+                    message="the Pandoc baseline supports only the source revision view",
+                )
+
             probe_failure = self._probe_version(request, prepared.output_path.parent)
             if probe_failure is not None:
                 return probe_failure

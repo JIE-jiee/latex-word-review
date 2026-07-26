@@ -283,6 +283,26 @@ def _waiting_view(
     review_path = resolve_within(run_root, review_relative)
     if not review_path.is_file():
         raise ContractError(ErrorCode.SCHEMA_INVALID, "sealed review Word is not a file")
+    existing_changes_display: dict[str, str] | None = None
+    display_relative_value = _artifacts(status).get("existing_changes_display_docx")
+    if display_relative_value is not None:
+        display_relative = validate_relative_path(
+            _string(
+                display_relative_value,
+                "status.artifacts.existing_changes_display_docx",
+            )
+        )
+        display_path = resolve_within(run_root, display_relative)
+        if not display_path.is_file():
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "existing LaTeX changes display Word is not a file",
+            )
+        existing_changes_display = {
+            "docx_name": PurePosixPath(display_relative).name,
+            "open_action": "/session/open-existing-changes-display",
+            "save_copy_action": "/session/save-existing-changes-copy",
+        }
     export_report = read_contract_file(
         resolve_within(run_root, validate_relative_path("export/objects/export-report.json")),
         expected_schema="ExportReport",
@@ -383,6 +403,7 @@ def _waiting_view(
         "export_warning_count": warning_count,
         "compatibility_counts": compatibility_counts,
         "notices": notices,
+        "existing_changes_display": existing_changes_display,
         "open_action": "/session/open-review-docx",
         "save_copy_action": "/session/save-review-copy",
         "receive_action": "/session/receive",
