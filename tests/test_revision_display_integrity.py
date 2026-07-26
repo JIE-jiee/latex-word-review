@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import stat
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Callable
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import latex_word_review.revision_display as revision_display_module
+import latex_word_review.word_fields as word_fields_module
 import latex_word_review.workflow as workflow_module
 from latex_word_review.discovery import discover_project
 from latex_word_review.errors import ContractError, ErrorCode
@@ -28,6 +30,7 @@ from latex_word_review.revision_macros import (
     RevisionMacroInventory,
 )
 from latex_word_review.workflow import export_workflow, initialize_workflow
+from tests.conftest import fake_invoke_word
 from tests.test_revision_display_workflow import TIME
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -39,6 +42,90 @@ W = f"{{{W_NS}}}"
 M = f"{{{M_NS}}}"
 R = f"{{{R_NS}}}"
 REL = f"{{{PKG_REL_NS}}}"
+
+
+def _add_portable_optional_protected_parts(path: Path) -> None:
+    """Add valid theme/font-table parts that Word would otherwise supply."""
+
+    with zipfile.ZipFile(path, mode="r") as source:
+        infos = source.infolist()
+        members = {info.filename: source.read(info.filename) for info in infos}
+    optional_parts = {
+        "word/fontTable.xml": (
+            f'<w:fonts xmlns:w="{W_NS}"><w:font w:name="LWR Baseline"/></w:fonts>'
+        ).encode(),
+        "word/theme/theme1.xml": (
+            b'<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            b'name="LWR Baseline"><a:themeElements><a:clrScheme name="LWR">'
+            b'<a:dk1><a:srgbClr val="000000"/></a:dk1></a:clrScheme>'
+            b"</a:themeElements></a:theme>"
+        ),
+    }
+    if all(name in members for name in optional_parts):
+        return
+    if any(name in members for name in optional_parts):
+        raise AssertionError("portable protected-part fixture is incomplete")
+
+    content_types = ET.fromstring(members["[Content_Types].xml"])
+    for part_name, content_type in (
+        (
+            "/word/fontTable.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+        ),
+        (
+            "/word/theme/theme1.xml",
+            "application/vnd.openxmlformats-officedocument.theme+xml",
+        ),
+    ):
+        override = ET.SubElement(content_types, f"{{{CONTENT_TYPES_NS}}}Override")
+        override.set("PartName", part_name)
+        override.set("ContentType", content_type)
+    members["[Content_Types].xml"] = ET.tostring(
+        content_types,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
+
+    relationships_name = "word/_rels/document.xml.rels"
+    relationships = ET.fromstring(members[relationships_name])
+    for relationship_id, relationship_type, target in (
+        (
+            "rIdLwrFontTable",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
+            "fontTable.xml",
+        ),
+        (
+            "rIdLwrTheme",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
+            "theme/theme1.xml",
+        ),
+    ):
+        relationship = ET.SubElement(relationships, f"{{{PKG_REL_NS}}}Relationship")
+        relationship.set("Id", relationship_id)
+        relationship.set("Type", relationship_type)
+        relationship.set("Target", target)
+    members[relationships_name] = ET.tostring(
+        relationships,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
+    members.update(optional_parts)
+
+    replacement = path.with_name(f".{path.name}.portable-parts")
+    original_mode = stat.S_IMODE(path.stat().st_mode)
+    try:
+        with zipfile.ZipFile(replacement, mode="x") as destination:
+            for info in infos:
+                destination.writestr(info, members[info.filename])
+            for name in sorted(optional_parts):
+                destination.writestr(name, members[name])
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        replacement.replace(path)
+    finally:
+        if path.exists():
+            path.chmod(original_mode)
+        if replacement.exists():
+            replacement.unlink()
 
 
 @pytest.fixture(scope="module")
@@ -99,6 +186,7 @@ def rich_revision_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     patcher = pytest.MonkeyPatch()
     patcher.setattr(workflow_module, "scan_revision_macros", lambda *_args, **_kwargs: inventory)
+    patcher.setattr(word_fields_module, "_invoke_word", fake_invoke_word)
     try:
         export_workflow(
             run,
@@ -107,6 +195,8 @@ def rich_revision_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
         )
     finally:
         patcher.undo()
+    _add_portable_optional_protected_parts(run / "export/review.docx")
+    _add_portable_optional_protected_parts(run / "export/existing-changes-display.docx")
     return run
 
 
