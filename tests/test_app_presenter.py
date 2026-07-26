@@ -97,6 +97,7 @@ def test_preflight_and_waiting_views_are_renderable_and_post_bound(tmp_path: Pat
     assert waiting["exported_at"] == TIME
     assert waiting["export_status"] == "partial"
     assert cast("int", waiting["export_warning_count"]) > 0
+    assert waiting["existing_changes_display"] is None
     notices = cast("Sequence[Mapping[str, str]]", waiting["notices"])
     assert [notice["title"] for notice in notices] == [
         "审阅稿已生成，但有转换提示",
@@ -142,6 +143,51 @@ def test_preflight_and_waiting_views_are_renderable_and_post_bound(tmp_path: Pat
     assert "拖回" not in waiting_html
     assert waiting_html.count('name="csrf" value="csrf-value"') == 3
     assert waiting_html.count('name="session" value="paper-1"') == 3
+    assert "已有 LaTeX 批改展示稿" not in waiting_html
+
+
+def test_waiting_view_conditionally_exposes_existing_latex_changes_display(
+    tmp_path: Path,
+) -> None:
+    session = _new_session(tmp_path)
+    session.export_review(confidentiality="public_fixture", generated_at=TIME)
+    status = session.status()
+    display_relative = "export/existing-changes-display.docx"
+    display_path = session.run_root / display_relative
+    display_path.write_bytes((session.run_root / "export/review.docx").read_bytes())
+    artifacts = cast("dict[str, str]", status["artifacts"])
+    artifacts["existing_changes_display_docx"] = display_relative
+    display_session = _as_application_session(_StatusSession(session.run_root, status))
+
+    view = render_session_view(
+        display_session,
+        session_key="display-paper",
+        csrf_token="csrf-display",
+    )
+    html = _assert_renderable_and_path_free(view, session.run_root)
+
+    display = cast("Mapping[str, str]", view["existing_changes_display"])
+    assert display == {
+        "docx_name": "existing-changes-display.docx",
+        "open_action": "/session/open-existing-changes-display",
+        "save_copy_action": "/session/save-existing-changes-copy",
+    }
+    assert "已有 LaTeX 批改展示稿（仅供对照）" in html
+    assert "新增文字为蓝色" in html
+    assert "删除文字为蓝色删除线" in html
+    assert "旧文字蓝色删除线＋新文字蓝色" in html
+    assert "不使用高亮" in html
+    assert "这不是 Word 原生修订" in html
+    assert "不要把它作为审阅者返回的 Word 导入" in html
+    assert 'action="/session/open-existing-changes-display"' in html
+    save_form = html.split('action="/session/save-existing-changes-copy"', 1)[1].split(
+        "</form>",
+        1,
+    )[0]
+    assert 'name="csrf" value="csrf-display"' in save_form
+    assert 'name="session" value="display-paper"' in save_form
+    assert 'name="path"' not in save_form
+    assert 'name="destination"' not in save_form
 
 
 def test_waiting_view_does_not_guess_missing_compatibility_metrics(

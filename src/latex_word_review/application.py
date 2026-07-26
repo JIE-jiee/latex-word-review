@@ -60,6 +60,10 @@ from latex_word_review.workflow_objects import build_run_manifest_document, utc_
 _SOURCE_MANIFEST: Final = "objects/source-manifest.json"
 _SNAPSHOT: Final = "snapshot"
 _REVIEW_DOCX: Final = "export/review.docx"
+_EXPORT_REPORT: Final = "export/objects/export-report.json"
+_EXISTING_CHANGES_DISPLAY_DOCX: Final = "export/existing-changes-display.docx"
+_EXISTING_CHANGES_DISPLAY_ROLE: Final = "latex_changes_display_docx"
+_DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _CHANGESET: Final = "receive/changeset.json"
 _RETURNED_ORIGINAL: Final = "receive/original/returned-original.docx"
 _APPROVALS: Final = "approvals"
@@ -108,6 +112,8 @@ class _VerificationVersion:
 class _Evidence:
     workflow: dict[str, Any]
     source_manifest: dict[str, Any]
+    review_docx_digest: FileDigest | None
+    existing_changes_display_digest: FileDigest | None
     changeset: dict[str, Any] | None
     approvals: tuple[_ApprovalVersion, ...]
     plans: tuple[_PlanVersion, ...]
@@ -200,7 +206,13 @@ def _publish_directory(
             shutil.rmtree(staged)
 
 
-def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
+def _publish_verified_file_copy(
+    source: Path,
+    destination: Path,
+    *,
+    expected_digest: FileDigest | None = None,
+    label: str = "review Word",
+) -> Path:
     """Stream one immutable artifact to a new user-selected path."""
 
     if not destination.is_absolute():
@@ -210,13 +222,18 @@ def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
     if destination.exists() or _is_link_or_junction(destination):
         raise ContractError(ErrorCode.SCHEMA_INVALID, "output path already exists")
 
-    source_file = _require_regular_file(source, "review Word")
+    source_file = _require_regular_file(source, label)
     parent = _require_real_directory(destination.parent, "output directory")
     target = parent / destination.name
     if target.exists() or _is_link_or_junction(target):
         raise ContractError(ErrorCode.SCHEMA_INVALID, "output path already exists")
 
     source_before = digest_file(source_file, max_bytes=_MAX_ARTIFACT_BYTES)
+    if expected_digest is not None and source_before != expected_digest:
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            f"{label} no longer matches its sealed evidence",
+        )
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.publish-",
         suffix=".tmp",
@@ -237,13 +254,13 @@ def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
         if source_after != source_before:
             raise ContractError(
                 ErrorCode.HASH_SOURCE_MISMATCH,
-                "review Word changed while being copied",
+                f"{label} changed while being copied",
             )
         staged_digest = digest_file(staged, max_bytes=_MAX_ARTIFACT_BYTES)
         if staged_digest != source_before:
             raise ContractError(
                 ErrorCode.HASH_INTEGRITY_MISMATCH,
-                "review Word copy failed byte verification",
+                f"{label} copy failed byte verification",
             )
 
         try:
@@ -253,7 +270,7 @@ def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
         except OSError as exc:
             raise ContractError(
                 ErrorCode.INTERNAL_INVARIANT,
-                "review Word copy could not be published",
+                f"{label} copy could not be published",
             ) from exc
         linked = True
 
@@ -267,7 +284,7 @@ def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
                     target.unlink()
             raise ContractError(
                 ErrorCode.HASH_INTEGRITY_MISMATCH,
-                "published review Word copy failed verification",
+                f"published {label} copy failed verification",
             )
         published = True
         return target
@@ -280,6 +297,144 @@ def _publish_verified_file_copy(source: Path, destination: Path) -> Path:
                     target.unlink()
         with suppress(FileNotFoundError):
             staged.unlink()
+
+
+def _load_review_docx_digest(
+    run_root: Path,
+    workflow_phase: str,
+) -> FileDigest | None:
+    """Return the sealed review DOCX digest for a copy authorization."""
+
+    if workflow_phase not in {"exported", "ingested"}:
+        return None
+    report = read_contract_file(
+        run_root / _EXPORT_REPORT,
+        expected_schema="ExportReport",
+        max_bytes=_MAX_CONTRACT_BYTES,
+    )
+    payload = cast("Mapping[str, Any]", report["payload"])
+    raw_artifact = payload.get("review_docx")
+    if not isinstance(raw_artifact, Mapping):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "review Word evidence is missing or invalid",
+        )
+    artifact = cast("Mapping[str, Any]", raw_artifact)
+    raw_path = artifact.get("path")
+    if not isinstance(raw_path, str):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "review Word evidence path is invalid",
+        )
+    artifact_path = validate_relative_path(raw_path)
+    if (
+        artifact_path != _REVIEW_DOCX
+        or artifact.get("path_base") != "run_root"
+        or artifact.get("role") != "review_docx"
+        or artifact.get("media_type") != _DOCX_MEDIA_TYPE
+        or artifact.get("immutable") is not True
+    ):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "review Word evidence has unexpected semantics",
+        )
+    size_bytes = artifact.get("size_bytes")
+    sha256 = artifact.get("sha256")
+    artifact_id = artifact.get("artifact_id")
+    if (
+        isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or not isinstance(sha256, str)
+        or not isinstance(artifact_id, str)
+        or artifact_id != derive_artifact_id(sha256)
+    ):
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            "review Word evidence identity is invalid",
+        )
+    expected = FileDigest(size_bytes=size_bytes, sha256=sha256)
+    review_file = _require_regular_file(
+        resolve_within(run_root, artifact_path),
+        "review Word",
+    )
+    if digest_file(review_file, max_bytes=_MAX_ARTIFACT_BYTES) != expected:
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            "review Word differs from its sealed evidence",
+        )
+    return expected
+
+
+def _load_existing_changes_display_digest(
+    run_root: Path,
+    workflow_phase: str,
+) -> FileDigest | None:
+    """Return verified optional evidence for the visual-only LaTeX changes DOCX."""
+
+    if workflow_phase not in {"exported", "ingested"}:
+        return None
+    report = read_contract_file(
+        run_root / _EXPORT_REPORT,
+        expected_schema="ExportReport",
+        max_bytes=_MAX_CONTRACT_BYTES,
+    )
+    payload = cast("Mapping[str, Any]", report["payload"])
+    raw_artifact = payload.get("existing_changes_display_docx")
+    if raw_artifact is None:
+        # Old reports, and new exports without revision macros, intentionally
+        # omit this optional artifact. A stray file is never enough evidence.
+        return None
+    if not isinstance(raw_artifact, Mapping):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "existing LaTeX changes display evidence is invalid",
+        )
+    artifact = cast("Mapping[str, Any]", raw_artifact)
+    raw_path = artifact.get("path")
+    if not isinstance(raw_path, str):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "existing LaTeX changes display path is invalid",
+        )
+    artifact_path = validate_relative_path(raw_path)
+    if (
+        artifact_path != _EXISTING_CHANGES_DISPLAY_DOCX
+        or artifact.get("path_base") != "run_root"
+        or artifact.get("role") != _EXISTING_CHANGES_DISPLAY_ROLE
+        or artifact.get("media_type") != _DOCX_MEDIA_TYPE
+        or artifact.get("immutable") is not True
+    ):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "existing LaTeX changes display evidence has unexpected semantics",
+        )
+    size_bytes = artifact.get("size_bytes")
+    sha256 = artifact.get("sha256")
+    artifact_id = artifact.get("artifact_id")
+    if (
+        isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or not isinstance(sha256, str)
+        or not isinstance(artifact_id, str)
+        or artifact_id != derive_artifact_id(sha256)
+    ):
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            "existing LaTeX changes display identity is invalid",
+        )
+    expected = FileDigest(size_bytes=size_bytes, sha256=sha256)
+    display_file = _require_regular_file(
+        resolve_within(run_root, artifact_path),
+        "existing LaTeX changes display Word",
+    )
+    if digest_file(display_file, max_bytes=_MAX_ARTIFACT_BYTES) != expected:
+        raise ContractError(
+            ErrorCode.HASH_INTEGRITY_MISMATCH,
+            "existing LaTeX changes display Word differs from its sealed evidence",
+        )
+    return expected
 
 
 def _artifact_ref(
@@ -423,7 +578,8 @@ class ApplicationSession:
         """Save a verified editable copy while preserving the sealed baseline."""
 
         evidence = self._inspect()
-        if evidence.workflow["phase"] not in {"exported", "ingested"}:
+        expected = evidence.review_docx_digest
+        if evidence.workflow["phase"] not in {"exported", "ingested"} or expected is None:
             raise ContractError(
                 ErrorCode.SCHEMA_INVALID,
                 "review Word is not available for copying",
@@ -431,6 +587,24 @@ class ApplicationSession:
         return _publish_verified_file_copy(
             self._run_root / _REVIEW_DOCX,
             destination,
+            expected_digest=expected,
+        )
+
+    def save_existing_changes_display_copy(self, destination: Path) -> Path:
+        """Save the optional visual-only LaTeX changes DOCX without changing state."""
+
+        evidence = self._inspect()
+        expected = evidence.existing_changes_display_digest
+        if evidence.workflow["phase"] not in {"exported", "ingested"} or expected is None:
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "existing LaTeX changes display Word is not available for copying",
+            )
+        return _publish_verified_file_copy(
+            self._run_root / _EXISTING_CHANGES_DISPLAY_DOCX,
+            destination,
+            expected_digest=expected,
+            label="existing LaTeX changes display Word",
         )
 
     def receive_review(
@@ -917,6 +1091,14 @@ class ApplicationSession:
             max_bytes=_MAX_CONTRACT_BYTES,
         )
         phase = cast("str", workflow["phase"])
+        review_docx_digest = _load_review_docx_digest(
+            self._run_root,
+            phase,
+        )
+        existing_changes_display_digest = _load_existing_changes_display_digest(
+            self._run_root,
+            phase,
+        )
         changeset: dict[str, Any] | None = None
         if phase == "ingested":
             changeset = read_contract_file(
@@ -983,6 +1165,8 @@ class ApplicationSession:
         return _Evidence(
             workflow=workflow,
             source_manifest=source_manifest,
+            review_docx_digest=review_docx_digest,
+            existing_changes_display_digest=existing_changes_display_digest,
             changeset=changeset,
             approvals=approvals,
             plans=plans,
@@ -1437,6 +1621,8 @@ class ApplicationSession:
         workflow_phase = cast("str", evidence.workflow["phase"])
         if workflow_phase in {"exported", "ingested"}:
             artifacts["review_docx"] = _REVIEW_DOCX
+        if evidence.existing_changes_display_digest is not None:
+            artifacts["existing_changes_display_docx"] = _EXISTING_CHANGES_DISPLAY_DOCX
         if workflow_phase == "ingested":
             artifacts["changeset"] = _CHANGESET
             artifacts["returned_original"] = _RETURNED_ORIGINAL

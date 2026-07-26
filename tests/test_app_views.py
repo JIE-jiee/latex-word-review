@@ -301,6 +301,41 @@ def test_waiting_word_uses_windows_picker_post_without_browser_upload() -> None:
     assert 'class="button button--primary button--large"' in page
 
 
+def test_waiting_word_renders_existing_latex_changes_as_a_separate_display_only_card() -> None:
+    model = _waiting_word()
+    model["form_fields"] = {"csrf": "csrf-display", "session": "session-display"}
+    model["existing_changes_display"] = {
+        "docx_name": "existing-changes-display.docx",
+        "open_action": "/session/open-existing-changes-display",
+        "save_copy_action": "/session/save-existing-changes-copy",
+    }
+
+    page = render_app_page(model)
+
+    assert "已有 LaTeX 批改展示稿（仅供对照）" in page
+    assert "新增文字为蓝色" in page
+    assert "删除文字为蓝色删除线" in page
+    assert "旧文字蓝色删除线＋新文字蓝色" in page
+    assert "不使用高亮" in page
+    assert "这不是 Word 原生修订" in page
+    assert "不要把它作为审阅者返回的 Word 导入" in page
+    assert 'method="post" action="/session/open-existing-changes-display"' in page
+    save_form = page.split('action="/session/save-existing-changes-copy"', 1)[1].split(
+        "</form>",
+        1,
+    )[0]
+    assert 'name="csrf"' in save_form
+    assert 'name="session"' in save_form
+    assert 'name="path"' not in save_form
+    assert 'name="destination"' not in save_form
+    assert 'type="file"' not in save_form
+    assert (
+        page.index("2A 另存可编辑 Word 并交给审阅者")
+        < page.index("已有 LaTeX 批改展示稿（仅供对照）")
+        < page.index("2B 收到修改稿后导入 Word")
+    )
+
+
 def test_approval_cards_keep_technical_evidence_collapsed_and_preserve_first_gate() -> None:
     page = render_app_page(_approval())
 

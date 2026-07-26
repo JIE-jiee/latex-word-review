@@ -5,7 +5,7 @@ collaborate with people who review in Word. It brings approved edits back into a
 four steps:
 
 1. choose `main.tex`;
-2. generate a Word review and select the returned `.docx`;
+2. generate `review.docx`, save its exact editable copy, send only that copy to the reviewer, and select the same-round returned `.docx`;
 3. decide each tracked change;
 4. inspect the exact diff, confirm a second time, and generate the revised copy and evidence.
 
@@ -64,9 +64,52 @@ It never writes generated files into the original source tree.
 
 ## Step 2: review in Word and import the return
 
-Open the generated `review.docx`. Ask the reviewer to use Microsoft Word with Track Changes
-enabled, use comments for discussion, and avoid Accept All, deleting bookmarks, or saving as legacy
-`.doc`.
+Before conversion, the application scans canonical `\added`, `\deleted`, and `\replaced` calls only
+when a supported static `changes` package declaration is visible in the bound project dependencies.
+Bare canonical calls, a discovery-bound project-local `changes.sty`, a visible `\input@path`
+modification, and direct or dynamic canonical definitions/redefinitions fail closed. Statically
+recognized `\add` and `\delete` aliases retain their separate conservative rules. The clean review
+view keeps new text for additions and replacements and removes old text for deletions.
+
+| Generated file | Purpose |
+|---|---|
+| `review.docx` | The sealed internal clean baseline. Use the application to save its exact editable copy. Only a copy in this review role may be sent out and returned |
+| `existing-changes-display.docx` | Generated only when existing change macros are detected. It is solely for viewing changes already present in the source and must never be imported as a returned Word file |
+
+The display file uses one consistent `0000FF` blue style: additions are blue; deletions use blue single strikethrough; replacements show old blue single-struck text immediately followed by new blue text. This feature adds no highlighting. The file contains static formatting rather than native Word revisions, and Track Changes is not enabled.
+
+`\add` is accepted only when exactly one static source is recognized: a supported `trackchanges`
+package declaration or a static local direct wrapper to `\added`. A package-backed `\add` is rejected
+when a discovery-bound `trackchanges.sty` or visible `\input@path` override could alter package
+selection. `\delete` is accepted only as exactly one static local direct wrapper to `\deleted`. A local
+wrapper target must also pass the static `changes` declaration gate. Bare calls, conflicting or
+multiple sources, incompatible signatures, and dynamic definitions fail closed before conversion.
+
+This gate does not run `kpsewhich` or resolve system/user TeX package trees. It verifies only a
+statically visible declaration plus the absence of a discovered project-tree shadow or detected
+`\input@path` override; it does not attest the actual package path or file hash loaded by TeX.
+
+The display artifact embeds its role, profile, and task ID in standard Word document variables, and
+the task seals its final digest. Import rejects the exact sealed display file and saved or repacked copies
+that retain the display-role marker. Blue text alone is not treated as role evidence.
+
+Validation derives expected visible text and a per-character strike mask for every top-level source
+macro tree. It checks non-overlapping matches and repeated-instance multiplicity, compares the
+clean/display deltas for blue, strike, and highlight formatting, and requires equations, images, tables,
+fields, and other non-revision structures to remain consistent. Identical blue text elsewhere cannot
+stand in for a missing displayed change. For deleted text, neighboring text in the same paragraph must
+uniquely prove the deletion boundary; missing or ambiguous context blocks generation.
+
+The same-paragraph check prevents a deletion from being moved to a guessed boundary. It is not an
+exact SourceMap for automatic writeback and does not cryptographically bind a LaTeX call to a Word
+coordinate. Later edits to macro-derived text may therefore be recorded but routed to manual handling
+when the LaTeX location cannot be proven.
+
+Only direct, literal, static, safe inline calls are handled; dynamic conditional regions are skipped as a whole. A directly recognized argument containing structured content such as mathematics, references, images, environments, footnotes, or paragraph breaks fails closed before conversion. When macros are found, both Word files must pass this validation in the same staged export before either is published.
+
+Use **Save editable Word** to create the exact review copy, and send only that copy to the reviewer.
+Ask the reviewer to use Microsoft Word with Track Changes enabled, use comments for discussion, and
+avoid Accept All, deleting bookmarks, or saving as legacy `.doc`.
 
 This is an editable semantic review layout, not a pixel reproduction of the LaTeX PDF or a journal
 submission template. Explicit source font declarations may override the default profile, and figures,
@@ -127,7 +170,9 @@ tools produce an honest partial result instead of discarding the safely revised 
 Typical artifacts are:
 
 ```text
-export/review.docx
+export/
+├─ review.docx
+└─ existing-changes-display.docx   # optional: static reference only, not review evidence
 receive/original/returned-original.docx
 receive/changeset.json
 approvals/approval-rN.json
@@ -140,6 +185,8 @@ ledger/ledger.json
 ledger/ledger.html
 audit.zip
 ```
+
+The returned review evidence must come from the same-round exact editable copy of `review.docx`. The display file does not participate in import, approval, or LaTeX writeback; its sealed digest and embedded role marker are explicit rejection signals.
 
 `revised-clean/` is the clean authoritative candidate. When there is an actual accepted source
 difference, `latexdiff.tex` contains the derived add/delete markup and a successfully compiled

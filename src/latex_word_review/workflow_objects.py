@@ -26,7 +26,8 @@ from latex_word_review.source_units import TextProvenanceSegment, review_ir_payl
 Confidentiality = Literal["public_fixture", "local_private", "derived_private"]
 SOURCE_MANIFEST_INTERFACE_VERSION = "source-manifest-builder-v2"
 SOURCE_MAP_INTERFACE_VERSION = "source-map-builder-v2"
-EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v2"
+PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v2"
+EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v3"
 LEGACY_SOURCE_MAP_INTERFACE_VERSION = "source-map-builder-v1"
 RunPhase = Literal[
     "initialized",
@@ -523,6 +524,7 @@ __all__ = [
     "Confidentiality",
     "EXPORT_REPORT_INTERFACE_VERSION",
     "LEGACY_SOURCE_MAP_INTERFACE_VERSION",
+    "PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION",
     "RunPhase",
     "SOURCE_MANIFEST_INTERFACE_VERSION",
     "SOURCE_MAP_INTERFACE_VERSION",

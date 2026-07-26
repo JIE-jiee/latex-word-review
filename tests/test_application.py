@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -14,6 +16,7 @@ import latex_word_review.application as application_module
 from latex_word_review.application import ApplicationSession
 from latex_word_review.approval import write_approval_json
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.hashing import digest_bytes
 from latex_word_review.jsonio import read_contract_file
 from latex_word_review.ledger import build_ledger
 from tests.test_e2e_public_roundtrip import _fake_tools
@@ -190,6 +193,117 @@ def test_review_copy_is_exact_editable_and_does_not_change_sealed_baseline(
     assert captured.value.code is ErrorCode.SCHEMA_INVALID
     assert existing.read_bytes() == b"existing-user-file"
     assert baseline.read_bytes() == baseline_before
+
+
+def test_review_copy_rejects_baseline_changed_after_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    baseline = run_root / "export/review.docx"
+    baseline.parent.mkdir(parents=True)
+    baseline_bytes = b"sealed-review-word"
+    baseline.write_bytes(baseline_bytes)
+    evidence = SimpleNamespace(
+        workflow={"phase": "exported"},
+        review_docx_digest=digest_bytes(baseline_bytes),
+    )
+    session = ApplicationSession(run_root)
+    monkeypatch.setattr(session, "_inspect", lambda: evidence)
+    output_directory = tmp_path / "race-output"
+    output_directory.mkdir()
+
+    normal_destination = output_directory / "normal-review-copy.docx"
+    assert session.save_review_copy(normal_destination) == normal_destination.resolve()
+    assert normal_destination.read_bytes() == baseline_bytes
+
+    baseline.write_bytes(b"tampered-after-inspection")
+    destination = output_directory / "paper-for-review.docx"
+
+    with pytest.raises(ContractError) as captured:
+        session.save_review_copy(destination)
+
+    assert captured.value.code is ErrorCode.HASH_INTEGRITY_MISMATCH
+    assert not destination.exists()
+    assert not list(output_directory.glob(f".{destination.name}.publish-*"))
+
+
+def test_existing_changes_display_requires_export_report_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    display_path = run_root / "export/existing-changes-display.docx"
+    display_path.parent.mkdir(parents=True)
+    display_bytes = b"visual-only-existing-latex-changes"
+    display_path.write_bytes(display_bytes)
+    report: dict[str, Any] = {"payload": {}}
+
+    def read_report(
+        path: Path,
+        *,
+        expected_schema: str,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        assert path == run_root / "export/objects/export-report.json"
+        assert expected_schema == "ExportReport"
+        assert max_bytes > 0
+        return copy.deepcopy(report)
+
+    monkeypatch.setattr(application_module, "read_contract_file", read_report)
+
+    assert (
+        application_module._load_existing_changes_display_digest(
+            run_root,
+            "exported",
+        )
+        is None
+    )
+
+    report["payload"]["existing_changes_display_docx"] = application_module._artifact_ref(
+        "export/existing-changes-display.docx",
+        "latex_changes_display_docx",
+        display_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    assert application_module._load_existing_changes_display_digest(
+        run_root,
+        "exported",
+    ) == digest_bytes(display_bytes)
+
+
+def test_existing_changes_display_copy_is_exact_and_does_not_change_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _exported_session(tmp_path)
+    baseline = session.run_root / "export/review.docx"
+    baseline_before = baseline.read_bytes()
+    display = session.run_root / "export/existing-changes-display.docx"
+    evidence = session._inspect()
+    display_bytes = b"visual-only-display-copy"
+    display.write_bytes(display_bytes)
+    authorized = replace(
+        evidence,
+        existing_changes_display_digest=digest_bytes(display_bytes),
+    )
+    monkeypatch.setattr(ApplicationSession, "_inspect", lambda _session: authorized)
+    output_directory = tmp_path / "display-output"
+    output_directory.mkdir()
+    destination = output_directory / "existing-changes.docx"
+
+    saved = session.save_existing_changes_display_copy(destination)
+
+    assert saved == destination.resolve()
+    assert saved.read_bytes() == display_bytes
+    assert display.read_bytes() == display_bytes
+    assert baseline.read_bytes() == baseline_before
+    status = session._status_from_evidence(authorized).as_dict()
+    assert status["phase"] == "waiting_for_return"
+    assert status["artifacts"]["review_docx"] == "export/review.docx"
+    assert status["artifacts"]["existing_changes_display_docx"] == (
+        "export/existing-changes-display.docx"
+    )
 
 
 def test_review_copy_publish_failure_leaves_no_output_or_temporary_file(

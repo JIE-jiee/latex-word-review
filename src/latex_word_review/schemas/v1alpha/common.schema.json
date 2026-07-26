@@ -440,7 +440,7 @@
               "body_text", "cjk", "inline_math", "display_math", "omml", "images",
               "tables", "bookmarks", "live_fields", "labels", "references", "citations",
               "raw_insert", "raw_delete", "move_pair", "format_revision", "comments",
-              "comment_range", "source_spans"
+              "comment_range", "source_spans", "revision_view"
             ]
           },
           "additionalProperties": {"$ref": "#/$defs/FeatureCapability"}
@@ -705,6 +705,9 @@
           "oneOf": [{"$ref": "#/$defs/Sha256"}, {"type": "null"}]
         },
         "review_docx": {
+          "oneOf": [{"$ref": "#/$defs/ArtifactRef"}, {"type": "null"}]
+        },
+        "existing_changes_display_docx": {
           "oneOf": [{"$ref": "#/$defs/ArtifactRef"}, {"type": "null"}]
         },
         "image_overlay": {"$ref": "#/$defs/ImageOverlayBinding"},

@@ -212,7 +212,18 @@ def test_worker_failures_are_contained(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_tex2word_worker, "main", lambda _argv: (_ for _ in ()).throw(ValueError()))
     monkeypatch.setattr(_image_worker, "main", lambda _argv: (_ for _ in ()).throw(RuntimeError()))
 
-    tex_args = ("--source", "a", "--output", "b", "--report", "c")
+    tex_args = (
+        "--source",
+        "a",
+        "--output",
+        "b",
+        "--report",
+        "c",
+        "--revision-view",
+        "source",
+        "--revision-aliases",
+        "none",
+    )
     image_args = (
         "--source",
         "a",
@@ -225,6 +236,28 @@ def test_worker_failures_are_contained(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert worker_dispatch.dispatch_worker("tex2word", tex_args) == 22
     assert worker_dispatch.dispatch_worker("image-render", image_args) == 22
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [
+        ("none", ()),
+        ("add", ("add",)),
+        ("delete", ("delete",)),
+        ("add,delete", ("add", "delete")),
+    ],
+)
+def test_tex2word_worker_revision_alias_selector_contract(
+    selector: str,
+    expected: tuple[str, ...],
+) -> None:
+    from latex_word_review.backends import _tex2word_worker
+
+    assert _tex2word_worker._parse_revision_aliases(selector) == expected
+
+    if selector == "none":
+        with pytest.raises(ValueError, match="invalid revision alias selector"):
+            _tex2word_worker._parse_revision_aliases("delete,add")
 
 
 def test_main_rejects_empty_and_dispatches_explicit_or_process_arguments(

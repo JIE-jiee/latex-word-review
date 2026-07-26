@@ -8,24 +8,39 @@ approves or applies a change on the user's behalf.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
-from dataclasses import dataclass
+import zipfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from lxml import etree  # type: ignore[import-untyped]
+
 from latex_word_review.atomic_publish import publish_new_directory
-from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBackend
+from latex_word_review.backends import (
+    BackendRequest,
+    ExportBackend,
+    PandocBackend,
+    Tex2WordBackend,
+)
 from latex_word_review.canonical import compute_payload_sha256
 from latex_word_review.contracts import load_contract_json
 from latex_word_review.discovery import ProjectDiscovery, discover_project
+from latex_word_review.docx_reader import DocxPackage, read_docx_package
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
-from latex_word_review.export_models import ExportReport, export_report_commitment
+from latex_word_review.export_models import (
+    ExportReport,
+    ReviewDocxArtifact,
+    export_report_commitment,
+)
 from latex_word_review.hashing import FileDigest, digest_file, read_stable_bytes
-from latex_word_review.ids import new_run_id
+from latex_word_review.ids import derive_artifact_id, new_run_id
 from latex_word_review.image_materializer import SealedImageCacheVerifier
 from latex_word_review.image_overlay import IMAGE_OVERLAY_FORMAT, IMAGE_OVERLAY_MANIFEST
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
@@ -37,6 +52,12 @@ from latex_word_review.paths import (
     validate_relative_path,
     windows_extended_path,
 )
+from latex_word_review.review_layout import apply_review_layout
+from latex_word_review.revision_display import (
+    inspect_revision_display,
+    validate_revision_display,
+)
+from latex_word_review.revision_macros import RevisionMacroInventory, scan_revision_macros
 from latex_word_review.revisions import build_changeset
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
 from latex_word_review.source_features import (
@@ -44,9 +65,11 @@ from latex_word_review.source_features import (
     independently_observed_label_count,
     scan_source_features,
 )
+from latex_word_review.word_fields import finalize_word_fields
 from latex_word_review.workflow_objects import (
     EXPORT_REPORT_INTERFACE_VERSION,
     LEGACY_SOURCE_MAP_INTERFACE_VERSION,
+    PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
     SOURCE_MANIFEST_INTERFACE_VERSION,
     SOURCE_MAP_INTERFACE_VERSION,
     bookmark_bindings_from_source_map,
@@ -66,6 +89,7 @@ _SOURCE_MANIFEST = "objects/source-manifest.json"
 _SNAPSHOT = "snapshot"
 _EXPORT = "export"
 _EXPORT_DOCX = "export/review.docx"
+_EXPORT_CHANGES_DISPLAY = "export/existing-changes-display.docx"
 _EXPORT_OBJECTS = "export/objects"
 _EXPORT_IMAGE_OVERLAY = "export/review.docx.image-overlay"
 _EXPORT_IMAGE_MANIFEST = f"{_EXPORT_IMAGE_OVERLAY}/{IMAGE_OVERLAY_MANIFEST}"
@@ -76,6 +100,39 @@ _CHANGESET = "receive/changeset.json"
 _STAGING = ".lwr-staging"
 _MAX_DOCX_BYTES = 128 * 1024 * 1024
 _MAX_CONTRACT_BYTES = 16 * 1024 * 1024
+_WORD_SETTINGS_PART = "word/settings.xml"
+_WORDPROCESSINGML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_DISPLAY_MARKER_ROLE: Literal["latex_changes_display_docx"] = "latex_changes_display_docx"
+_DISPLAY_MARKER_PROFILE = "lwr-existing-changes-display-v1"
+_ARTIFACT_ROLE_DOCVAR = "LWR_ARTIFACT_ROLE"
+_ARTIFACT_PROFILE_DOCVAR = "LWR_ARTIFACT_PROFILE"
+_ARTIFACT_RUN_DOCVAR = "LWR_RUN_ID"
+_ARTIFACT_MARKER_DOCVARS = (
+    _ARTIFACT_ROLE_DOCVAR,
+    _ARTIFACT_PROFILE_DOCVAR,
+    _ARTIFACT_RUN_DOCVAR,
+)
+_SETTINGS_AFTER_DOCVARS = frozenset(
+    {
+        "rsids",
+        "mathPr",
+        "uiCompat97To2003",
+        "attachedSchema",
+        "themeFontLang",
+        "clrSchemeMapping",
+        "doNotIncludeSubdocsInStats",
+        "doNotAutoCompressPictures",
+        "forceUpgrade",
+        "captions",
+        "readModeInkLockDown",
+        "smartTagType",
+        "schemaLibrary",
+        "shapeDefaults",
+        "doNotEmbedSmartTags",
+        "decimalSymbol",
+        "listSeparator",
+    }
+)
 _LEGACY_EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v1"
 _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION = "source-manifest-builder-v1"
 _SOURCE_FEATURE_METRICS = {
@@ -133,6 +190,319 @@ class _ExportState:
     source_map: dict[str, Any]
     source_map_sha256: str
     counts: dict[str, int]
+    non_returnable_docx_digests: frozenset[FileDigest]
+
+
+@dataclass(frozen=True, slots=True)
+class _EmbeddedArtifactMarker:
+    role: str
+    profile: str
+    run_id: str
+
+
+def _word_tag(local: str) -> str:
+    return f"{{{_WORDPROCESSINGML_NS}}}{local}"
+
+
+def _invalid_artifact_marker(code: ErrorCode, message: str) -> ContractError:
+    return ContractError(code, message)
+
+
+def _artifact_marker_from_package(
+    package: DocxPackage,
+    *,
+    invalid_code: ErrorCode,
+) -> _EmbeddedArtifactMarker | None:
+    if _WORD_SETTINGS_PART not in package.part_names:
+        return None
+    root = package.xml_root(_WORD_SETTINGS_PART)
+    if root.tag != _word_tag("settings"):
+        raise _invalid_artifact_marker(invalid_code, "DOCX artifact marker settings are invalid")
+    containers = root.findall(_word_tag("docVars"))
+    if len(containers) > 1:
+        raise _invalid_artifact_marker(invalid_code, "DOCX repeats artifact marker variables")
+    if not containers:
+        return None
+
+    expected_by_fold = {name.casefold(): name for name in _ARTIFACT_MARKER_DOCVARS}
+    values: dict[str, str] = {}
+    for variable in containers[0].findall(_word_tag("docVar")):
+        raw_name = variable.get(_word_tag("name"))
+        if raw_name is None:
+            continue
+        canonical_name = expected_by_fold.get(raw_name.casefold())
+        if canonical_name is None:
+            continue
+        value = variable.get(_word_tag("val"))
+        if canonical_name in values or value is None or not value:
+            raise _invalid_artifact_marker(invalid_code, "DOCX artifact marker is malformed")
+        values[canonical_name] = value
+    if not values:
+        return None
+    if set(values) != set(_ARTIFACT_MARKER_DOCVARS):
+        raise _invalid_artifact_marker(invalid_code, "DOCX artifact marker is incomplete")
+    return _EmbeddedArtifactMarker(
+        role=values[_ARTIFACT_ROLE_DOCVAR],
+        profile=values[_ARTIFACT_PROFILE_DOCVAR],
+        run_id=values[_ARTIFACT_RUN_DOCVAR],
+    )
+
+
+def _read_embedded_artifact_marker(
+    path: Path,
+    *,
+    invalid_code: ErrorCode,
+) -> _EmbeddedArtifactMarker | None:
+    return _artifact_marker_from_package(
+        read_docx_package(path),
+        invalid_code=invalid_code,
+    )
+
+
+def _display_artifact_marker(run_id: str) -> _EmbeddedArtifactMarker:
+    return _EmbeddedArtifactMarker(
+        role=_DISPLAY_MARKER_ROLE,
+        profile=_DISPLAY_MARKER_PROFILE,
+        run_id=run_id,
+    )
+
+
+def _xml_bytes(root: etree._Element) -> bytes:
+    return cast(
+        "bytes",
+        etree.tostring(
+            root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            standalone=True,
+        ),
+    )
+
+
+def _write_display_artifact_marker(source: Path, destination: Path, *, run_id: str) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise ContractError(ErrorCode.BACKEND_FAILED, "display marker output already exists")
+    package = read_docx_package(source)
+    expected_source = FileDigest(package.size_bytes, package.file_sha256)
+    if (
+        _artifact_marker_from_package(
+            package,
+            invalid_code=ErrorCode.EXPORT_SILENT_LOSS,
+        )
+        is not None
+    ):
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "display source unexpectedly contains a reserved artifact marker",
+        )
+    if _WORD_SETTINGS_PART not in package.part_names:
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "display DOCX has no settings part for the artifact marker",
+        )
+    settings = package.xml_root(_WORD_SETTINGS_PART)
+    containers = settings.findall(_word_tag("docVars"))
+    if containers:
+        doc_vars = containers[0]
+    else:
+        doc_vars = etree.Element(_word_tag("docVars"))
+        insert_at = len(settings)
+        for index, child in enumerate(settings):
+            name = etree.QName(child).localname
+            if etree.QName(child).namespace == _WORDPROCESSINGML_NS and name in (
+                _SETTINGS_AFTER_DOCVARS
+            ):
+                insert_at = index
+                break
+        settings.insert(insert_at, doc_vars)
+    marker = _display_artifact_marker(run_id)
+    marker_values = {
+        _ARTIFACT_ROLE_DOCVAR: marker.role,
+        _ARTIFACT_PROFILE_DOCVAR: marker.profile,
+        _ARTIFACT_RUN_DOCVAR: marker.run_id,
+    }
+    for name in _ARTIFACT_MARKER_DOCVARS:
+        variable = etree.SubElement(doc_vars, _word_tag("docVar"))
+        variable.set(_word_tag("name"), name)
+        variable.set(_word_tag("val"), marker_values[name])
+    replacement = _xml_bytes(settings)
+
+    try:
+        with zipfile.ZipFile(source, mode="r") as input_package:
+            infos = input_package.infolist()
+            with zipfile.ZipFile(destination, mode="x") as output_package:
+                for info in infos:
+                    data = (
+                        replacement
+                        if info.filename == _WORD_SETTINGS_PART
+                        else input_package.read(info.filename)
+                    )
+                    output_package.writestr(info, data)
+        with destination.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        if digest_file(source, max_bytes=_MAX_DOCX_BYTES) != expected_source:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "display DOCX changed while its artifact marker was written",
+            )
+        observed = _read_embedded_artifact_marker(
+            destination,
+            invalid_code=ErrorCode.EXPORT_SILENT_LOSS,
+        )
+        if observed != marker:
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "display artifact marker was not preserved in the DOCX package",
+            )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _synchronize_display_table_look(
+    clean_reference: Path,
+    source: Path,
+    destination: Path,
+) -> None:
+    """Copy only table-look defaults from the sealed clean review.
+
+    Tex2word can emit different ``w:tblLook`` defaults when the same table is
+    converted with clean versus display-only revision macros.  The review
+    layout pass fixes direct geometry and header formatting but intentionally
+    leaves that backend default intact.  Synchronizing this single property
+    makes the reference display inherit the clean review's visible table-style
+    switches; all table order, geometry, content, fields, and relationships are
+    still compared independently afterwards.
+    """
+
+    if destination.exists() or destination.is_symlink():
+        raise ContractError(ErrorCode.BACKEND_FAILED, "table-look output already exists")
+    clean_package = read_docx_package(clean_reference)
+    source_package = read_docx_package(source)
+    expected_clean = FileDigest(clean_package.size_bytes, clean_package.file_sha256)
+    expected_source = FileDigest(source_package.size_bytes, source_package.file_sha256)
+    if clean_package.story_parts != source_package.story_parts:
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "LaTeX revision display story parts differ before table-look synchronization",
+        )
+
+    table_tag = _word_tag("tbl")
+    properties_tag = _word_tag("tblPr")
+    look_tag = _word_tag("tblLook")
+    replacements: dict[str, bytes] = {}
+    expected_looks: list[tuple[str, int, tuple[tuple[str, str], ...] | None]] = []
+    for part_uri in clean_package.story_parts:
+        clean_root = clean_package.xml_root(part_uri)
+        source_root = source_package.xml_root(part_uri)
+        clean_tables = tuple(clean_root.iter(table_tag))
+        source_tables = tuple(source_root.iter(table_tag))
+        if len(clean_tables) != len(source_tables):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display table count differs before table-look synchronization",
+                details={
+                    "part_uri": part_uri,
+                    "clean_tables": len(clean_tables),
+                    "display_tables": len(source_tables),
+                },
+            )
+        changed = False
+        for table_index, (clean_table, source_table) in enumerate(
+            zip(clean_tables, source_tables, strict=True)
+        ):
+            clean_properties = clean_table.find(properties_tag)
+            source_properties = source_table.find(properties_tag)
+            clean_look = None if clean_properties is None else clean_properties.find(look_tag)
+            source_look = None if source_properties is None else source_properties.find(look_tag)
+            signature = (
+                None
+                if clean_look is None
+                else tuple(sorted((str(name), value) for name, value in clean_look.attrib.items()))
+            )
+            expected_looks.append((part_uri, table_index, signature))
+            if clean_look is None:
+                if source_look is not None and source_properties is not None:
+                    source_properties.remove(source_look)
+                    changed = True
+                continue
+            if source_properties is None:
+                raise ContractError(
+                    ErrorCode.EXPORT_SILENT_LOSS,
+                    "LaTeX revision display table properties are missing",
+                    details={"part_uri": part_uri, "table_index": table_index},
+                )
+            copied = etree.fromstring(etree.tostring(clean_look))
+            if source_look is None:
+                assert clean_properties is not None
+                clean_index = list(clean_properties).index(clean_look)
+                source_properties.insert(min(clean_index, len(source_properties)), copied)
+            else:
+                source_properties.replace(source_look, copied)
+            changed = True
+        if changed:
+            replacements[part_uri] = _xml_bytes(source_root)
+
+    try:
+        with zipfile.ZipFile(source, mode="r") as input_package:
+            infos = input_package.infolist()
+            with zipfile.ZipFile(destination, mode="x") as output_package:
+                for info in infos:
+                    output_package.writestr(
+                        info,
+                        replacements.get(info.filename, input_package.read(info.filename)),
+                    )
+        with destination.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        if digest_file(clean_reference, max_bytes=_MAX_DOCX_BYTES) != expected_clean:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "clean review changed during table-look synchronization",
+            )
+        if digest_file(source, max_bytes=_MAX_DOCX_BYTES) != expected_source:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "display DOCX changed during table-look synchronization",
+            )
+        synchronized = read_docx_package(destination)
+        observed_looks: list[tuple[str, int, tuple[tuple[str, str], ...] | None]] = []
+        for part_uri in synchronized.story_parts:
+            root = synchronized.xml_root(part_uri)
+            for table_index, table in enumerate(root.iter(table_tag)):
+                properties = table.find(properties_tag)
+                look = None if properties is None else properties.find(look_tag)
+                signature = (
+                    None
+                    if look is None
+                    else tuple(sorted((str(name), value) for name, value in look.attrib.items()))
+                )
+                observed_looks.append((part_uri, table_index, signature))
+        if tuple(observed_looks) != tuple(expected_looks):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display table-look synchronization was not preserved",
+            )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _reject_embedded_non_returnable_artifact(path: Path) -> None:
+    marker = _read_embedded_artifact_marker(
+        path,
+        invalid_code=ErrorCode.REVISION_BASELINE_DRIFT,
+    )
+    if marker is None:
+        return
+    raise ContractError(
+        ErrorCode.REVISION_BASELINE_DRIFT,
+        "embedded DOCX artifact role is not returnable as a reviewed file",
+        details={
+            "artifact_role": marker.role,
+            "artifact_profile": marker.profile,
+            "artifact_run_id": marker.run_id,
+        },
+    )
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -460,6 +830,213 @@ def _load_core(run_root: Path) -> _CoreState:
     )
 
 
+def _revision_aliases_for_inventory(
+    inventory: RevisionMacroInventory,
+) -> tuple[Literal["add", "delete"], ...]:
+    aliases: list[Literal["add", "delete"]] = []
+    if inventory.alias_counts.add:
+        aliases.append("add")
+    if inventory.alias_counts.delete:
+        aliases.append("delete")
+    return tuple(aliases)
+
+
+def _write_existing_changes_display(
+    core: _CoreState,
+    payload: Path,
+    *,
+    backend: ExportBackend,
+    outcome: ExportOutcome,
+    inventory: RevisionMacroInventory,
+    timeout_s: float,
+    confidentiality: Confidentiality,
+) -> tuple[ReviewDocxArtifact, dict[str, int]]:
+    """Create one sealed, non-authoritative static view from the existing overlay."""
+
+    if inventory.total <= 0:
+        raise ContractError(
+            ErrorCode.INTERNAL_INVARIANT,
+            "revision display requested without revision macros",
+        )
+    overlay = outcome.image_overlay
+    if overlay is None or not overlay.ready:
+        raise ContractError(
+            ErrorCode.INTERNAL_INVARIANT,
+            "revision display requires a ready image overlay",
+        )
+    clean_reference = outcome.output_path
+    if clean_reference is None:
+        raise ContractError(
+            ErrorCode.INTERNAL_INVARIANT,
+            "revision display requires a clean review reference",
+        )
+    destination = payload / "existing-changes-display.docx"
+    if destination.exists() or destination.is_symlink():
+        raise ContractError(ErrorCode.BACKEND_FAILED, "revision display output already exists")
+
+    with tempfile.TemporaryDirectory(
+        prefix=".lwr-revision-display-",
+        dir=windows_extended_path(payload),
+    ) as temporary_name:
+        temporary = Path(temporary_name)
+        backend_docx = temporary / "backend.docx"
+        layout_docx = temporary / "layout.docx"
+        final_docx = temporary / "final.docx"
+        synchronized_docx = temporary / "synchronized.docx"
+        marked_docx = temporary / "marked.docx"
+        result = backend.export(
+            BackendRequest(
+                source_root=overlay.derived_root,
+                main_document=core.discovery.main_document,
+                output_path=backend_docx,
+                expected_source_tree_sha256=overlay.discovery.source_tree_sha256,
+                timeout_s=timeout_s,
+                revision_view="display",
+                revision_aliases=_revision_aliases_for_inventory(inventory),
+            )
+        )
+        if not result.succeeded:
+            primary = next(
+                (item for item in result.findings if item.severity in {"error", "fatal"}),
+                None,
+            )
+            code = primary.code if primary is not None else ErrorCode.BACKEND_FAILED
+            details: dict[str, object] = {
+                "stage": "revision_display_backend",
+                "backend_status": result.status,
+                "finding_count": len(result.findings),
+                "timed_out": "yes" if result.timed_out else "no",
+            }
+            if result.returncode is not None:
+                details["returncode"] = result.returncode
+            raise ContractError(
+                code,
+                "LaTeX revision display backend did not produce a DOCX",
+                details=details,
+            )
+        if result.findings != outcome.backend_result.findings:
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display backend findings differ from the clean review",
+                details={
+                    "stage": "revision_display_backend_parity",
+                    "clean_finding_count": len(outcome.backend_result.findings),
+                    "display_finding_count": len(result.findings),
+                },
+            )
+        native_parity_keys = (
+            "error_count",
+            "math_image",
+            "math_omml",
+            "math_raw",
+            "reference_loaded",
+            "reference_profile",
+            "reference_sha256",
+            "warning_count",
+            "warning_constructs",
+        )
+        if any(
+            result.native_report.get(key) != outcome.backend_result.native_report.get(key)
+            for key in native_parity_keys
+        ):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display backend evidence differs from the clean review",
+            )
+        apply_review_layout(backend_docx, layout_docx)
+        before_field_refresh = inspect_revision_display(layout_docx)
+        finalize_word_fields(layout_docx, final_docx)
+        _synchronize_display_table_look(clean_reference, final_docx, synchronized_docx)
+        _write_display_artifact_marker(synchronized_docx, marked_docx, run_id=core.run_id)
+        independent = inspect_docx(marked_docx)
+        if (
+            not independent.package_valid
+            or not independent.structure_inspected
+            or independent.external_relationships
+        ):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display failed independent DOCX inspection",
+            )
+        if outcome.output_path is None:
+            raise ContractError(
+                ErrorCode.INTERNAL_INVARIANT,
+                "clean review output is unavailable for display parity",
+            )
+        clean_independent = inspect_docx(outcome.output_path)
+        structural_metrics = (
+            "body_paragraphs",
+            "paragraphs",
+            "omml_objects",
+            "omml_paragraphs",
+            "images",
+            "image_instances",
+            "tables",
+            "seq_fields",
+            "ref_fields",
+            "pageref_fields",
+            "relationships",
+            "external_relationships",
+        )
+        for metric in structural_metrics:
+            clean_value = getattr(clean_independent, metric)
+            display_value = getattr(independent, metric)
+            if clean_value != display_value:
+                raise ContractError(
+                    ErrorCode.EXPORT_SILENT_LOSS,
+                    "LaTeX revision display structure differs from the clean review",
+                    details={
+                        "metric": metric,
+                        "clean_value": clean_value,
+                        "display_value": display_value,
+                    },
+                )
+        clean_package = read_docx_package(outcome.output_path)
+        display_package = read_docx_package(marked_docx)
+        if clean_package.story_parts != display_package.story_parts:
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "LaTeX revision display story parts differ from the clean review",
+            )
+        display = validate_revision_display(
+            marked_docx,
+            inventory=inventory,
+            clean_reference=clean_reference,
+        )
+        if (
+            display.blue_text_characters != before_field_refresh.blue_text_characters
+            or display.strike_text_characters != before_field_refresh.strike_text_characters
+            or display.highlighted_text_characters
+            != before_field_refresh.highlighted_text_characters
+            or display.native_revision_elements != before_field_refresh.native_revision_elements
+            or display.track_revisions_enabled != before_field_refresh.track_revisions_enabled
+        ):
+            raise ContractError(
+                ErrorCode.EXPORT_SILENT_LOSS,
+                "Word field refresh changed the LaTeX revision display styling",
+            )
+
+        artifact = ReviewDocxArtifact.from_file(
+            marked_docx,
+            artifact_path=_EXPORT_CHANGES_DISPLAY,
+            confidentiality=confidentiality,
+            role=_DISPLAY_MARKER_ROLE,
+        )
+        try:
+            os.link(marked_docx, destination, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "revision display output appeared during publication",
+            ) from exc
+        except OSError as exc:
+            raise ContractError(
+                ErrorCode.BACKEND_FAILED,
+                "revision display output could not be atomically published",
+            ) from exc
+        return artifact, display.as_metrics()
+
+
 def _write_export_objects(
     core: _CoreState,
     payload: Path,
@@ -476,6 +1053,18 @@ def _write_export_objects(
     output = payload / "review.docx"
     backend = Tex2WordBackend() if backend_name == "tex2word" else PandocBackend()
     source_payload = cast("dict[str, Any]", core.source_manifest["payload"])
+    revision_inventory = scan_revision_macros(core.root / _SNAPSHOT, core.discovery)
+    revision_aliases = _revision_aliases_for_inventory(revision_inventory)
+    if revision_inventory.total and backend_name != "tex2word":
+        raise ContractError(
+            ErrorCode.BACKEND_CAPABILITY_MISSING,
+            "the selected backend cannot create the LaTeX revision display",
+            details={
+                "backend": backend_name,
+                "revision_macro_instances": revision_inventory.total,
+                "remediation": "use the tex2word backend for this review task",
+            },
+        )
     outcome = export_review_docx(
         backend,
         BackendRequest(
@@ -484,6 +1073,10 @@ def _write_export_objects(
             output,
             expected_source_tree_sha256=core.discovery.source_tree_sha256,
             timeout_s=timeout_s,
+            revision_view=(
+                "clean" if backend_name == "tex2word" and revision_inventory.total else "source"
+            ),
+            revision_aliases=revision_aliases,
         ),
         core.discovery,
         ExportBindings(
@@ -498,7 +1091,6 @@ def _write_export_objects(
         run_id=core.run_id,
         generated_at=timestamp,
     )
-    report = build_export_report_document(outcome, run_id=core.run_id, generated_at=timestamp)
     write_new_json(objects / "backend-capabilities.json", capabilities, contract=True)
     if outcome.output_path is None or outcome.anchoring is None:
         raise _export_failure_error(outcome, backend_name=backend_name)
@@ -511,6 +1103,38 @@ def _write_export_objects(
                 "finding_count": len(outcome.report.findings),
             },
         )
+    display_artifact: ReviewDocxArtifact | None = None
+    display_metrics: dict[str, int] = {"revision_display_available": 0}
+    if revision_inventory.total:
+        display_artifact, observed_display_metrics = _write_existing_changes_display(
+            core,
+            payload,
+            backend=backend,
+            outcome=outcome,
+            inventory=revision_inventory,
+            timeout_s=timeout_s,
+            confidentiality=confidentiality,
+        )
+        display_metrics = {
+            "revision_display_available": 1,
+            **observed_display_metrics,
+        }
+    outcome = replace(
+        outcome,
+        report=replace(
+            outcome.report,
+            source_map_sha256=None,
+            existing_changes_display_docx=display_artifact,
+            source_metrics={
+                **outcome.report.source_metrics,
+                **revision_inventory.as_metrics(),
+            },
+            output_metrics={
+                **outcome.report.output_metrics,
+                **display_metrics,
+            },
+        ),
+    )
     _validate_source_feature_report_payload(
         cast("dict[str, Any]", outcome.report.as_payload()),
         source_manifest_interface_version=SOURCE_MANIFEST_INTERFACE_VERSION,
@@ -525,6 +1149,7 @@ def _write_export_objects(
         source_manifest_sha256=core.source_manifest_sha256,
         generated_at=timestamp,
     )
+    assert outcome.anchoring is not None
     source_map = build_source_map_document(
         outcome.anchoring,
         run_id=core.run_id,
@@ -533,6 +1158,14 @@ def _write_export_objects(
         generated_at=timestamp,
         export_report_payload=cast("dict[str, Any]", outcome.report.as_payload()),
     )
+    outcome = replace(
+        outcome,
+        report=replace(
+            outcome.report,
+            source_map_sha256=compute_payload_sha256(source_map),
+        ),
+    )
+    report = build_export_report_document(outcome, run_id=core.run_id, generated_at=timestamp)
     write_new_json(objects / "review-ir.json", review_ir, contract=True)
     write_new_json(objects / "source-map.json", source_map, contract=True)
     write_new_json(objects / "export-report.json", report, contract=True)
@@ -541,6 +1174,8 @@ def _write_export_objects(
         "review_units": coverage["total"],
         "exact_mappings": coverage["exact"],
         "export_findings": len(outcome.report.findings),
+        "revision_macro_instances": revision_inventory.total,
+        "revision_display_available": int(display_artifact is not None),
     }
 
 
@@ -626,6 +1261,7 @@ def export_workflow(
     if destination.exists() or destination.is_symlink():
         raise ContractError(ErrorCode.SCHEMA_INVALID, "workflow export already exists")
     stage, payload = _prepare_stage(core.root, "export")
+    export_published = False
     try:
         _write_export_objects(
             core,
@@ -636,8 +1272,9 @@ def export_workflow(
             generated_at=generated_at,
         )
         _seal_tree_files(payload)
+        state = _validate_export(core, export_root=payload)
         _publish_payload(payload, destination)
-        state = _validate_export(core)
+        export_published = True
         return {
             "run_id": core.run_id,
             "phase": "exported",
@@ -648,8 +1285,18 @@ def export_workflow(
             "working_directory": "run_root",
         }
     finally:
+        primary_error_active = sys.exc_info()[0] is not None
         if stage.exists():
-            _remove_owned_tree(stage, stage.parent, prefixes=(".lwr-stage-export-",))
+            try:
+                _remove_owned_tree(stage, stage.parent, prefixes=(".lwr-stage-export-",))
+            except ContractError:
+                # The directory rename above is the publication commit point. A
+                # post-commit cleanup conflict must leave a discoverable stale
+                # stage for ``workflow clean`` instead of reporting a false
+                # export failure that cannot be retried. Cleanup must likewise
+                # never mask the original pre-commit failure.
+                if not export_published and not primary_error_active:
+                    raise
 
 
 def _source_manifest_interface_version(core: _CoreState) -> str:
@@ -692,12 +1339,17 @@ def _validate_export_generation(
         SOURCE_MAP_INTERFACE_VERSION,
         EXPORT_REPORT_INTERFACE_VERSION,
     )
+    previous = (
+        SOURCE_MANIFEST_INTERFACE_VERSION,
+        SOURCE_MAP_INTERFACE_VERSION,
+        PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
+    )
     legacy = (
         _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION,
         LEGACY_SOURCE_MAP_INTERFACE_VERSION,
         _LEGACY_EXPORT_REPORT_INTERFACE_VERSION,
     )
-    if generation == current:
+    if generation in {current, previous}:
         if map_payload.get("export_report_commitment") != export_report_commitment(report_payload):
             raise ContractError(
                 ErrorCode.HASH_SOURCE_MISMATCH,
@@ -717,8 +1369,167 @@ def _validate_export_generation(
     )
 
 
-def _validate_export(core: _CoreState) -> _ExportState:
-    export_root = _require_real_directory(core.root / _EXPORT, "workflow export")
+def _validate_existing_changes_display(
+    core: _CoreState,
+    export_root: Path,
+    report_payload: dict[str, Any],
+    *,
+    producer_interface_version: object,
+) -> tuple[RevisionMacroInventory | None, dict[str, int], FileDigest | None]:
+    """Rebuild source evidence and validate the optional sealed display artifact."""
+
+    display_path = export_root / "existing-changes-display.docx"
+    display_exists = display_path.exists() or display_path.is_symlink()
+    declared = "existing_changes_display_docx" in report_payload
+    current_report = producer_interface_version == EXPORT_REPORT_INTERFACE_VERSION
+    legacy_report = producer_interface_version in {
+        _LEGACY_EXPORT_REPORT_INTERFACE_VERSION,
+        PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
+    }
+    if not current_report and not legacy_report:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "export report producer interface is unsupported",
+        )
+    if legacy_report:
+        if declared or display_exists:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy export report contains current LaTeX revision display evidence",
+            )
+        metrics = report_payload.get("metrics")
+        source_metrics = metrics.get("source") if isinstance(metrics, dict) else None
+        output_metrics = metrics.get("output") if isinstance(metrics, dict) else None
+        if not isinstance(source_metrics, dict) or not isinstance(output_metrics, dict):
+            raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metrics are invalid")
+        if any(
+            key.startswith(("revision_macro_", "revision_macros_", "revision_display_"))
+            for key in (*source_metrics, *output_metrics)
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy export report contains current revision display metrics",
+            )
+        return None, {"revision_display_available": 0}, None
+    if not declared:
+        if display_exists:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "workflow export contains an unbound LaTeX revision display",
+            )
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "current export report omits the revision display field",
+        )
+
+    revision_inventory = scan_revision_macros(core.root / _SNAPSHOT, core.discovery)
+    metrics = report_payload.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metrics are invalid")
+    source_metrics = metrics.get("source")
+    output_metrics = metrics.get("output")
+    if not isinstance(source_metrics, dict) or not isinstance(output_metrics, dict):
+        raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metric groups are invalid")
+    for name, expected in revision_inventory.as_metrics().items():
+        value = source_metrics.get(name)
+        if value != expected or isinstance(value, bool):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "revision macro metrics differ from the sealed snapshot",
+                details={"metric": name},
+            )
+
+    artifact = report_payload.get("existing_changes_display_docx")
+    expected_available = int(revision_inventory.total > 0)
+    if output_metrics.get("revision_display_available") != expected_available:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision display availability metric differs",
+        )
+    if not revision_inventory.total:
+        if artifact is not None or display_exists:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "revision display exists without supported source macros",
+            )
+        return revision_inventory, {"revision_display_available": 0}, None
+
+    if not isinstance(artifact, dict) or not display_exists:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision display artifact is missing",
+        )
+    _require_read_only(display_path, "export LaTeX revision display")
+    display_digest = digest_file(display_path, max_bytes=_MAX_DOCX_BYTES)
+    expected_display = FileDigest(
+        cast("int", artifact["size_bytes"]),
+        cast("str", artifact["sha256"]),
+    )
+    review_artifact = cast("dict[str, Any]", report_payload["review_docx"])
+    if (
+        artifact["path_base"] != "run_root"
+        or artifact["path"] != _EXPORT_CHANGES_DISPLAY
+        or artifact["role"] != "latex_changes_display_docx"
+        or artifact["media_type"]
+        != "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or artifact["immutable"] is not True
+        or artifact["confidentiality"] != review_artifact["confidentiality"]
+        or artifact["artifact_id"] != derive_artifact_id(expected_display.sha256)
+        or display_digest != expected_display
+    ):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision display artifact binding differs",
+        )
+    marker = _read_embedded_artifact_marker(
+        display_path,
+        invalid_code=ErrorCode.HASH_SOURCE_MISMATCH,
+    )
+    if marker != _display_artifact_marker(core.run_id):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision display embedded artifact marker differs",
+        )
+    independent = inspect_docx(display_path)
+    if (
+        not independent.package_valid
+        or not independent.structure_inspected
+        or independent.external_relationships
+    ):
+        raise ContractError(
+            ErrorCode.EXPORT_SILENT_LOSS,
+            "sealed revision display failed independent DOCX inspection",
+        )
+
+    display = validate_revision_display(
+        display_path,
+        inventory=revision_inventory,
+        clean_reference=export_root / "review.docx",
+    )
+    observed_metrics = {
+        "revision_display_available": 1,
+        **display.as_metrics(),
+    }
+    for name, expected in observed_metrics.items():
+        value = output_metrics.get(name)
+        if value != expected or isinstance(value, bool):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "revision display metrics differ from the sealed DOCX",
+                details={"metric": name},
+            )
+    return revision_inventory, observed_metrics, display_digest
+
+
+def _validate_export(
+    core: _CoreState,
+    *,
+    export_root: Path | None = None,
+) -> _ExportState:
+    export_root = _require_real_directory(
+        core.root / _EXPORT if export_root is None else export_root,
+        "workflow export",
+    )
     _tree_entries_without_links(export_root)
     paths = {
         "review": export_root / "review.docx",
@@ -763,17 +1574,38 @@ def _validate_export(core: _CoreState) -> _ExportState:
         or report_payload["source_map_sha256"] != compute_payload_sha256(source_map)
         or artifact["path_base"] != "run_root"
         or artifact["path"] != _EXPORT_DOCX
+        or artifact["role"] != "review_docx"
+        or artifact["media_type"]
+        != "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         or artifact["immutable"] is not True
         or review_digest != expected_review
         or map_payload["review_docx_sha256"] != review_digest.sha256
     ):
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export object binding differs")
+    review_marker = _read_embedded_artifact_marker(
+        paths["review"],
+        invalid_code=ErrorCode.HASH_SOURCE_MISMATCH,
+    )
+    if review_marker is not None:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "sealed review DOCX carries a non-review artifact marker",
+        )
     inspection = inspect_docx(paths["review"])
     if not inspection.package_valid or not inspection.structure_inspected:
         raise ContractError(
             ErrorCode.EXPORT_SILENT_LOSS,
             "sealed review DOCX failed independent structure inspection",
         )
+    report_producer = cast("dict[str, Any]", report["producer"])
+    revision_inventory, revision_display_metrics, display_digest = (
+        _validate_existing_changes_display(
+            core,
+            export_root,
+            report_payload,
+            producer_interface_version=report_producer.get("interface_version"),
+        )
+    )
     inventory = scan_source_features(
         core.root / _SNAPSHOT,
         core.discovery,
@@ -792,7 +1624,6 @@ def _validate_export(core: _CoreState) -> _ExportState:
     for feature in _SOURCE_FEATURE_METRICS:
         location = inventory.location_for(cast("Any", feature))
         expected_locations[feature] = None if location is None else location.as_contract()
-    report_producer = cast("dict[str, Any]", report["producer"])
     _validate_source_feature_report_payload(
         report_payload,
         producer_interface_version=report_producer.get("interface_version"),
@@ -808,11 +1639,16 @@ def _validate_export(core: _CoreState) -> _ExportState:
         "review_units": coverage["total"],
         "exact_mappings": coverage["exact"],
         "export_findings": len(cast("list[Any]", report_payload["findings"])),
+        "revision_macro_instances": 0 if revision_inventory is None else revision_inventory.total,
+        "revision_display_available": revision_display_metrics["revision_display_available"],
     }
     return _ExportState(
         source_map=source_map,
         source_map_sha256=compute_payload_sha256(source_map),
         counts=counts,
+        non_returnable_docx_digests=(
+            frozenset() if display_digest is None else frozenset({display_digest})
+        ),
     )
 
 
@@ -846,7 +1682,11 @@ def _validate_source_feature_report_payload(
     if source_manifest_interface_version is None:
         source_manifest_interface_version = (
             SOURCE_MANIFEST_INTERFACE_VERSION
-            if producer_interface_version == EXPORT_REPORT_INTERFACE_VERSION
+            if producer_interface_version
+            in {
+                PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
+                EXPORT_REPORT_INTERFACE_VERSION,
+            }
             else _LEGACY_SOURCE_MANIFEST_INTERFACE_VERSION
         )
     if source_manifest_interface_version not in {
@@ -858,7 +1698,10 @@ def _validate_source_feature_report_payload(
             "source manifest producer interface is unsupported",
         )
     current_source_evidence = source_manifest_interface_version == SOURCE_MANIFEST_INTERFACE_VERSION
-    current_report = producer_interface_version == EXPORT_REPORT_INTERFACE_VERSION
+    current_report = producer_interface_version in {
+        PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
+        EXPORT_REPORT_INTERFACE_VERSION,
+    }
     if current_source_evidence != current_report:
         raise ContractError(
             ErrorCode.HASH_SOURCE_MISMATCH,
@@ -867,6 +1710,7 @@ def _validate_source_feature_report_payload(
 
     supported_interfaces = {
         _LEGACY_EXPORT_REPORT_INTERFACE_VERSION,
+        PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION,
         EXPORT_REPORT_INTERFACE_VERSION,
     }
     if producer_interface_version not in supported_interfaces:
@@ -1244,7 +2088,7 @@ def _validate_image_overlay(
     for entry in _tree_entries_without_links(overlay_root):
         if entry.is_file():
             _require_read_only(entry, "workflow image-overlay artifact")
-    manifest_path = core.root / _EXPORT_IMAGE_MANIFEST
+    manifest_path = overlay_root / IMAGE_OVERLAY_MANIFEST
     _require_read_only(manifest_path, "workflow image-overlay manifest")
     manifest_bytes = read_stable_bytes(manifest_path, max_bytes=_MAX_CONTRACT_BYTES)
     manifest_digest = digest_file(manifest_path, max_bytes=_MAX_CONTRACT_BYTES)
@@ -1436,10 +2280,18 @@ def receive_workflow(
     core = _load_core(run_root)
     export_state = _validate_export(core)
     source = _require_regular_file(returned_docx, "returned Word original")
+    source_digest = digest_file(source, max_bytes=_MAX_DOCX_BYTES)
+    if source_digest in export_state.non_returnable_docx_digests:
+        raise ContractError(
+            ErrorCode.REVISION_BASELINE_DRIFT,
+            "LaTeX revision display artifacts cannot be used as returned review files",
+            details={"artifact_role": _DISPLAY_MARKER_ROLE},
+        )
     destination = core.root / _RECEIVE
     if destination.exists() or destination.is_symlink():
         raise ContractError(ErrorCode.SCHEMA_INVALID, "workflow receive output already exists")
     stage, payload = _prepare_stage(core.root, "receive")
+    receive_published = False
     try:
         map_payload = cast("dict[str, Any]", export_state.source_map["payload"])
         archive = archive_returned_docx(
@@ -1449,6 +2301,14 @@ def receive_workflow(
             exported_docx_sha256=cast("str", map_payload["review_docx_sha256"]),
             confidentiality=confidentiality,
         )
+        archived_digest = FileDigest(archive.size_bytes, archive.returned_docx_sha256)
+        if archived_digest in export_state.non_returnable_docx_digests:
+            raise ContractError(
+                ErrorCode.REVISION_BASELINE_DRIFT,
+                "LaTeX revision display artifacts cannot be used as returned review files",
+                details={"artifact_role": _DISPLAY_MARKER_ROLE},
+            )
+        _reject_embedded_non_returnable_artifact(archive.docx_path)
         timestamp = generated_at or utc_now()
         reader = build_revision_reader_capabilities_document(
             run_id=core.run_id,
@@ -1471,8 +2331,9 @@ def receive_workflow(
         )
         write_new_json(payload / "changeset.json", changeset, contract=True)
         _seal_tree_files(payload)
+        counts = _validate_receive(core, export_state, receive_root=payload)
         _publish_payload(payload, destination)
-        counts = _validate_receive(core, export_state)
+        receive_published = True
         changeset_payload = cast("dict[str, Any]", changeset["payload"])
         baseline = cast("dict[str, Any]", changeset_payload["baseline_verification"])
         return {
@@ -1491,12 +2352,25 @@ def receive_workflow(
             "apply_enabled": False,
         }
     finally:
+        primary_error_active = sys.exc_info()[0] is not None
         if stage.exists():
-            _remove_owned_tree(stage, stage.parent, prefixes=(".lwr-stage-receive-",))
+            try:
+                _remove_owned_tree(stage, stage.parent, prefixes=(".lwr-stage-receive-",))
+            except ContractError:
+                if not receive_published and not primary_error_active:
+                    raise
 
 
-def _validate_receive(core: _CoreState, export_state: _ExportState) -> dict[str, int]:
-    receive_root = _require_real_directory(core.root / _RECEIVE, "workflow receive output")
+def _validate_receive(
+    core: _CoreState,
+    export_state: _ExportState,
+    *,
+    receive_root: Path | None = None,
+) -> dict[str, int]:
+    receive_root = _require_real_directory(
+        core.root / _RECEIVE if receive_root is None else receive_root,
+        "workflow receive output",
+    )
     _tree_entries_without_links(receive_root)
     reader_path = receive_root / "revision-reader.json"
     changeset_path = receive_root / "changeset.json"

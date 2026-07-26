@@ -79,6 +79,70 @@
    Word→LaTeX 结果覆盖权威原稿。任何回填必须经过
    `ChangeSet → ApprovalSet → PatchPlan` 并只写新工作副本。
 
+## 2026-07-25 补充：展示 LaTeX 中已有的批改
+
+[CTAN `changes`](https://ctan.org/pkg/changes) 定义了 `\added[options]{新文字}`、
+`\deleted[options]{旧文字}` 和 `\replaced[options]{新文字}{旧文字}`。这些规范命令只有在已绑定
+项目依赖中静态可见标准 `changes` 宏包声明、已绑定项目树未发现同名 `changes.sty` 且未检测到
+`\input@path` 搜索覆盖时才接受；裸调用以及直接或动态定义/重定义规范命令全部 fail closed，
+不按 TeX 加载顺序猜测。
+
+短命令仍使用独立的保守来源规则：`\add` 只有在唯一来源是静态
+[`trackchanges`](https://trackchanges.sourceforge.net/help_stylefile.html) 宏包声明，或唯一、可证明
+直接转发到 `\added` 的本地包装时才接受；`\delete` 只有在唯一、可证明直接转发到 `\deleted`
+的本地包装时才接受。`\delete` 不是 `trackchanges` 文档声明的命令。宏包声明来源还必须没有
+已绑定项目树中的同名 `trackchanges.sty` 或检测到的 `\input@path` 搜索覆盖；包装目标仍须
+通过上述静态 `changes` 声明门。裸短别名调用、冲突定义、多重来源、签名不兼容或动态条件中的
+定义全部 fail closed。
+
+该门只证明“源码中静态可见标准宏包声明，且已绑定项目树未发现同名 `.sty`，也未检测到
+`\input@path` 搜索覆盖”。它不执行 TeX 或 `kpsewhich`，不解析系统/用户 TEXMF 树或
+`TEXINPUTS`，也不绑定 TeX 实际加载的宏包路径、版本和哈希。因此这里的 provenance 是有界
+语法来源证据，不是对已安装宏包文件身份的证明。
+
+决策：继续采用并包装锁定的 `tex2word==1.0.5` 后端。程序只在内存中注入定义，复用其宏展开、IR、`textcolor` / `sout` 支持和 Word writer，生成两种视图：
+
+- **clean**：新增与替换保留新文字，删除去除旧文字；
+- **display**：新增为 `0000FF` 蓝字，删除为 `0000FF` 蓝色单删除线，替换为旧文字蓝色单删除线后紧接新文字蓝字。本功能不添加高亮。
+
+这样无需重建通用 TeX parser、通用转换 IR 或 OMML writer。本项目仍自行负责有界词法/平衡分组扫描器和独立 OOXML 验收层，因为产物身份与 fail-closed 安全属于本地责任。
+
+`review.docx` 是密封的 clean 基线。只有它的精确可编辑另存副本属于可发给审阅者、并可在
+返回后导入的角色。`existing-changes-display.docx` 只是静态展示辅助文件：它不是 Word
+原生 Track Changes，不启用 Track Changes，也绝不能导入。
+
+展示稿完成字段处理后，会在标准 `word/settings.xml` 文档变量中写入角色
+`latex_changes_display_docx`、配置 `lwr-existing-changes-display-v1` 和当前 run ID；最终摘要
+另作为 non-returnable 证据密封。receive 先拒绝摘要完全相同的展示稿，再拒绝仍带嵌入角色的
+另存或重新打包副本。蓝色不是角色判据，正常审阅稿中的蓝色修订仍走 clean 基线核验。
+
+扫描器只识别直接字面量调用；别名来源另在已绑定的 UTF-8 `.tex`、`.sty`、`.cls` 中做静态
+provenance 审计。主文件限于 `document` 正文，其他已绑定的 UTF-8 `.tex` 文件扫描全文。
+注释、支持的 verbatim/代码形式、定义命令正文和动态条件的全部分支不会被当作调用；目标规范
+命令与短别名的定义仍接受来源和冲突审计。除可证明的短别名直接包装外，普通包装宏、`\csname`
+和 TeX 条件不会展开或求值。允许普通 Unicode 文本、
+平衡分组、嵌套批改调用、转义字面量和固定的简单格式 allowlist。直接识别到的参数若包含
+公式、引用/文献引用、图片、环境、脚注、标签、段落分隔、未转义结构字符或其他命令，会在
+后端执行前 fail closed。
+
+空批改内容（如 `\added{}`、`\deleted{}`、`\replaced{}{}`）仍计入源库存，但不能形成非空
+展示证据，因此展示稿导出以 `E_SCHEMA_INVALID` fail closed。
+
+只要识别到至少一个宏，两份 Word 就都是同一次暂存导出的必需成员。展示验收从每个最上层
+宏树生成诊断用源调用哈希、可见文字和逐字符删除线掩码，并要求 DOCX 提供足够的不重叠、
+`0000FF` 蓝色且删除线状态精确相符的片段。对删除内容，还必须由同一段落的相邻可见正文
+唯一证明删除线边界；上下文不足或候选不唯一时拒绝生成。验收同时要求 clean/display 新增的
+蓝字、删除线和高亮数量与源预期相等，并对照公式、图片、表格、字段、关系和 story parts 等
+非批改结构，避免论文别处相同蓝字补偿遗漏实例。完整 OPC 部件名集合，以及
+`[Content_Types].xml`、`styles.xml`、`numbering.xml`、`fontTable.xml`、全部
+`word/theme/*.xml` 和常规 `settings.xml` 也必须通过规范语义对照；只允许已列明的保存标识、
+解析后的编号定义标识、Track Changes 角色差异和完整精确的展示角色 `docVars`。任一产物、
+实例、结构、受保护部件或角色标记验收失败都会阻止发布，因此当前 `export/` 不会出现半套结果。
+
+同段上下文证明只用于拒绝错误的删除位置。源调用哈希和偏移仍是诊断来源，不是 LaTeX 调用到
+Word 坐标的密码学位置绑定；该展示流程也不为宏派生文字新增精确 SourceMap，自动回填仍依赖
+独立的 clean 审阅书签和 SourceMap 契约。
+
 ## 边界
 
 无论最终选择哪个后端，下列能力固定由本项目所有：

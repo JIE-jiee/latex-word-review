@@ -127,6 +127,8 @@ class BackendRequest:
     expected_source_tree_sha256: str | None = None
     timeout_s: float = 60.0
     max_output_bytes: int = 1024 * 1024
+    revision_view: Literal["source", "clean", "display"] = "source"
+    revision_aliases: tuple[Literal["add", "delete"], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +172,23 @@ def prepare_export(request: BackendRequest, *, owner: str) -> PreparedExport:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "backend timeout must be in (0, 60]")
     if not 0 < request.max_output_bytes <= 16 * 1024 * 1024:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "backend output limit is invalid")
+    if request.revision_view not in {"source", "clean", "display"}:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "backend revision view is invalid")
+    if request.revision_aliases not in {
+        (),
+        ("add",),
+        ("delete",),
+        ("add", "delete"),
+    }:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "backend revision aliases must be unique and canonically ordered",
+        )
+    if request.revision_view == "source" and request.revision_aliases:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "backend revision aliases require a clean or display revision view",
+        )
     main_document = validate_relative_path(request.main_document)
     if not main_document.lower().endswith(".tex"):
         raise ContractError(ErrorCode.SCHEMA_INVALID, "main document must be a .tex file")

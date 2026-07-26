@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from latex_word_review.application import (
 )
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.hashing import FileDigest
+from latex_word_review.ids import derive_artifact_id
 from latex_word_review.ledger import LedgerOutput
 
 
@@ -85,6 +87,8 @@ def _evidence(**overrides: Any) -> _Evidence:
             "run_id": "run-1",
             "payload": {"main_document": "main.tex", "source_tree_sha256": "0" * 64},
         },
+        "review_docx_digest": None,
+        "existing_changes_display_digest": None,
         "changeset": {"schema": "ChangeSet"},
         "approvals": (),
         "plans": (),
@@ -104,6 +108,151 @@ def _evidence(**overrides: Any) -> _Evidence:
 
 def _assert_code(caught: pytest.ExceptionInfo[ContractError], code: ErrorCode) -> None:
     assert caught.value.code is code
+
+
+def _display_report(tmp_path: Path) -> tuple[Path, dict[str, Any], FileDigest]:
+    display = tmp_path / "export" / "existing-changes-display.docx"
+    display.parent.mkdir()
+    data = b"sealed display Word"
+    display.write_bytes(data)
+    digest = FileDigest(
+        size_bytes=len(data),
+        sha256="sha256:" + hashlib.sha256(data).hexdigest(),
+    )
+    artifact = {
+        "artifact_id": derive_artifact_id(digest.sha256),
+        "path": "export/existing-changes-display.docx",
+        "path_base": "run_root",
+        "role": "latex_changes_display_docx",
+        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "size_bytes": digest.size_bytes,
+        "sha256": digest.sha256,
+        "immutable": True,
+    }
+    return display, {"payload": {"existing_changes_display_docx": artifact}}, digest
+
+
+def test_optional_display_evidence_preserves_old_reports_and_ignores_stray_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def report(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"payload": {}}
+
+    monkeypatch.setattr(application_module, "read_contract_file", report)
+    stray = tmp_path / "export" / "existing-changes-display.docx"
+    stray.parent.mkdir()
+    stray.write_bytes(b"unsealed")
+
+    assert application_module._load_existing_changes_display_digest(tmp_path, "snapshotted") is None
+    assert application_module._load_existing_changes_display_digest(tmp_path, "exported") is None
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_artifact", "message"),
+    [
+        ([], "evidence is invalid"),
+        ({"path": 42}, "path is invalid"),
+    ],
+)
+def test_optional_display_evidence_rejects_invalid_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_artifact: object,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        application_module,
+        "read_contract_file",
+        lambda *_args, **_kwargs: {"payload": {"existing_changes_display_docx": raw_artifact}},
+    )
+
+    with pytest.raises(ContractError, match=message) as caught:
+        application_module._load_existing_changes_display_digest(tmp_path, "exported")
+    _assert_code(caught, ErrorCode.SCHEMA_INVALID)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", "export/other.docx"),
+        ("path_base", "snapshot_root"),
+        ("role", "review_docx"),
+        ("media_type", "application/octet-stream"),
+        ("immutable", False),
+    ],
+)
+def test_optional_display_evidence_rejects_semantic_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    _display, report, _digest = _display_report(tmp_path)
+    artifact = cast("dict[str, Any]", report["payload"]["existing_changes_display_docx"])
+    artifact[field] = value
+    monkeypatch.setattr(
+        application_module,
+        "read_contract_file",
+        lambda *_args, **_kwargs: report,
+    )
+
+    with pytest.raises(ContractError, match="unexpected semantics") as caught:
+        application_module._load_existing_changes_display_digest(tmp_path, "ingested")
+    _assert_code(caught, ErrorCode.SCHEMA_INVALID)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("size_bytes", True),
+        ("size_bytes", -1),
+        ("sha256", 42),
+        ("artifact_id", 42),
+        ("artifact_id", "artifact_wrong"),
+    ],
+)
+def test_optional_display_evidence_rejects_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    _display, report, _digest = _display_report(tmp_path)
+    artifact = cast("dict[str, Any]", report["payload"]["existing_changes_display_docx"])
+    artifact[field] = value
+    monkeypatch.setattr(
+        application_module,
+        "read_contract_file",
+        lambda *_args, **_kwargs: report,
+    )
+
+    with pytest.raises(ContractError, match="identity is invalid") as caught:
+        application_module._load_existing_changes_display_digest(tmp_path, "exported")
+    _assert_code(caught, ErrorCode.HASH_INTEGRITY_MISMATCH)
+
+
+def test_optional_display_evidence_accepts_bound_file_and_rejects_digest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    display, report, digest = _display_report(tmp_path)
+    monkeypatch.setattr(
+        application_module,
+        "read_contract_file",
+        lambda *_args, **_kwargs: report,
+    )
+
+    assert application_module._load_existing_changes_display_digest(tmp_path, "exported") == digest
+    display.write_bytes(b"changed display Word")
+    with pytest.raises(ContractError, match="differs from its sealed evidence") as caught:
+        application_module._load_existing_changes_display_digest(tmp_path, "exported")
+    _assert_code(caught, ErrorCode.HASH_INTEGRITY_MISMATCH)
 
 
 def test_path_guards_close_metadata_and_shape_failures(tmp_path: Path) -> None:

@@ -5,6 +5,33 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_name", "schema_version", "object_id", "run_id", "generated_at", "producer", "payload", "integrity", "extensions"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "producer": {
+            "properties": {
+              "interface_version": {"const": "export-report-builder-v3"}
+            },
+            "required": ["interface_version"]
+          }
+        },
+        "required": ["producer"]
+      },
+      "then": {
+        "properties": {
+          "payload": {"required": ["existing_changes_display_docx"]}
+        }
+      },
+      "else": {
+        "properties": {
+          "payload": {
+            "not": {"required": ["existing_changes_display_docx"]}
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "schema_name": {"const": "ExportReport"},
     "schema_version": {"const": "1.0.0-alpha.1"},

@@ -2,26 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import latex_word_review.backends.pandoc as pandoc_module
 import latex_word_review.backends.tex2word as tex2word_module
 from latex_word_review.backends import BackendRequest, PandocBackend, Tex2WordBackend
-from latex_word_review.backends.base import BackendCapabilities, BackendResult
+from latex_word_review.backends.base import BackendCapabilities, BackendResult, prepare_export
 from latex_word_review.discovery import discover_project
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
 from latex_word_review.export_models import ExportReport, ReviewDocxArtifact
 from latex_word_review.hashing import digest_file
 from latex_word_review.inspection import inspect_docx
+from latex_word_review.review_reference import PROFILE_ID, REFERENCE_DOCX_SHA256
 from latex_word_review.runtime import CommandResult
 from tests._docx_factory import write_docx
 from tests.test_image_materializer import _minimal_pdf, _require_pdf_runtime
@@ -45,10 +47,59 @@ def _required_child(root: ET.Element, path: str) -> ET.Element:
     return child
 
 
+def _direct_run_style(root: ET.Element, needle: str) -> tuple[str | None, bool, bool]:
+    matches: list[tuple[str | None, bool, bool]] = []
+    for run in root.iter(f"{W}r"):
+        text = "".join(node.text or "" for node in run.iter(f"{W}t"))
+        if needle not in text:
+            continue
+        properties = run.find(f"{W}rPr")
+        color = None if properties is None else properties.find(f"{W}color")
+        matches.append(
+            (
+                None if color is None else color.get(f"{W}val"),
+                properties is not None and properties.find(f"{W}strike") is not None,
+                properties is not None and properties.find(f"{W}highlight") is not None,
+            )
+        )
+    assert len(matches) == 1, f"expected one run containing {needle!r}, got {len(matches)}"
+    return matches[0]
+
+
+def _assert_no_native_revisions(root: ET.Element) -> None:
+    for local in (
+        "ins",
+        "del",
+        "moveFrom",
+        "moveTo",
+        "rPrChange",
+        "pPrChange",
+        "tblPrChange",
+        "trPrChange",
+        "tcPrChange",
+        "sectPrChange",
+    ):
+        assert root.find(f".//{W}{local}") is None
+
+
 def _write_project(root: Path) -> None:
     root.mkdir()
     (root / "main.tex").write_text(
         "\\documentclass{article}\n\\begin{document}\nPlain text.\n\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _write_revision_project(root: Path) -> None:
+    root.mkdir()
+    (root / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}\n\n"
+        "Added: \\added{ADDED}.\n\n"
+        "Deleted: \\deleted{DELETED}.\n\n"
+        "Replaced: \\replaced{CURRENT}{FORMER}.\n\n"
+        "\\end{document}\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -93,6 +144,8 @@ def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
     assert result.capabilities.interface_version == tex2word_module.TEX2WORD_INTERFACE_VERSION
     assert result.native_report["reference_loaded"] is True
     assert result.native_report["reference_profile"] == "academic-review-v1"
+    assert result.native_report["revision_view"] == "source"
+    assert result.native_report["revision_aliases"] == []
     assert result.native_report["math_omml"] == 5
     assert (
         inspection.paragraphs,
@@ -220,6 +273,8 @@ def test_tex2word_worker_timeout_preserves_output_and_cleans_owned_stages(
     arguments = observed["arguments"]
     assert isinstance(arguments, tuple)
     assert arguments[:2] == ("-m", "latex_word_review.backends._tex2word_worker")
+    alias_index = arguments.index("--revision-aliases")
+    assert arguments[alias_index + 1] == "none"
     assert not list(output.parent.glob(".review.docx.tex2word-*.docx"))
     assert not list(output.parent.glob(".lwr-t2w-report-*.json"))
 
@@ -307,6 +362,189 @@ def test_full_e0_pipeline_adds_only_exact_source_bookmarks(tmp_path: Path) -> No
         f"{W}h": "16838",
     }
     assert _required_child(section, f"{W}cols").get(f"{W}num") == "1"
+
+
+def test_tex2word_clean_revision_view_keeps_only_current_text(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_revision_project(source)
+    output = tmp_path / "output/clean.docx"
+
+    result = Tex2WordBackend().export(
+        BackendRequest(source, "main.tex", output, revision_view="clean")
+    )
+
+    assert result.succeeded
+    assert result.native_report["revision_view"] == "clean"
+    assert result.native_report["revision_aliases"] == []
+    with zipfile.ZipFile(output) as package:
+        document = ET.fromstring(package.read("word/document.xml"))
+    text = "".join(node.text or "" for node in document.iter(f"{W}t"))
+    assert "ADDED" in text
+    assert "CURRENT" in text
+    assert "DELETED" not in text
+    assert "FORMER" not in text
+    assert document.find(f".//{W}color") is None
+    assert document.find(f".//{W}strike") is None
+    assert document.find(f".//{W}highlight") is None
+    _assert_no_native_revisions(document)
+
+
+def test_tex2word_display_revision_view_uses_blue_runs_and_strike(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _write_revision_project(source)
+    output = tmp_path / "output/display.docx"
+
+    result = Tex2WordBackend().export(
+        BackendRequest(source, "main.tex", output, revision_view="display")
+    )
+
+    assert result.succeeded
+    assert result.native_report["revision_view"] == "display"
+    assert result.native_report["revision_aliases"] == []
+    with zipfile.ZipFile(output) as package:
+        document = ET.fromstring(package.read("word/document.xml"))
+    text = "".join(node.text or "" for node in document.iter(f"{W}t"))
+    assert text.index("FORMER") < text.index("CURRENT")
+    assert _direct_run_style(document, "ADDED") == ("0000FF", False, False)
+    assert _direct_run_style(document, "DELETED") == ("0000FF", True, False)
+    assert _direct_run_style(document, "FORMER") == ("0000FF", True, False)
+    assert _direct_run_style(document, "CURRENT") == ("0000FF", False, False)
+    assert document.find(f".//{W}highlight") is None
+    _assert_no_native_revisions(document)
+
+
+def test_tex2word_display_revision_aliases_are_explicit_and_styled(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "Alias add: \\add{ALIASADDED}.\n"
+        "Alias delete: \\delete{ALIASDELETED}.\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    output = tmp_path / "output/aliases.docx"
+
+    result = Tex2WordBackend().export(
+        BackendRequest(
+            source,
+            "main.tex",
+            output,
+            revision_view="display",
+            revision_aliases=("add", "delete"),
+        )
+    )
+
+    assert result.succeeded
+    assert result.native_report["revision_aliases"] == ["add", "delete"]
+    with zipfile.ZipFile(output) as package:
+        document = ET.fromstring(package.read("word/document.xml"))
+    assert _direct_run_style(document, "ALIASADDED") == ("0000FF", False, False)
+    assert _direct_run_style(document, "ALIASDELETED") == ("0000FF", True, False)
+    assert document.find(f".//{W}dstrike") is None
+
+
+def test_prepare_export_rejects_unknown_revision_view(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_project(source)
+
+    with pytest.raises(ContractError) as raised:
+        prepare_export(
+            BackendRequest(
+                source,
+                "main.tex",
+                tmp_path / "output/review.docx",
+                revision_view="unknown",  # type: ignore[arg-type]
+            ),
+            owner="test",
+        )
+
+    assert raised.value.code is ErrorCode.SCHEMA_INVALID
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    ("revision_view", "revision_aliases"),
+    [
+        ("source", ("add",)),
+        ("clean", ("delete", "add")),
+        ("display", ("add", "add")),
+        ("display", ("unknown",)),
+    ],
+)
+def test_prepare_export_rejects_invalid_revision_alias_contracts(
+    tmp_path: Path,
+    revision_view: str,
+    revision_aliases: tuple[str, ...],
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source)
+
+    with pytest.raises(ContractError) as raised:
+        prepare_export(
+            BackendRequest(
+                source,
+                "main.tex",
+                tmp_path / "output/review.docx",
+                revision_view=cast("Any", revision_view),
+                revision_aliases=cast("Any", revision_aliases),
+            ),
+            owner="test",
+        )
+
+    assert raised.value.code is ErrorCode.SCHEMA_INVALID
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    ("revision_aliases", "revision_view", "message"),
+    [
+        (["delete"], "display", "invalid aliases"),
+        (["add"], "clean", "invalid reference data"),
+    ],
+)
+def test_tex2word_worker_report_rejects_revision_contract_drift(
+    tmp_path: Path,
+    revision_aliases: list[str],
+    revision_view: str,
+    message: str,
+) -> None:
+    report_path = tmp_path / "worker-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "constructs": [],
+                "entry_count": 0,
+                "error_count": 0,
+                "math_image": 0,
+                "math_omml": 0,
+                "math_raw": 0,
+                "reference_loaded": True,
+                "reference_profile": PROFILE_ID,
+                "reference_sha256": REFERENCE_DOCX_SHA256,
+                "revision_aliases": revision_aliases,
+                "revision_view": revision_view,
+                "warning_constructs": [],
+                "warning_count": 0,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(ContractError, match=message) as raised:
+        Tex2WordBackend._read_report(
+            report_path,
+            expected_revision_view="display",
+            expected_revision_aliases=("add",),
+        )
+    assert raised.value.code is ErrorCode.BACKEND_FAILED
 
 
 def test_export_refuses_a_successful_zero_unit_review(tmp_path: Path) -> None:
@@ -405,6 +643,24 @@ def test_export_blocks_when_a_source_image_instance_is_missing_from_docx(
     )
     assert repeated.report.status == "failed"
     assert not output.with_name(f"{output.name}.image-overlay").exists()
+
+
+def test_pandoc_rejects_non_source_revision_view_without_invoking_tool(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _write_project(source)
+    output = tmp_path / "out/review.docx"
+
+    result = PandocBackend(version_override="test").export(
+        BackendRequest(source, "main.tex", output, revision_view="display")
+    )
+
+    assert not result.succeeded
+    assert result.findings[0].code is ErrorCode.BACKEND_CAPABILITY_MISSING
+    assert dict(result.capabilities.features)["revision_view"].support == "none"
+    assert not output.exists()
+    assert not list(output.parent.glob(".review.docx.pandoc-*.docx"))
 
 
 def test_pandoc_forces_source_root_cwd_and_fixed_argv(

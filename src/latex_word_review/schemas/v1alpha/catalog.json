@@ -3,7 +3,7 @@
   "schema_version": "1.0.0-alpha.1",
   "common": {
     "file": "common.schema.json",
-    "sha256": "21f98e0ecc96eb604401ec86d46a46ce23a3eec6ee7f5779b5d47c45ff5c418e"
+    "sha256": "c329d3f03aa88e74469e58f2eafa20f6372cae967055783e49865a820b7a54d4"
   },
   "objects": [
     {
@@ -34,7 +34,7 @@
     {
       "name": "ExportReport",
       "file": "export-report.schema.json",
-      "sha256": "fe576f0b88cc64214837ef33e58f605993064dee245f8ce4f8d629d1c723ccb9"
+      "sha256": "d82f3991b8b1c29a275e559394e2eb6fcc76eaed2aae6a84b21e4f4902248837"
     },
     {
       "name": "RawRevisionEvent",

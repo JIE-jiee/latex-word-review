@@ -20,6 +20,10 @@ TEX_ARGS = (
     "review.docx",
     "--report",
     "report.json",
+    "--revision-view",
+    "source",
+    "--revision-aliases",
+    "none",
 )
 IMAGE_ARGS = (
     "--source",
@@ -88,6 +92,8 @@ def test_frozen_commands_use_one_hidden_self_spawn_protocol(
     [
         ("unknown", ()),
         ("tex2word", ("--output", "x", "--source", "y", "--report", "z")),
+        ("tex2word", TEX_ARGS + ("--extra", "x")),
+        ("tex2word", TEX_ARGS[:-1] + ("bad\x00view",)),
         ("image-render", IMAGE_ARGS + ("--extra", "x")),
         ("windows-gated-launcher", ()),
         ("windows-gated-launcher", ("bad\x00tool",)),

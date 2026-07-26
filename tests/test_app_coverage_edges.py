@@ -665,6 +665,16 @@ def test_post_routes_previously_unreached(monkeypatch: pytest.MonkeyPatch, tmp_p
 
         monkeypatch.setattr(st, "submit_existing_export", submit_existing)
         monkeypatch.setattr(st, "open_review_docx", lambda _k: calls.append("open"))
+        monkeypatch.setattr(
+            st,
+            "open_existing_changes_display",
+            lambda _k: calls.append("open-display"),
+        )
+        monkeypatch.setattr(
+            st,
+            "save_existing_changes_display_copy",
+            lambda _k: calls.append("save-display"),
+        )
         monkeypatch.setattr(st, "choose_returned_word", lambda _k: None)
         monkeypatch.setattr(st, "accept_all_safe", lambda _k: calls.append("accept"))
         monkeypatch.setattr(st, "open_revised_source", lambda _k: calls.append("revised"))
@@ -673,6 +683,8 @@ def test_post_routes_previously_unreached(monkeypatch: pytest.MonkeyPatch, tmp_p
         for path in [
             "/session/export-existing",
             "/session/open-review-docx",
+            "/session/open-existing-changes-display",
+            "/session/save-existing-changes-copy",
             "/session/receive",
             "/approval/accept-safe",
             "/result/open-revised",
@@ -680,7 +692,16 @@ def test_post_routes_previously_unreached(monkeypatch: pytest.MonkeyPatch, tmp_p
             "/result/retry",
         ]:
             assert _post_form(app, path, {"csrf": csrf, "session": key}, cookie=cookie)[0] == 303
-        assert calls == ["export", "open", "accept", "revised", "delivery", "retry"]
+        assert calls == [
+            "export",
+            "open",
+            "open-display",
+            "save-display",
+            "accept",
+            "revised",
+            "delivery",
+            "retry",
+        ]
         assert (
             _post_form(
                 app,

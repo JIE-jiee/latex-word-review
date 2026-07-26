@@ -525,6 +525,40 @@ def _render_waiting_word(view: Mapping[str, object]) -> str:
     save_copy_action = _local_url(view, "save_copy_action", default="/session/save-review-copy")
     receive_action = _local_url(view, "receive_action", default="/session/receive")
     reviewer_message = _optional_text(view, "reviewer_message")
+    raw_existing_changes_display = view.get("existing_changes_display")
+    existing_changes_display_card = ""
+    if raw_existing_changes_display is not None:
+        display = _as_mapping(
+            raw_existing_changes_display,
+            "existing_changes_display",
+        )
+        display_name = _text(display, "docx_name")
+        display_open_action = _local_url(
+            display,
+            "open_action",
+            default="/session/open-existing-changes-display",
+        )
+        display_save_action = _local_url(
+            display,
+            "save_copy_action",
+            default="/session/save-existing-changes-copy",
+        )
+        existing_changes_display_card = (
+            '<section class="handoff-card" aria-labelledby="existing-changes-display-title">'
+            '<div><p class="eyebrow">仅供对照</p>'
+            '<h2 id="existing-changes-display-title">已有 LaTeX 批改展示稿（仅供对照）</h2>'
+            f"<p><strong>{_escape(display_name)}</strong></p>"
+            "<p>它把原 LaTeX 中已有的批改统一显示为蓝色：新增文字为蓝色；删除文字为"
+            "蓝色删除线；替换内容为旧文字蓝色删除线＋新文字蓝色，不使用高亮。</p>"
+            "<p><strong>这不是 Word 原生修订。</strong>它只用于查看原稿已有批改，"
+            "不要把它作为审阅者返回的 Word 导入；返回稿必须来自上方可编辑审阅副本。</p></div>"
+            '<div class="actions">'
+            f'<form method="post" action="{_escape(display_save_action)}">{_hidden_fields(view)}'
+            '<button class="button button--secondary" type="submit">另存展示稿</button></form>'
+            f'<form method="post" action="{_escape(display_open_action)}">{_hidden_fields(view)}'
+            '<button class="button button--secondary" type="submit">打开展示稿</button></form>'
+            "</div></section>"
+        )
     compatibility_counts = _mapping_items(view, "compatibility_counts")
     compatibility_tiles = "".join(
         '<li class="summary-tile summary-tile--neutral">'
@@ -594,6 +628,7 @@ def _render_waiting_word(view: Mapping[str, object]) -> str:
         "打开只读基线（仅检查）</button></form>"
         "</div>"
         "</section>"
+        f"{existing_changes_display_card}"
         f"{_render_notices(view)}"
         f"{compatibility_summary}"
         '<section class="hero" aria-labelledby="return-word-title"><div>'
