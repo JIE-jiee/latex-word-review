@@ -480,19 +480,16 @@ def test_pandoc_probe_failures_and_missing_artifact_are_bounded(
     assert not result.succeeded
     assert result.returncode == 2
 
-    calls = 0
-
-    def no_artifact(*args: object, **kwargs: object) -> CommandResult:
-        nonlocal calls
-        del args, kwargs
-        calls += 1
-        if calls == 1:
-            return CommandResult(
-                0, "pandoc unparseable-version", "", False, False, 1, "sha256:" + "b" * 64
-            )
-        return CommandResult(0, "", "", False, False, 1, "sha256:" + "c" * 64)
-
-    monkeypatch.setattr(pandoc_module, "run_command", no_artifact)
+    probe_success = CommandResult(
+        0, "pandoc unparseable-version", "", False, False, 1, "sha256:" + "b" * 64
+    )
+    conversion_without_artifact = CommandResult(0, "", "", False, False, 1, "sha256:" + "c" * 64)
+    monkeypatch.setattr(pandoc_module, "run_command", lambda *args, **kwargs: probe_success)
+    monkeypatch.setattr(
+        pandoc_module,
+        "run_conversion_command",
+        lambda *args, **kwargs: conversion_without_artifact,
+    )
     result = PandocBackend().export(BackendRequest(source, "main.tex", output))
     assert not result.succeeded
     assert result.capabilities.tool_version == "unknown"

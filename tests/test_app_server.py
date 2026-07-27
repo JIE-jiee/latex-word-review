@@ -29,6 +29,7 @@ from latex_word_review.app_server import (
 )
 from latex_word_review.app_views import render_app_page
 from latex_word_review.application import ApplicationSession
+from latex_word_review.discovery import ExternalReference, ProjectDiscovery
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.jsonio import read_contract_file
 from tests.test_workflow import FIXTURE, _make_returned
@@ -589,6 +590,135 @@ def test_picker_cancel_is_a_safe_noop_and_preflight_uses_selected_copy(
     choose_form = page.split('action="/new"', 1)[1].split("</form>", 1)[0]
     assert 'name="csrf"' in choose_form
     assert 'name="selection"' not in choose_form
+
+
+def test_preflight_distinguishes_missing_ambiguous_and_unsafe_references(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "paper"
+    project.mkdir()
+    (project / "figures").mkdir()
+    main_file = project / "main.tex"
+    private_reference = "C:/confidential/private.tex"
+    main_file.write_text(
+        "\\documentclass{article}\n"
+        "\\graphicspath{{figures/}}\n"
+        "\\begin{document}\n"
+        "\\input{missing/chapter}\n"
+        "\\includegraphics{response.v2}\n"
+        f"\\input{{{private_reference}}}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+    (project / "figures" / "response.v2").write_bytes(b"exact")
+    (project / "figures" / "response.v2.pdf").write_bytes(b"extension")
+
+    state = AppState(tmp_path / "app", main_picker=lambda _initial: main_file)
+    try:
+        selected = state.select_project()
+        assert selected is not None
+        view = state.preflight_view(selected.token)
+        page = render_app_page(view)
+    finally:
+        state.close()
+
+    checks = cast("list[dict[str, str]]", view["checks"])
+    messages = "\n".join(check["message"] for check in checks)
+    labels = {check["label"] for check in checks}
+    assert view["can_continue"] is False
+    assert "缺少输入文件" in labels
+    assert "图片不唯一" in labels
+    assert "不安全的输入文件引用" in labels
+    assert "missing/chapter" in messages
+    assert "response.v2" in messages
+    assert "这不表示论文含有越界引用" not in messages
+    assert "unsafe-path:" in messages
+    assert private_reference not in messages
+    assert private_reference not in page
+    assert "请核对文件名和扩展名" in page
+    assert "请保留唯一文件" in page
+    assert "请改用论文项目目录内" in page
+    assert "越界或不安全引用" not in page
+
+
+def test_preflight_missing_reference_is_not_called_unsafe(tmp_path: Path) -> None:
+    project = tmp_path / "paper"
+    project.mkdir()
+    main_file = project / "main.tex"
+    main_file.write_text(
+        "\\documentclass{article}\n\\begin{document}\\input{chapters/missing}\\end{document}\n",
+        encoding="utf-8",
+    )
+    state = AppState(tmp_path / "app", main_picker=lambda _initial: main_file)
+    try:
+        selected = state.select_project()
+        assert selected is not None
+        page = render_app_page(state.preflight_view(selected.token))
+    finally:
+        state.close()
+
+    assert "这不表示论文含有越界引用" in page
+    assert "缺少输入文件" in page
+    assert "chapters/missing" in page
+    assert "不安全的输入文件引用" not in page
+
+
+def test_preflight_reference_details_are_bounded_and_future_reasons_fail_safe() -> None:
+    safe = "figures/plot.pdf"
+    redacted = "unsafe-path:" + "a" * 16
+    long_reference = "figures/" + "a" * 200 + ".pdf"
+
+    assert app_server_module._bounded_preflight_reference(safe) == safe
+    assert app_server_module._bounded_preflight_reference(redacted) == redacted
+    assert app_server_module._bounded_preflight_reference("C:/private/file.tex").startswith(
+        "unsafe-path:"
+    )
+    bounded = app_server_module._bounded_preflight_reference(long_reference)
+    assert len(bounded) < len(long_reference)
+    assert bounded.startswith("figures/")
+    assert "…#" in bounded
+
+    link = app_server_module._preflight_reference_check(
+        ExternalReference(redacted, "graphic", "link_escape")
+    )
+    dynamic = app_server_module._preflight_reference_check(
+        ExternalReference(redacted, "input", "dynamic_or_unsafe")
+    )
+    unknown = app_server_module._preflight_reference_check(
+        ExternalReference(redacted, "future-kind", "future_reason")
+    )
+    assert "移除符号链接或目录联接" in link["message"]
+    assert "动态命令" in dynamic["message"]
+    assert "不含越界片段" in unknown["message"]
+    unsafe_discovery = ProjectDiscovery(
+        main_document="main.tex",
+        files=(),
+        dependency_edges=(),
+        external_references=(ExternalReference(redacted, "future-kind", "future_reason"),),
+        engine_hints=(),
+        source_tree_sha256="sha256:" + "0" * 64,
+        profile_sha256="sha256:" + "1" * 64,
+    )
+    unsafe_summary = app_server_module._preflight_dependency_checks(unsafe_discovery)[0]
+    assert "动态、越界或链接引用" in unsafe_summary["message"]
+
+    references = tuple(
+        ExternalReference(f"missing/file-{index}.tex", "input", "missing")
+        for index in range(app_server_module._MAX_PREFLIGHT_REFERENCE_DETAILS + 1)
+    )
+    discovery = ProjectDiscovery(
+        main_document="main.tex",
+        files=(),
+        dependency_edges=(),
+        external_references=references,
+        engine_hints=(),
+        source_tree_sha256="sha256:" + "0" * 64,
+        profile_sha256="sha256:" + "1" * 64,
+    )
+    checks = app_server_module._preflight_dependency_checks(discovery)
+    assert checks[-1]["label"] == "其余依赖"
+    assert "另有 1 个问题" in checks[-1]["message"]
+    assert len(checks) == app_server_module._MAX_PREFLIGHT_REFERENCE_DETAILS + 2
 
 
 def test_picker_file_disappearing_after_selection_is_an_actionable_input_error(

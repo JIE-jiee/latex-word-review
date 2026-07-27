@@ -120,6 +120,16 @@ _GROUP_CONDITIONAL_ARGUMENTS: Final = {
     "ifthenelse": 3,
 }
 FeatureKind = Literal["math", "tables", "references", "labels", "images", "citations"]
+RevisionFeatureView = Literal["source", "clean", "display"]
+RevisionAlias = Literal["add", "delete"]
+_CANONICAL_REVISION_COMMANDS: Final = frozenset({"added", "deleted", "replaced"})
+_REVISION_COMMAND_ARITY: Final = {
+    "added": 1,
+    "deleted": 1,
+    "replaced": 2,
+    "add": 1,
+    "delete": 1,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +428,175 @@ def _skip_group_conditional(text: str, index: int, *, arguments: int) -> int:
     return cursor
 
 
+def _group_span(
+    text: str,
+    index: int,
+    *,
+    opening: str,
+    closing: str,
+) -> tuple[int, int] | None:
+    start = _skip_space_and_comments(text, index)
+    result = _balanced(text, start, opening=opening, closing=closing)
+    if result is None:
+        return None
+    return start, result[1]
+
+
+def _revision_projection_exclusions(
+    text: str,
+    *,
+    main_document: bool,
+    revision_view: Literal["clean", "display"],
+    revision_aliases: tuple[RevisionAlias, ...],
+) -> tuple[tuple[int, int], ...]:
+    """Locate source spans that a revision view intentionally does not render.
+
+    The ranges stay in original character coordinates. They are used only to
+    mask the feature-inventory scan; source bytes and source-map offsets never
+    change.
+    """
+
+    revision_commands = _CANONICAL_REVISION_COMMANDS | frozenset(revision_aliases)
+    exclusions: list[tuple[int, int]] = []
+    excluded_starts: dict[int, int] = {}
+    projection_calls = 0
+    active = not main_document
+    cursor = 0
+    while cursor < len(text):
+        excluded_end = excluded_starts.get(cursor)
+        if excluded_end is not None:
+            cursor = excluded_end
+            continue
+        character = text[cursor]
+        if character == "%" and not _is_escaped(text, cursor):
+            cursor = _skip_comment(text, cursor)
+            continue
+        if character != "\\":
+            cursor += 1
+            continue
+        command_start = cursor
+        command, command_end = _command(text, cursor)
+        cursor = command_end
+        if command == "endinput":
+            break
+        if (
+            command
+            in _NEW_COMMAND_DEFINITIONS
+            | _XPARSE_COMMAND_DEFINITIONS
+            | _ENVIRONMENT_DEFINITIONS
+            | _PRIMITIVE_DEFINITIONS
+        ):
+            cursor = _skip_definition(text, command, cursor)
+            continue
+        if command == "verb":
+            if cursor < len(text) and text[cursor] == "*":
+                cursor += 1
+            if cursor < len(text):
+                delimiter_character = text[cursor]
+                ending = text.find(delimiter_character, cursor + 1)
+                cursor = len(text) if ending < 0 else ending + 1
+            continue
+        conditional_arguments = _GROUP_CONDITIONAL_ARGUMENTS.get(command)
+        if conditional_arguments is not None:
+            cursor = _skip_group_conditional(
+                text,
+                cursor,
+                arguments=conditional_arguments,
+            )
+            continue
+        if command.startswith("if"):
+            cursor = _skip_conditional(text, cursor)
+            continue
+        if command in {"begin", "end"}:
+            group = _mandatory_group(text, cursor)
+            if group is None:
+                continue
+            environment, cursor = group
+            environment = environment.strip()
+            if command == "begin" and environment == "document" and main_document:
+                active = True
+                continue
+            if command == "end" and environment == "document" and main_document:
+                active = False
+                continue
+            if command == "begin" and active and environment in _VERBATIM_ENVIRONMENTS:
+                terminator = f"\\end{{{environment}}}"
+                ending = text.find(terminator, cursor)
+                cursor = len(text) if ending < 0 else ending + len(terminator)
+            continue
+        if not active or command not in revision_commands:
+            continue
+
+        projection_calls += 1
+        if projection_calls > _MAX_FEATURE_OCCURRENCES:
+            raise ContractError(
+                ErrorCode.SCHEMA_INVALID,
+                "LaTeX source exceeds the revision feature projection limit",
+                details={"max_projection_calls": _MAX_FEATURE_OCCURRENCES},
+            )
+        parse_cursor = command_end
+        optional = _group_span(text, parse_cursor, opening="[", closing="]")
+        if optional is not None:
+            exclusions.append(optional)
+            excluded_starts[optional[0]] = optional[1]
+            parse_cursor = optional[1]
+        mandatory: list[tuple[int, int]] = []
+        for _ in range(_REVISION_COMMAND_ARITY[command]):
+            revision_group = _group_span(text, parse_cursor, opening="{", closing="}")
+            if revision_group is None:
+                line, column = _line_column(text, command_start)
+                raise ContractError(
+                    ErrorCode.SCHEMA_INVALID,
+                    "revision macro cannot be projected for source feature inventory",
+                    details={
+                        "command": f"\\{command}",
+                        "line": line,
+                        "column": column,
+                    },
+                )
+            mandatory.append(revision_group)
+            parse_cursor = revision_group[1]
+        if revision_view == "clean":
+            hidden: tuple[int, int] | None = None
+            if command in {"deleted", "delete"}:
+                hidden = mandatory[0]
+            elif command == "replaced":
+                hidden = mandatory[1]
+            if hidden is not None:
+                exclusions.append(hidden)
+                excluded_starts[hidden[0]] = hidden[1]
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(exclusions):
+        if merged and start <= merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _mask_projection_ranges(
+    text: str,
+    ranges: tuple[tuple[int, int], ...],
+) -> str:
+    if not ranges:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end in ranges:
+        parts.append(text[cursor:start])
+        parts.append(
+            "".join(character if character in "\r\n" else " " for character in text[start:end])
+        )
+        cursor = end
+    parts.append(text[cursor:])
+    projected = "".join(parts)
+    if len(projected) != len(text):
+        raise AssertionError("revision feature projection changed source character offsets")
+    return projected
+
+
 def _static_keys(value: str) -> tuple[str, ...] | None:
     keys = tuple(item.strip() for item in value.split(",") if item.strip())
     if not keys:
@@ -484,15 +663,28 @@ def _scan_file(
     mutable: _MutableInventory,
     *,
     main_document: bool,
+    revision_view: RevisionFeatureView,
+    revision_aliases: tuple[RevisionAlias, ...],
 ) -> None:
     try:
-        text = data.decode("utf-8", errors="strict")
+        source_text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ContractError(
             ErrorCode.SCHEMA_INVALID,
             "included LaTeX source dependency must be valid UTF-8",
             details={"path": source_file.path},
         ) from exc
+    text = source_text
+    if revision_view != "source":
+        text = _mask_projection_ranges(
+            source_text,
+            _revision_projection_exclusions(
+                source_text,
+                main_document=main_document,
+                revision_view=revision_view,
+                revision_aliases=revision_aliases,
+            ),
+        )
     active = not main_document
     environments: list[str] = []
     delimiter: str | None = None
@@ -518,7 +710,7 @@ def _scan_file(
                 else:
                     mutable.inline_math_instances += 1
                 mutable.math_objects += 1
-                _remember(mutable, "math", data, text, source_file, cursor, end)
+                _remember(mutable, "math", data, source_text, source_file, cursor, end)
             elif delimiter == marker:
                 delimiter = None
             cursor = end
@@ -586,13 +778,13 @@ def _scan_file(
                 if environment in _MATH_ENVIRONMENTS:
                     mutable.display_math_instances += 1
                     mutable.math_objects += 1
-                    _remember(mutable, "math", data, text, source_file, start, cursor)
+                    _remember(mutable, "math", data, source_text, source_file, start, cursor)
                 if environment in _EQUIVALENT_TABLE_ENVIRONMENTS:
                     mutable.table_instances += 1
-                    _remember(mutable, "tables", data, text, source_file, start, cursor)
+                    _remember(mutable, "tables", data, source_text, source_file, start, cursor)
                 elif environment in _NON_EQUIVALENT_TABLE_ENVIRONMENTS:
                     mutable.non_equivalent_table_instances += 1
-                    _remember(mutable, "tables", data, text, source_file, start, cursor)
+                    _remember(mutable, "tables", data, source_text, source_file, start, cursor)
             elif environments:
                 if environments[-1] == environment:
                     environments.pop()
@@ -609,7 +801,7 @@ def _scan_file(
                 else:
                     mutable.inline_math_instances += 1
                 mutable.math_objects += 1
-                _remember(mutable, "math", data, text, source_file, start, cursor)
+                _remember(mutable, "math", data, source_text, source_file, start, cursor)
             continue
         if (
             command
@@ -623,7 +815,7 @@ def _scan_file(
             continue
         if command == "\\" and environments and environments[-1] in _MULTI_ROW_MATH_ENVIRONMENTS:
             mutable.math_objects += 1
-            _remember(mutable, "math", data, text, source_file, start, cursor)
+            _remember(mutable, "math", data, source_text, source_file, start, cursor)
             continue
         if command == "label":
             group = _mandatory_group(text, cursor)
@@ -636,7 +828,7 @@ def _scan_file(
                     mutable.dynamic_label_instances += 1
                 else:
                     mutable.static_labels.append(keys[0])
-            _remember(mutable, "labels", data, text, source_file, start, cursor)
+            _remember(mutable, "labels", data, source_text, source_file, start, cursor)
             continue
         if command in _FIELD_REFERENCE_COMMANDS:
             count = 0
@@ -662,11 +854,11 @@ def _scan_file(
                 mutable.reference_warning_constructs.add("\\ref")
             else:
                 mutable.non_equivalent_reference_instances += 1
-            _remember(mutable, "references", data, text, source_file, start, cursor)
+            _remember(mutable, "references", data, source_text, source_file, start, cursor)
             continue
         if command in _NON_EQUIVALENT_REFERENCE_COMMANDS:
             mutable.non_equivalent_reference_instances += 1
-            _remember(mutable, "references", data, text, source_file, start, cursor)
+            _remember(mutable, "references", data, source_text, source_file, start, cursor)
             continue
         if command in _CITATION_COMMANDS:
             group = _mandatory_group(text, _optional_groups(text, cursor))
@@ -675,7 +867,7 @@ def _scan_file(
                 keys = _static_keys(value)
                 if keys is not None:
                     mutable.citation_instances += len(keys)
-                    _remember(mutable, "citations", data, text, source_file, start, cursor)
+                    _remember(mutable, "citations", data, source_text, source_file, start, cursor)
 
 
 def scan_source_features(
@@ -683,11 +875,22 @@ def scan_source_features(
     discovery: ProjectDiscovery,
     *,
     image_instances: int,
+    revision_view: RevisionFeatureView = "source",
+    revision_aliases: tuple[RevisionAlias, ...] = (),
 ) -> SourceFeatureInventory:
     """Build a bounded conservative inventory from one sealed discovery tree."""
 
     if image_instances < 0:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "image instance count cannot be negative")
+    if revision_view not in {"source", "clean", "display"}:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "invalid revision feature projection")
+    if revision_aliases not in {(), ("add",), ("delete",), ("add", "delete")}:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "invalid revision feature aliases")
+    if revision_view == "source" and revision_aliases:
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "source revision feature view cannot enable aliases",
+        )
     if discovery.external_references:
         raise ContractError(ErrorCode.PATH_TRAVERSAL, "blocked discovery cannot be inventoried")
     mutable = _MutableInventory()
@@ -712,6 +915,8 @@ def scan_source_features(
             source_file,
             mutable,
             main_document=source_file.path == discovery.main_document,
+            revision_view=revision_view,
+            revision_aliases=revision_aliases,
         )
     return SourceFeatureInventory(
         source_tree_sha256=discovery.source_tree_sha256,
@@ -1040,21 +1245,24 @@ def reconcile_source_features(
             finding = _finding(
                 inventory,
                 "labels",
-                code=ErrorCode.EXPORT_SILENT_LOSS,
+                code=ErrorCode.EXPORT_DEGRADED,
                 message=(
                     "one or more uniquely representable LaTeX label bookmarks are "
-                    "absent from the review DOCX"
+                    "not available as native Word bookmarks"
                 ),
-                recoverable=False,
+                recoverable=True,
                 evidence={
                     "expected_unique_label_bookmarks": len(unique_names),
                     "matched_unique_label_bookmarks": matched_labels,
                 },
-                remediation="resolve static label conversion before reviewer handoff",
+                remediation=(
+                    "review unresolved Word reference placeholders manually; "
+                    "the original LaTeX labels remain unchanged"
+                ),
             )
             findings.append(finding)
             label_ids.append(finding.diagnostic_id)
-            label_status = "failed"
+            label_status = "degraded"
         elif len(unique_names) != len(expected_names) or inventory.dynamic_label_instances:
             finding = _finding(
                 inventory,
@@ -1166,6 +1374,8 @@ __all__ = [
     "FeatureSourceLocation",
     "INVENTORY_PROFILE_NAME",
     "INVENTORY_PROFILE_VERSION",
+    "RevisionAlias",
+    "RevisionFeatureView",
     "SourceFeatureInventory",
     "independently_observed_label_count",
     "reconcile_source_features",

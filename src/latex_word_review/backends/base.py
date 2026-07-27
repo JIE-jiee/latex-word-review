@@ -14,6 +14,10 @@ from latex_word_review.canonical import sha256_canonical
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.docx_reader import read_docx_package
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export_limits import (
+    DEFAULT_EXPORT_TIMEOUT_SECONDS,
+    validate_export_timeout,
+)
 from latex_word_review.export_models import ExportFinding
 from latex_word_review.hashing import FileDigest, digest_file
 from latex_word_review.ids import stable_id
@@ -125,7 +129,7 @@ class BackendRequest:
     main_document: str
     output_path: Path
     expected_source_tree_sha256: str | None = None
-    timeout_s: float = 60.0
+    timeout_s: float = DEFAULT_EXPORT_TIMEOUT_SECONDS
     max_output_bytes: int = 1024 * 1024
     revision_view: Literal["source", "clean", "display"] = "source"
     revision_aliases: tuple[Literal["add", "delete"], ...] = ()
@@ -168,8 +172,7 @@ class PreparedExport:
 
 
 def prepare_export(request: BackendRequest, *, owner: str) -> PreparedExport:
-    if not 0 < request.timeout_s <= 60:
-        raise ContractError(ErrorCode.SCHEMA_INVALID, "backend timeout must be in (0, 60]")
+    validate_export_timeout(request.timeout_s)
     if not 0 < request.max_output_bytes <= 16 * 1024 * 1024:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "backend output limit is invalid")
     if request.revision_view not in {"source", "clean", "display"}:

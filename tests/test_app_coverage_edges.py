@@ -20,6 +20,7 @@ import latex_word_review.app_server as s
 from latex_word_review.app_jobs import JobSnapshot
 from latex_word_review.app_server import AppRequestHandler, AppState
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export_limits import DEFAULT_EXPORT_TIMEOUT_SECONDS
 from latex_word_review.hashing import digest_bytes
 from tests.test_app_presenter import _as_application_session, _StatusSession
 from tests.test_app_server import _credentials, _post_form, _running_server
@@ -448,8 +449,14 @@ def inline(
 
 
 def test_inline_existing_receive_prepare(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_options: dict[str, object] = {}
+
+    def export_review(**kwargs: object) -> dict[str, str]:
+        export_options.update(kwargs)
+        return {"phase": "waiting"}
+
     session = SimpleNamespace(
-        export_review=lambda **_k: {"phase": "waiting"},
+        export_review=export_review,
         receive_review=lambda _p: None,
         begin_approval=lambda **_k: {"phase": "approval"},
         prepare_plan=lambda: {"phase": "plan"},
@@ -458,6 +465,7 @@ def test_inline_existing_receive_prepare(monkeypatch: pytest.MonkeyPatch, tmp_pa
     key = "session_" + "a" * 32
     try:
         st.submit_existing_export(key)
+        assert export_options == {"timeout_s": DEFAULT_EXPORT_TIMEOUT_SECONDS}
         st.submit_receive(key, tmp_path / "r.docx")
         st.submit_prepare_plan(key)
         assert jobs.result is not None

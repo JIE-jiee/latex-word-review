@@ -25,6 +25,7 @@
 
 ## 架构、范围与上游决策
 
+- [代码地图与维护边界](architecture/code-map.md)
 - [v1alpha 领域契约](architecture/domain-contracts.md)
 - [v0.1 支持与自动应用范围](compat/v0.1-scope.md)
 - [Windows 平台和工具支持矩阵](compat/platform-support.md)

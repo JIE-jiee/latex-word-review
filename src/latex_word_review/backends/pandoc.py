@@ -7,7 +7,7 @@ from pathlib import Path
 
 from latex_word_review.canonical import sha256_canonical
 from latex_word_review.errors import ContractError, ErrorCode
-from latex_word_review.runtime import minimal_environment, run_command
+from latex_word_review.runtime import minimal_environment, run_command, run_conversion_command
 
 from .base import (
     BackendCapabilities,
@@ -178,7 +178,7 @@ class PandocBackend:
                 f"--output={prepared.temporary_path}",
                 "--resource-path=.",
             )
-            result = run_command(
+            result = run_conversion_command(
                 self._executable,
                 arguments,
                 cwd=prepared.source_root,

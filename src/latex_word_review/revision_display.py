@@ -124,6 +124,13 @@ _PARAGRAPH_ZERO_WIDTH: Final = frozenset(
         _w("sdtPr"),
     }
 )
+_RUN_ZERO_WIDTH: Final = frozenset(
+    {
+        # Word may add this pagination cache marker while refreshing fields.
+        # It has no visible character and must not split source-bound text.
+        _w("lastRenderedPageBreak"),
+    }
+)
 
 
 def _paragraph_events(element: etree._Element) -> Iterator[etree._Element | None]:
@@ -604,7 +611,12 @@ def _structure_attributes(element: etree._Element) -> tuple[tuple[str, str], ...
 def _paragraph_structure_node(element: etree._Element) -> tuple[object, ...] | None:
     """Return an ordered non-body-text token for one paragraph descendant."""
 
-    if element.tag in {_w("bookmarkStart"), _w("bookmarkEnd"), _w("proofErr")}:
+    if element.tag in {
+        _w("bookmarkStart"),
+        _w("bookmarkEnd"),
+        _w("lastRenderedPageBreak"),
+        _w("proofErr"),
+    }:
         return None
     if element.tag in {_w("t"), _w("rPr")}:
         return None
@@ -736,6 +748,8 @@ def _inspect_document(path: Path) -> _DocumentEvidence:
                 for child in run:
                     if child.tag == _w("rPr"):
                         continue
+                    if child.tag in _RUN_ZERO_WIDTH:
+                        continue
                     if child.tag != _w("t"):
                         _append_barrier(styled)
                         continue
@@ -844,6 +858,32 @@ class _MatchedExpectationGroup:
     intervals: tuple[tuple[int, int, int], ...]
 
 
+def _normalize_tex_dash_sequences(value: str) -> str:
+    """Match the deterministic visible dash projection produced by tex2word."""
+
+    return value.replace("---", "\N{EM DASH}").replace("--", "\N{EN DASH}")
+
+
+def _normalized_match_inventory(
+    inventory: RevisionMacroInventory,
+) -> RevisionMacroInventory:
+    expectations = tuple(
+        replace(
+            expectation,
+            segments=tuple(
+                replace(segment, text=_normalize_tex_dash_sequences(segment.text))
+                for segment in expectation.segments
+            ),
+            left_context=_normalize_tex_dash_sequences(expectation.left_context),
+            right_context=_normalize_tex_dash_sequences(expectation.right_context),
+        )
+        for expectation in inventory.display_expectations
+    )
+    if expectations == inventory.display_expectations:
+        return inventory
+    return replace(inventory, display_expectations=expectations)
+
+
 def _text_candidate_intervals(
     paragraphs: tuple[tuple[_StyledCharacter, ...], ...],
     text: str,
@@ -902,6 +942,7 @@ def _validate_source_expectations(
     inventory: RevisionMacroInventory,
     *,
     match_budget: _MatchBudget,
+    require_full_coverage: bool = True,
 ) -> tuple[
     int,
     int,
@@ -916,7 +957,7 @@ def _validate_source_expectations(
         )
     expectations = inventory.display_expectations
     covered_instances = sum(item.macro_instances for item in inventory.display_expectations)
-    if covered_instances != inventory.total:
+    if require_full_coverage and covered_instances != inventory.total:
         raise ContractError(
             ErrorCode.SCHEMA_INVALID,
             "revision display expectations do not cover the source inventory",
@@ -944,7 +985,7 @@ def _validate_source_expectations(
             paragraphs,
             expected_text,
             budget=match_budget,
-            stop_after=expected_count + 1,
+            stop_after=expected_count + 1 if require_full_coverage else None,
         )
         candidate_count += len(textual_candidates)
         if candidate_count > _MAX_MATCH_CANDIDATES:
@@ -952,7 +993,11 @@ def _validate_source_expectations(
                 ErrorCode.EXPORT_SILENT_LOSS,
                 "LaTeX revision display matching exceeded its document safety limit",
             )
-        if len(textual_candidates) != expected_count:
+        if (
+            len(textual_candidates) != expected_count
+            if require_full_coverage
+            else len(textual_candidates) < expected_count
+        ):
             raise ContractError(
                 ErrorCode.EXPORT_SILENT_LOSS,
                 "LaTeX revision display text location is ambiguous",
@@ -1417,7 +1462,13 @@ def validate_revision_display(
     inventory: RevisionMacroInventory,
     clean_reference: Path,
 ) -> RevisionDisplayInspection:
-    """Fail closed unless the static display is an exact, position-bound derivative."""
+    """Validate an exact display, or a clearly bounded best-effort structured view.
+
+    Plain-text revision trees retain exact style and source-position proof. When
+    the inventory contains formula/reference/other structured arguments, the
+    display remains non-authoritative: package safety and every exact subset are
+    verified, while structured portions are reported separately by the workflow.
+    """
 
     if inventory.total <= 0:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "revision display expectations are invalid")
@@ -1434,19 +1485,34 @@ def validate_revision_display(
     highlight_delta = (
         inspection.highlighted_text_characters - clean.inspection.highlighted_text_characters
     )
+    match_inventory = _normalized_match_inventory(inventory)
+    degraded_instances = inventory.degraded_display_macro_instances
     if (
-        blue_delta != inventory.expected_blue_text_characters
-        or strike_delta != inventory.expected_strike_text_characters
-        or highlight_delta != 0
+        degraded_instances < 0
+        or (degraded_instances > 0 and not inventory.display_degradations)
+        or (degraded_instances == 0 and inventory.display_degradations)
     ):
+        raise ContractError(
+            ErrorCode.SCHEMA_INVALID,
+            "revision display expectations do not cover the source inventory",
+        )
+    structured = degraded_instances > 0
+    style_delta_invalid = (
+        blue_delta < match_inventory.expected_blue_text_characters
+        or strike_delta < match_inventory.expected_strike_text_characters
+        if structured
+        else blue_delta != match_inventory.expected_blue_text_characters
+        or strike_delta != match_inventory.expected_strike_text_characters
+    )
+    if style_delta_invalid or highlight_delta != 0:
         raise ContractError(
             ErrorCode.EXPORT_SILENT_LOSS,
             "LaTeX revision display style delta differs from the clean review",
             details={
                 "observed_blue_delta": blue_delta,
-                "expected_blue_delta": inventory.expected_blue_text_characters,
+                "expected_blue_delta": match_inventory.expected_blue_text_characters,
                 "observed_strike_delta": strike_delta,
-                "expected_strike_delta": inventory.expected_strike_text_characters,
+                "expected_strike_delta": match_inventory.expected_strike_text_characters,
                 "observed_highlight_delta": highlight_delta,
             },
         )
@@ -1459,9 +1525,17 @@ def validate_revision_display(
         matched_groups,
     ) = _validate_source_expectations(
         display.paragraphs,
-        inventory,
+        match_inventory,
         match_budget=match_budget,
+        require_full_coverage=not structured,
     )
+    if structured:
+        return replace(
+            inspection,
+            verified_expectations=verified_expectations,
+            verified_blue_text_characters=verified_blue_text_characters,
+            verified_strike_text_characters=verified_strike_text_characters,
+        )
     projection_boundaries = _validate_positional_alignment(
         clean,
         display,

@@ -56,6 +56,16 @@ native dependency license/relink evidence described below is complete.
 
 ### Changed
 
+- Keep the clean review Word available when an existing LaTeX change contains a formula, reference,
+  or formatting that cannot be shown exactly. The app now explains the affected item and makes the
+  separate blue reference Word only when it can do so safely.
+- Improve conversion of common figure layouts, including subfigures, minipage-based figures, and
+  uniquely resolvable graphic filenames, while giving clearer messages for missing, ambiguous, or
+  unsafe project references.
+- Give each Word conversion a bounded full attempt instead of allowing a frozen application to wait
+  indefinitely.
+- Use one root double-click launcher for both source downloads and maintainer workspaces, and add
+  quick/full/release maintenance checks so small changes can be verified faster.
 - Bound Inno Setup compilation to 300 seconds by default, terminate only the verified compiler PID
   on timeout, and retain bounded stdout/stderr diagnostics instead of allowing an indefinite build.
 - Reapply deterministic layout after Microsoft Word field refresh and restore trusted style
@@ -100,10 +110,11 @@ native dependency license/relink evidence described below is complete.
   canonical calls, discovery-bound project-tree `changes.sty`/`trackchanges.sty` shadowing, detected
   `\input@path` overrides, and direct or dynamic canonical redefinitions. This syntactic gate does
   not resolve system/user TEXMF or `TEXINPUTS`, or bind the finally loaded package path, version, or hash.
-- Validate source-derived visible text and strike expectations, clean/display blue-strike-highlight
-  deltas, unique same-paragraph context for every deletion position, non-change DOCX structures, the
-  exact OPC part-name set, and protected style, numbering, font, theme, content-type, and settings
-  parts before publishing either staged Word result. This is not an automatic-writeback SourceMap.
+- Validate the clean review's real images, equations, tables, references, and protected Word
+  structures before publication. Plain-text change displays still require exact text, blue,
+  strikethrough, and unique same-paragraph context. A structured item that cannot be displayed
+  exactly is reported and may cause only the optional display file to be omitted; it does not bypass
+  clean-review integrity checks. This is not an automatic-writeback SourceMap.
 - Keep task deletion and review-copy publication inside the application lock and recheck active jobs
   after native dialogs return; publish review copies atomically without clobbering existing files.
 
@@ -113,11 +124,12 @@ native dependency license/relink evidence described below is complete.
 
 ### Known limitations
 
-- Existing-change rendering is intentionally limited to direct, static, safe inline calls. Dynamic
-  conditionals are skipped, while unsupported structured arguments, a missing accepted static
-  declaration, local package shadowing, detected package-search overrides, canonical redefinitions,
-  ambiguous alias provenance, and non-unique deletion context fail closed. Macro-derived text does not automatically gain an exact
-  LaTeX SourceMap.
+- Existing-change rendering is intentionally limited to direct, static calls. Structured arguments
+  are reported and shown where possible instead of blocking the clean review Word. Dynamic
+  conditionals are skipped, while a missing accepted static declaration, local package shadowing,
+  detected package-search overrides, canonical redefinitions, ambiguous alias provenance, and
+  non-unique plain-text deletion context still fail closed. Macro-derived text does not automatically
+  gain an exact LaTeX SourceMap.
 
 - Empty change payloads such as `\added{}`, `\deleted{}`, or `\replaced{}{}` are inventoried but
   cannot provide display evidence, so display export fails closed with `E_SCHEMA_INVALID`.

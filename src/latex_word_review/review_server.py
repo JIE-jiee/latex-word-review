@@ -18,12 +18,12 @@ from typing import Any, Final, cast
 from urllib.parse import parse_qsl, urlsplit
 
 from latex_word_review.approval import (
-    Decision,
     finalize_approval_set,
     record_decision,
     write_approval_json,
 )
 from latex_word_review.contracts import compute_payload_sha256, validate_contract
+from latex_word_review.domain_values import ACTION_DECISION_VALUE_SET
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.planner import evaluate_patch_eligibility
 
@@ -48,13 +48,7 @@ _FILTER_LABELS: Final[dict[str, str]] = {
     "high-risk": "High risk",
 }
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
-_DECISIONS: Final = {
-    "accepted",
-    "accepted_with_edit",
-    "rejected",
-    "manual",
-    "conflict",
-}
+_DECISIONS = ACTION_DECISION_VALUE_SET
 _SECURITY_HEADERS: Final[tuple[tuple[str, str], ...]] = (
     (
         "Content-Security-Policy",
@@ -409,7 +403,7 @@ class _ReviewState:
                 self.changeset,
                 self.approval,
                 change_id=change_id,
-                decision=cast("Decision", decision),
+                decision=decision,
                 final_text=final_text if decision == "accepted_with_edit" else None,
                 reason=form["reason"] or None,
                 risk_acknowledgement=form["risk_acknowledgement"] or None,

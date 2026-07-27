@@ -110,6 +110,38 @@ def _write_additions_only_project(root: Path) -> None:
     )
 
 
+def _write_structured_revision_project(root: Path) -> None:
+    root.mkdir()
+    (root / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{changes}\n"
+        "\\begin{document}\n\n"
+        "\\section{Scope}\\label{sec:scope}\n\n"
+        "Stable editable sentence.\n\n"
+        "Plain addition: \\added{LWRPLAINSTRUCTURED}.\n\n"
+        "Formula addition: \\added{energy \\(E=mc^2\\)}.\n\n"
+        "Reference replacement: "
+        "\\replaced{see Section~\\ref{sec:scope}}{LWRFORMERREFERENCE}.\n\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _write_tex_dash_revision_project(root: Path) -> None:
+    root.mkdir()
+    (root / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\usepackage{changes}\n"
+        "\\begin{document}\n\n"
+        "Stable editable sentence.\n\n"
+        "Dash addition: \\added{LWR--DASH}.\n\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def _initialize_and_export(origin: Path, run: Path) -> dict[str, Any]:
     initialize_workflow(
         origin,
@@ -240,14 +272,15 @@ def _mutate_display_run(
         if color_node is None:
             color_node = ET.SubElement(properties, f"{W}color")
         color_node.set(f"{W}val", "FF0000")
-    elif mutation == "tab":
+    elif mutation in {"tab", "last_rendered_page_break"}:
         text = next(node for node in run.findall(f"{W}t") if token in (node.text or ""))
         value = text.text or ""
         split = value.index(token) + len(token) // 2
         before, after = value[:split], value[split:]
         text.text = before
         position = list(run).index(text)
-        run.insert(position + 1, ET.Element(f"{W}tab"))
+        marker = "tab" if mutation == "tab" else "lastRenderedPageBreak"
+        run.insert(position + 1, ET.Element(f"{W}{marker}"))
         trailing = ET.Element(f"{W}t")
         trailing.text = after
         run.insert(position + 2, trailing)
@@ -616,6 +649,182 @@ def test_revision_workflow_generates_clean_baseline_and_static_blue_display(
     assert status["counts"]["revision_display_available"] == 1
 
 
+def test_structured_revision_macros_degrade_per_item_without_failing_export(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    run = tmp_path / "run"
+    _write_structured_revision_project(origin)
+
+    result = _initialize_and_export(origin, run)
+
+    review = run / "export/review.docx"
+    display = run / "export/existing-changes-display.docx"
+    assert result["counts"]["revision_macro_instances"] == 3
+    assert result["counts"]["revision_display_available"] == 1
+    assert review.is_file()
+    assert display.is_file()
+    assert not review.stat().st_mode & stat.S_IWUSR
+    assert not display.stat().st_mode & stat.S_IWUSR
+
+    review_root = _document_root(review)
+    review_text = _visible_text(review_root)
+    assert "LWRPLAINSTRUCTURED" in review_text
+    assert "LWRFORMERREFERENCE" not in review_text
+    assert review_root.find(f".//{M}oMath") is not None
+
+    report = read_contract_file(
+        run / "export/objects/export-report.json",
+        expected_schema="ExportReport",
+    )
+    payload = cast("dict[str, Any]", report["payload"])
+    assert payload["status"] == "partial"
+    findings = cast("list[dict[str, Any]]", payload["findings"])
+    structured_findings = [
+        item for item in findings if item["code"] == ErrorCode.REVISION_STRUCTURED_TEXT.value
+    ]
+    assert len(structured_findings) == 2
+    for finding in structured_findings:
+        assert finding["severity"] == "warning"
+        assert finding["recoverable"] is True
+        location = cast("dict[str, Any]", finding["source_location"])
+        assert location["path"] == "main.tex"
+        assert location["start_byte"] < location["end_byte"]
+        assert location["slice_sha256"].startswith("sha256:")
+
+    metrics = cast("dict[str, Any]", payload["metrics"])
+    source_metrics = cast("dict[str, int]", metrics["source"])
+    output_metrics = cast("dict[str, int]", metrics["output"])
+    assert source_metrics["revision_macros_total"] == 3
+    assert source_metrics["revision_display_exact_macro_instances"] == 1
+    assert source_metrics["revision_display_degraded_macro_instances"] == 2
+    assert source_metrics["revision_display_degradation_calls"] == 2
+    assert output_metrics["revision_display_available"] == 1
+    assert (
+        cast("dict[str, Any]", payload["existing_changes_display_docx"])["path"]
+        == "export/existing-changes-display.docx"
+    )
+
+
+def test_tex_dash_sequence_uses_the_visible_unicode_projection(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    run = tmp_path / "run"
+    _write_tex_dash_revision_project(origin)
+
+    result = _initialize_and_export(origin, run)
+
+    assert result["counts"]["revision_display_available"] == 1
+    report = read_contract_file(
+        run / "export/objects/export-report.json",
+        expected_schema="ExportReport",
+    )
+    metrics = cast("dict[str, Any]", cast("dict[str, Any]", report["payload"])["metrics"])
+    source_metrics = cast("dict[str, int]", metrics["source"])
+    output_metrics = cast("dict[str, int]", metrics["output"])
+    assert source_metrics["revision_display_expected_blue_text_characters"] == len("LWR--DASH")
+    assert output_metrics["revision_display_verified_blue_text_characters"] == len("LWR–DASH")
+    assert output_metrics["revision_display_verified_expectations"] == 1
+
+
+def test_structured_display_failure_keeps_clean_review_with_sealed_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    run = tmp_path / "run"
+    _write_structured_revision_project(origin)
+    initialize_workflow(
+        origin,
+        run,
+        main_document="main.tex",
+        confidentiality="public_fixture",
+        generated_at=TIME,
+    )
+
+    def fail_optional_display(*_args: object, **_kwargs: object) -> object:
+        raise ContractError(ErrorCode.EXPORT_SILENT_LOSS, "synthetic display failure")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_write_existing_changes_display",
+        fail_optional_display,
+    )
+    result = export_workflow(
+        run,
+        confidentiality="public_fixture",
+        generated_at=TIME,
+    )
+
+    assert result["counts"]["revision_macro_instances"] == 3
+    assert result["counts"]["revision_display_available"] == 0
+    assert (run / "export/review.docx").is_file()
+    assert not (run / "export/existing-changes-display.docx").exists()
+    report = read_contract_file(
+        run / "export/objects/export-report.json",
+        expected_schema="ExportReport",
+    )
+    payload = cast("dict[str, Any]", report["payload"])
+    assert payload["status"] == "partial"
+    assert payload["existing_changes_display_docx"] is None
+    findings = cast("list[dict[str, Any]]", payload["findings"])
+    display_warnings = [
+        item for item in findings if item["code"] == ErrorCode.EXPORT_DEGRADED.value
+    ]
+    assert len(display_warnings) == 1
+    assert display_warnings[0]["severity"] == "warning"
+    assert display_warnings[0]["recoverable"] is True
+    status = workflow_status(run)
+    assert status["counts"]["revision_display_available"] == 0
+
+    core = workflow_module._load_core(run)
+    payload_without_warning = copy.deepcopy(payload)
+    payload_without_warning["findings"] = [
+        item for item in findings if item["code"] != ErrorCode.EXPORT_DEGRADED.value
+    ]
+    with pytest.raises(ContractError) as raised:
+        workflow_module._validate_existing_changes_display(
+            core,
+            run / "export",
+            payload_without_warning,
+            producer_interface_version=EXPORT_REPORT_INTERFACE_VERSION,
+        )
+    assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
+
+
+def test_exact_only_display_failure_remains_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    run = tmp_path / "run"
+    _write_revision_project(origin)
+    initialize_workflow(
+        origin,
+        run,
+        main_document="main.tex",
+        confidentiality="public_fixture",
+        generated_at=TIME,
+    )
+
+    def fail_required_display(*_args: object, **_kwargs: object) -> object:
+        raise ContractError(ErrorCode.EXPORT_SILENT_LOSS, "synthetic display failure")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_write_existing_changes_display",
+        fail_required_display,
+    )
+    with pytest.raises(ContractError) as raised:
+        export_workflow(
+            run,
+            confidentiality="public_fixture",
+            generated_at=TIME,
+        )
+
+    assert raised.value.code is ErrorCode.EXPORT_SILENT_LOSS
+    assert not (run / "export").exists()
+
+
 @pytest.mark.parametrize(
     ("mutation", "token"),
     [
@@ -649,6 +858,30 @@ def test_display_validator_rejects_unexpected_style_or_visible_barrier(
         )
 
     assert caught.value.code is ErrorCode.EXPORT_SILENT_LOSS
+
+
+def test_display_validator_ignores_zero_width_last_rendered_page_break(
+    revision_run_template: Path,
+    tmp_path: Path,
+) -> None:
+    snapshot = revision_run_template / "snapshot"
+    discovery = discover_project(snapshot, main_document="main.tex")
+    inventory = scan_revision_macros(snapshot, discovery)
+    mutated = tmp_path / "last-rendered-page-break.docx"
+    _mutate_display_run(
+        revision_run_template / "export/existing-changes-display.docx",
+        mutated,
+        token="LWRADDED",
+        mutation="last_rendered_page_break",
+    )
+
+    inspection = validate_revision_display(
+        mutated,
+        inventory=inventory,
+        clean_reference=revision_run_template / "export/review.docx",
+    )
+
+    assert inspection.verified_expectations == inventory.expected_display_expectations
 
 
 @pytest.mark.parametrize("location", ["start", "end", "wrong"])
@@ -1377,6 +1610,66 @@ def test_resealed_display_artifact_id_must_be_digest_derived(
 
     with pytest.raises(ContractError) as raised:
         workflow_status(run)
+
+    assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
+
+
+def test_profile_v2_exact_only_revision_task_remains_fully_readable(
+    revision_run_template: Path,
+    tmp_path: Path,
+) -> None:
+    run = _copy_run(revision_run_template, tmp_path)
+    report_path = run / "export/objects/export-report.json"
+    source_map_path = run / "export/objects/source-map.json"
+    report = read_contract_file(report_path, expected_schema="ExportReport")
+    report_payload = cast("dict[str, Any]", report["payload"])
+    metrics = cast("dict[str, Any]", report_payload["metrics"])
+    source_metrics = cast("dict[str, int]", metrics["source"])
+    source_metrics["revision_macro_inventory_version"] = 2
+    for name in (
+        "revision_display_exact_macro_instances",
+        "revision_display_degraded_macro_instances",
+        "revision_display_degradation_calls",
+    ):
+        source_metrics.pop(name)
+
+    source_map = read_contract_file(source_map_path, expected_schema="SourceMap")
+    source_map_payload = cast("dict[str, Any]", source_map["payload"])
+    source_map_payload["export_report_commitment"] = export_report_commitment(report_payload)
+    resealed_source_map = seal_envelope(source_map)
+    report_payload["source_map_sha256"] = compute_payload_sha256(resealed_source_map)
+    _write_resealed_contract(source_map_path, source_map)
+    _write_resealed_contract(report_path, report)
+
+    status = workflow_status(run)
+
+    assert status["phase"] == "exported"
+    assert status["counts"]["revision_macro_instances"] == 5
+    assert status["counts"]["revision_display_available"] == 1
+
+
+def test_profile_v2_revision_evidence_rejects_current_only_metrics(
+    revision_run_template: Path,
+    tmp_path: Path,
+) -> None:
+    run = _copy_run(revision_run_template, tmp_path)
+    core = workflow_module._load_core(run)
+    report = read_contract_file(
+        run / "export/objects/export-report.json",
+        expected_schema="ExportReport",
+    )
+    payload = copy.deepcopy(cast("dict[str, Any]", report["payload"]))
+    metrics = cast("dict[str, Any]", payload["metrics"])
+    source_metrics = cast("dict[str, int]", metrics["source"])
+    source_metrics["revision_macro_inventory_version"] = 2
+
+    with pytest.raises(ContractError) as raised:
+        workflow_module._validate_existing_changes_display(
+            core,
+            run / "export",
+            payload,
+            producer_interface_version=EXPORT_REPORT_INTERFACE_VERSION,
+        )
 
     assert raised.value.code is ErrorCode.HASH_SOURCE_MISMATCH
 

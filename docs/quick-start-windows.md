@@ -259,10 +259,12 @@ moving branch.
 
 ### Workspace-only frozen candidate
 
-A maintainer workspace may contain `LaTeX Word Review（双击启动）.lnk`, with
-`output\local-windows\Start-Latex-Word-Review.cmd` as its fallback. This ignored local delivery
-keeps the frozen application, review data, and temporary files below `output\local-windows`. It is
-not part of the public source ZIP and does not represent a published GitHub binary.
+A maintainer workspace uses the same root `Start-Latex-Word-Review.cmd` entry as a source ZIP.
+When a structurally complete ignored delivery is present below `output\local-windows`, the root
+launcher delegates to its frozen launcher first; otherwise it automatically uses the source
+bootstrap. `LaTeX Word Review（双击启动）.lnk` may point to this single root entry. The frozen
+delivery keeps its application, review data, and temporary files below `output\local-windows`.
+It is not part of the public source ZIP and does not represent a published GitHub binary.
 
 ### Binary publication status
 

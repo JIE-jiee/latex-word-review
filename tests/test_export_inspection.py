@@ -132,6 +132,7 @@ def test_ambiguous_source_text_creates_no_bookmark(tmp_path: Path) -> None:
         "conflict": 2,
     }
     assert all(finding.code is ErrorCode.MAP_AMBIGUOUS for finding in result.findings)
+    assert len({finding.diagnostic_id for finding in result.findings}) == len(result.findings)
     assert inspect_docx(anchored).bookmarks == 0
 
 

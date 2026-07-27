@@ -20,6 +20,8 @@ from collections.abc import Mapping, Sequence
 from typing import Final, cast
 from urllib.parse import urlsplit
 
+from latex_word_review.domain_values import DECISION_VALUE_SET
+
 __all__ = [
     "APP_STYLESHEET_PATH",
     "SUPPORTED_PAGES",
@@ -64,9 +66,7 @@ _STEP_LABELS: Final[tuple[str, ...]] = (
 _TONES: Final = frozenset({"info", "success", "warning", "danger", "neutral"})
 _CHECK_STATES: Final = frozenset({"ok", "warning", "error", "info"})
 _SAFETY_STATES: Final = frozenset({"safe", "manual", "conflict"})
-_DECISIONS: Final = frozenset(
-    {"pending", "accepted", "accepted_with_edit", "rejected", "manual", "conflict"}
-)
+_DECISIONS = DECISION_VALUE_SET
 _APPROVAL_FILTERS: Final = frozenset({"all", "pending", "safe", "manual", "conflict"})
 _RESULT_STATES: Final = frozenset({"complete", "partial"})
 _FIELD_NAME_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}")

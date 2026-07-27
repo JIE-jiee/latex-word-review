@@ -86,9 +86,12 @@ def test_inventory_counts_active_canonical_and_alias_macros_across_inputs(
         "expected_display_expectations": 5,
         "expected_blue_text_characters": 32,
         "expected_strike_text_characters": 10,
+        "exact_display_macro_instances": 5,
+        "degraded_display_macro_instances": 0,
+        "display_degradation_calls": 0,
     }
     assert inventory.as_metrics() == {
-        "revision_macro_inventory_version": 2,
+        "revision_macro_inventory_version": REVISION_MACRO_PROFILE_VERSION,
         "revision_macro_tex_files": 2,
         "revision_macros_total": 5,
         "revision_macros_added": 1,
@@ -100,6 +103,9 @@ def test_inventory_counts_active_canonical_and_alias_macros_across_inputs(
         "revision_display_expected_expectations": 5,
         "revision_display_expected_blue_text_characters": 32,
         "revision_display_expected_strike_text_characters": 10,
+        "revision_display_exact_macro_instances": 5,
+        "revision_display_degraded_macro_instances": 0,
+        "revision_display_degradation_calls": 0,
     }
     assert len(inventory.display_expectations) == 5
     assert sum(item.macro_instances for item in inventory.display_expectations) == 5
@@ -224,9 +230,10 @@ def test_empty_revision_macros_remain_covered_without_visible_style_claims(
     inventory = _scan(source)
 
     assert inventory.total == 3
-    assert len(inventory.display_expectations) == 3
-    assert all(not expectation.text for expectation in inventory.display_expectations)
-    assert sum(expectation.macro_instances for expectation in inventory.display_expectations) == 3
+    assert not inventory.display_expectations
+    assert len(inventory.display_degradations) == 3
+    assert inventory.exact_display_macro_instances == 0
+    assert inventory.degraded_display_macro_instances == 3
     assert inventory.expected_display_expectations == 0
     assert inventory.expected_blue_text_characters == 0
     assert inventory.expected_strike_text_characters == 0
@@ -1072,24 +1079,30 @@ def test_scanner_allows_plain_unicode_escaped_literals_and_simple_inline_formatt
         r"\replaced{safe new}{old \label{unsafe}}",
     ],
 )
-def test_scanner_fails_closed_for_structured_revision_arguments(
+def test_scanner_records_structured_revision_arguments_as_display_degradations(
     tmp_path: Path,
     body: str,
 ) -> None:
     source = _project(
         tmp_path,
-        f"\\documentclass{{article}}\n\\begin{{document}}\n{body}\n\\end{{document}}\n",
+        f"\\documentclass{{article}}\n\\usepackage{{changes}}\n\\begin{{document}}\n{body}\n\\end{{document}}\n",
     )
     if "\\includegraphics" in body:
         (source / "figure.png").write_bytes(b"synthetic test image")
 
-    with pytest.raises(ContractError) as caught:
-        _scan(source)
+    inventory = _scan(source)
 
-    assert caught.value.code is ErrorCode.SCHEMA_INVALID
-    assert caught.value.violation.details is not None
-    assert caught.value.violation.details["path"] == "main.tex"
-    assert caught.value.violation.details["command"] in {"added", "replaced"}
+    assert inventory.total == 1
+    assert inventory.exact_display_macro_instances == 0
+    assert inventory.degraded_display_macro_instances == 1
+    assert len(inventory.display_expectations) == 0
+    assert len(inventory.display_degradations) == 1
+    degradation = inventory.display_degradations[0]
+    assert degradation.source_path == "main.tex"
+    assert degradation.line == 4
+    assert degradation.command in {"added", "replaced"}
+    assert degradation.reason in {"command", "paragraph", "structured"}
+    assert degradation.source_call_sha256.startswith("sha256:")
 
 
 def test_scanner_allows_a_single_source_line_break_inside_plain_text(tmp_path: Path) -> None:
@@ -1539,6 +1552,23 @@ def test_nonstatic_dynamic_targets_fail_closed_for_canonical_calls(
         "computed_definition",
         "patch_definition",
     }
+
+
+def test_dynamic_computed_name_with_noncanonical_fixed_prefix_is_not_a_conflict(
+    tmp_path: Path,
+) -> None:
+    source = _project(
+        tmp_path,
+        r"""\documentclass{article}
+\usepackage{changes}
+\csxdef{ca_affiliation_\int_use:N \g_stm_aff_ext_int}{body}
+\begin{document}
+\added{content}
+\end{document}
+""",
+    )
+
+    assert _scan(source).canonical_counts.added == 1
 
 
 def test_unrelated_dynamic_tokens_do_not_create_canonical_conflicts(tmp_path: Path) -> None:

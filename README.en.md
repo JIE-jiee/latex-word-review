@@ -23,7 +23,7 @@ LaTeX Word Review provides a controlled bridge. Word is the review interface, wh
 ## What it does
 
 - Creates an editable Word review copy from a LaTeX project.
-- Views change markup already present in LaTeX: recognizes `\added`, `\deleted`, and `\replaced` after a bounded static declaration check, conservatively accepts `\add` and `\delete`, and creates a separate display-only Word file in uniform `0000FF` blue.
+- Shows change markup already present in LaTeX: plain-text `\added`, `\deleted`, and `\replaced` calls receive an exact uniform-blue view; formulas, references, or formatting are reported without preventing the clean review Word from being created.
 - Reads tracked changes and comments from the returned Word file.
 - Lets you review proposed changes before they reach LaTeX.
 - Shows the exact LaTeX diff before writing anything.
@@ -32,6 +32,12 @@ LaTeX Word Review provides a controlled bridge. Word is the review interface, wh
 The original LaTeX project and the returned Word original are not overwritten.
 
 This project does **not** convert the whole modified Word document back into LaTeX.
+
+## What's new
+
+- Change markup already present in LaTeX can now be saved as a separate uniform-blue reference Word file, with deleted text shown in blue strikethrough.
+- A change containing a formula, reference, or formatting no longer blocks the whole clean review Word merely because it cannot be displayed perfectly. The app explains the affected item and shows what it safely can.
+- Everyday use is simpler: there is one root double-click launcher, you can choose where to save the review Word file, and you can remove recent tasks you no longer need.
 
 ## Who it is for
 
@@ -83,41 +89,52 @@ Review the proposed file changes. Only after a second confirmation will the appl
 
 ## If the LaTeX source already contains change markup
 
-The app recognizes `\added{new text}`, `\deleted{old text}`, and
-`\replaced{new text}{old text}` only when a supported static `changes` package declaration is visible,
-no same-named `changes.sty` is found in the discovery-bound project tree, and no detected
-`\input@path` override can redirect package lookup. Bare canonical calls and direct or dynamic
-definitions/redefinitions fail closed before conversion. `\add` and `\delete` use stricter static
-declaration or direct-wrapper rules; a `trackchanges.sty` shadow, conflicting source, or unproven
-source stops conversion instead of being guessed.
+The app can recognize `\added{new text}`, `\deleted{old text}`, and
+`\replaced{new text}{old text}`, with conservative support for `\add` and `\delete` when their source
+can be proven statically.
+
+- **Plain-text changes are exact:** additions are uniform blue, deletions are blue with a
+  single strikethrough, and replacements show the old blue struck text followed by the new blue text.
+- **Changes containing formulas or references are handled item by item:** they no longer block the
+  whole paper merely because they cannot be colored exactly. `review.docx` remains the clean Word
+  file to send. The app explains each affected item, and the reference view is shown where possible.
 
 | File | Purpose |
 |---|---|
 | `review.docx` and its exact editable saved copy | The clean review document. Only a saved copy in this review role may be sent out and imported as the returned Word file |
-| `existing-changes-display.docx` | A display-only view of changes already present in LaTeX: additions are `0000FF` blue; deletions use `0000FF` blue single strikethrough; replacements show the old blue single-struck text immediately followed by the new blue text. This feature adds no highlighting |
+| `existing-changes-display.docx` | An optional reference-only view. Plain-text changes are displayed exactly in blue/blue strikethrough; changes containing formulas or references are explained item by item and shown where possible. This feature adds no highlighting |
 
 The display file does not use native Word Track Changes, must never be imported as a returned review,
-and does not participate in automatic writeback. Before either Word file becomes a formal task result,
-the app checks the source-derived text and blue/strike effects and compares non-change structures such
-as equations, images, tables, and fields. A failed check blocks both results. Blue text alone is not
-used to identify the display file, so ordinary blue tracked edits do not cause a normal review return
-to be rejected. Deleted text must also land at a boundary uniquely proven by neighboring text in the
-same paragraph. Missing or ambiguous context blocks generation instead of guessing where to place the
-strikethrough.
+and does not participate in automatic writeback. Writeback remains limited to exact plain-body edits
+from the returned Word file, approved one by one and written only into a new LaTeX copy. The application
+never replaces LaTeX with a whole Word-to-LaTeX conversion.
 
-This is a bounded syntactic check. It does not run TeX, resolve system or user TEXMF trees or
-`TEXINPUTS`, or prove the path, version, or hash of the package that TeX would ultimately load. Empty
-change payloads such as `\added{}`, `\deleted{}`, or `\replaced{}{}` cannot establish display evidence
-and fail closed with `E_SCHEMA_INVALID`.
+Dangerous or escaping paths, unproven dynamic macros, and proven silent loss of real images,
+equations, tables, or references in the clean review still stop the export. Those are security or
+content-integrity failures, not ordinary display limitations.
 
-The two Word files must also preserve the exact OPC part-name set and protected style, numbering,
-font, theme, content-type, and general-settings parts. Except for explicitly permitted save identifiers
-and the exact display-role marker, drift in those parts blocks publication.
+<details>
+<summary>Static recognition and display-validation details</summary>
 
-This feature does not create a new SourceMap from each LaTeX call to a Word coordinate. A later edit
-may be recorded but routed to manual handling when its LaTeX location cannot be proven. See
-[Export backends and DOCX inspection](docs/reference/export-and-inspection.md) for the alias-provenance,
-scan-boundary, structured-content, artifact-role, and validation contracts.
+Canonical calls require a supported static `changes` package declaration. A same-named
+`changes.sty` in the bound project tree, a detected `\input@path` override, or a direct/dynamic
+definition or redefinition stops conversion. `\add` and `\delete` use stricter static declaration or
+direct-wrapper rules; a `trackchanges.sty` shadow, conflicting source, or unproven source is not
+guessed. This bounded syntactic check does not run TeX or prove which file, version, or hash a system
+or user TEXMF tree or `TEXINPUTS` would ultimately load.
+
+For plain text, source-derived text, blue/strike effects, and unique same-paragraph deletion context
+must match exactly. For structured changes, the exact plain-text subset is still checked, while every
+unproven item is source-bound and reported. If the best-effort display as a whole cannot pass bounded
+validation, the application omits it and retains the integrity-checked clean review. Empty payloads
+such as `\added{}`, `\deleted{}`, or `\replaced{}{}` cannot establish display evidence and stop with
+`E_SCHEMA_INVALID`.
+
+This feature does not create a new SourceMap from each LaTeX call to a Word coordinate. See
+[Export backends and DOCX inspection](docs/reference/export-and-inspection.md) for the complete
+alias-provenance, scan-boundary, structured-content, artifact-role, and validation contracts.
+
+</details>
 
 ## Windows quick start
 
@@ -139,8 +156,9 @@ The current download is a source ZIP with a double-click bootstrap. It is not a 
 - Windows is the only supported platform.
 - The current version is beta software and may still contain conversion, layout, performance, packaging, or edge-case defects.
 - The generated Word file is for readable review, not a pixel-perfect copy of the LaTeX PDF.
-- The change-display Word file is static reference-only formatting, not native Word Track Changes, and cannot be imported. Its sealed digest and embedded role marker participate in import rejection. When change macros are found, both Word files must pass source-derived text, clean/display style-delta, unique same-paragraph deletion-context, and non-revision structure validation in the same staged export before either result is published.
-- Formulas, citations, labels, references, environments, figures, moves, formatting-only edits, comments, and uncertain matches are not automatically rewritten.
+- The change-display Word file is static reference-only formatting, not native Word Track Changes, and cannot be imported. Plain-text changes are exact; structured formulas, references, or formatting are best-effort with item-level warnings, and the display file may be omitted while the clean review remains available.
+- Structured display difficulty alone does not block the paper. Dangerous/escaping paths, unproven dynamic macros, or proven silent loss of images, equations, tables, or references still block export.
+- Formulas, citations, labels, references, environments, figures, moves, formatting-only edits, comments, and uncertain matches are not automatically rewritten. Automatic writeback remains limited to individually approved, exactly located plain-body text.
 - A reviewer who accepts all revisions, turns off Track Changes, removes mapping bookmarks, or returns the wrong review round may cause the workflow to stop rather than guess.
 - The reviewer needs Microsoft Word for the normal review workflow. Some papers with live Word fields also require Word on the application computer during export.
 - Final PDF creation requires a suitable local TeX setup. A marked PDF also requires `latexdiff`.

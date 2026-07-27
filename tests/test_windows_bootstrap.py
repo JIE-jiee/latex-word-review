@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,10 +30,18 @@ def test_double_click_launcher_is_utf8_bilingual_and_bounded() -> None:
     text = data.decode("utf-8")
 
     assert "chcp 65001 >nul" in text
+    assert r"%~dp0output\local-windows" in text
+    assert r"%FROZEN_ROOT%\app\LatexWordReview.exe" in text
+    assert r"%FROZEN_ROOT%\app\latex-word-review.exe" in text
+    assert r"%FROZEN_ROOT%\app\CONTENTS.sha256" in text
+    assert r"%FROZEN_ROOT%\SHA256SUMS.txt" in text
+    assert r"%FROZEN_ROOT%\app\_internal" in text
+    assert 'call "Start-Latex-Word-Review.cmd"' in text
     assert "%~dp0scripts\\bootstrap-windows.ps1" in text
     assert "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" in text
     assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in text
     for code in (
+        "E_LAUNCHER_FROZEN_FAILED",
         "E_LAUNCHER_BOOTSTRAP_FAILED",
         "E_LAUNCHER_FILES_MISSING",
         "E_LAUNCHER_POWERSHELL_MISSING",
@@ -42,8 +51,66 @@ def test_double_click_launcher_is_utf8_bilingual_and_bounded() -> None:
     assert "Startup did not finish" in text
     assert "项目文件不完整" in text
     assert "Project files are incomplete" in text
+    assert text.index('call "Start-Latex-Word-Review.cmd"') < text.index('"%POWERSHELL%" -NoLogo')
     assert "%*" not in text
     assert "Invoke-Expression" not in text
+
+
+def test_double_click_launcher_prefers_complete_local_frozen_app(tmp_path: Path) -> None:
+    launcher = tmp_path / LAUNCHER.name
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    frozen_root = tmp_path / "output" / "local-windows"
+    app_root = frozen_root / "app"
+    internal_root = app_root / "_internal"
+    internal_root.mkdir(parents=True)
+    (app_root / "LatexWordReview.exe").write_bytes(b"gui")
+    (app_root / "latex-word-review.exe").write_bytes(b"cli")
+    (app_root / "CONTENTS.sha256").write_text("manifest", encoding="ascii")
+    (frozen_root / "SHA256SUMS.txt").write_text("sums", encoding="ascii")
+    (frozen_root / LAUNCHER.name).write_bytes(
+        b'@echo off\r\n>"%~dp0frozen-marker.txt" echo frozen\r\nexit /b 0\r\n'
+    )
+
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(launcher)],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert (frozen_root / "frozen-marker.txt").read_text(encoding="ascii").strip() == "frozen"
+    assert not (tmp_path / "bootstrap-marker.txt").exists()
+
+
+def test_double_click_launcher_falls_back_when_local_frozen_app_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / LAUNCHER.name
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    frozen_root = tmp_path / "output" / "local-windows"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / LAUNCHER.name).write_bytes(b"@echo off\r\nexit /b 91\r\n")
+    scripts_root = tmp_path / "scripts"
+    scripts_root.mkdir()
+    (scripts_root / "bootstrap-windows.ps1").write_text(
+        "[System.IO.File]::WriteAllText("
+        '(Join-Path (Split-Path -Parent $PSScriptRoot) "bootstrap-marker.txt"),'
+        ' "source")\n',
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(launcher)],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert (tmp_path / "bootstrap-marker.txt").read_text(encoding="ascii") == "source"
 
 
 def test_bootstrap_pins_and_verifies_upstream_assets() -> None:

@@ -549,7 +549,12 @@ def anchor_source_units(
                     )
                 ),
                 recoverable=True,
-                fingerprint=unit.normalized_text_sha256,
+                fingerprint=sha256_canonical(
+                    {
+                        "unit_id": unit.unit_id,
+                        "normalized_text_sha256": unit.normalized_text_sha256,
+                    }
+                ),
                 unit_id=unit.unit_id,
                 source_location=unit.source_location(),
                 remediation=(
@@ -680,6 +685,8 @@ def export_review_docx(
         source_root,
         discovery,
         image_instances=source_image_instances,
+        revision_view=request.revision_view,
+        revision_aliases=request.revision_aliases,
     )
     source_metrics = {
         "paragraphs": len(units),

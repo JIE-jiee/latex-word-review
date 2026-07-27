@@ -19,28 +19,14 @@ from typing import Any, Final, Literal, cast
 from latex_word_review.__about__ import __version__
 from latex_word_review.canonical import canonical_json, compute_payload_sha256, sha256_canonical
 from latex_word_review.contracts import make_envelope, validate_contract
+from latex_word_review.domain_values import DECISION_VALUE_SET, Decision
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.ids import stable_id
 
-Decision = Literal[
-    "pending",
-    "accepted",
-    "accepted_with_edit",
-    "rejected",
-    "manual",
-    "conflict",
-]
 DecisionSource = Literal["cli", "local_ui", "codex_skill", "imported"]
 BulkOperation = Literal["accept_all_safe", "reject_selected", "mark_manual"]
 
-_DECISIONS: Final = {
-    "pending",
-    "accepted",
-    "accepted_with_edit",
-    "rejected",
-    "manual",
-    "conflict",
-}
+_DECISIONS = DECISION_VALUE_SET
 _DECISION_SOURCES: Final = {"cli", "local_ui", "codex_skill", "imported"}
 _BULK_DECISIONS: Final[dict[str, str]] = {
     "accept_all_safe": "accepted",

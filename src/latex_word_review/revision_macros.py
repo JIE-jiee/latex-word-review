@@ -23,7 +23,7 @@ from latex_word_review.paths import resolve_within
 RevisionMacroMode = Literal["source", "clean", "display"]
 
 REVISION_MACRO_PROFILE_NAME: Final = "bounded-static-revision-macros"
-REVISION_MACRO_PROFILE_VERSION: Final = 2
+REVISION_MACRO_PROFILE_VERSION: Final = 3
 REVISION_MACRO_PROFILE_ID: Final = (
     f"{REVISION_MACRO_PROFILE_NAME}-v{REVISION_MACRO_PROFILE_VERSION}"
 )
@@ -273,6 +273,53 @@ class RevisionDisplayExpectation:
         return sum(len(segment.text) for segment in self.segments if segment.strike)
 
 
+@dataclass(frozen=True, slots=True)
+class RevisionDisplayDegradation:
+    """One source-bound revision call that requires best-effort Word display."""
+
+    source_path: str
+    source_character_offset: int
+    source_character_end: int
+    source_call_sha256: str
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+    command: str
+    reason: Literal["command", "empty", "paragraph", "structured"]
+    token: str
+
+    def __post_init__(self) -> None:
+        digest = self.source_call_sha256.removeprefix("sha256:")
+        if (
+            self.source_character_offset < 0
+            or self.source_character_end <= self.source_character_offset
+            or self.line <= 0
+            or self.column <= 0
+            or self.end_line <= 0
+            or self.end_column <= 0
+            or self.command not in _REVISION_ARITY
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("revision display degradation metadata is invalid")
+
+
+class _RevisionProjectionUnsupported(Exception):
+    """Internal signal: conversion may continue, but exact display proof cannot."""
+
+    def __init__(
+        self,
+        source_character_offset: int,
+        reason: Literal["command", "empty", "paragraph", "structured"],
+        token: str,
+    ) -> None:
+        super().__init__(reason, token)
+        self.source_character_offset = source_character_offset
+        self.reason = reason
+        self.token = token
+
+
 class _ProjectionBuilder:
     """Build the same normalized text/strike stream inspected in Word."""
 
@@ -331,6 +378,7 @@ class RevisionMacroInventory:
     alias_counts: AliasRevisionMacroCounts
     skipped_dynamic_regions: int
     display_expectations: tuple[RevisionDisplayExpectation, ...] = ()
+    display_degradations: tuple[RevisionDisplayDegradation, ...] = ()
     profile_name: str = REVISION_MACRO_PROFILE_NAME
     profile_version: int = REVISION_MACRO_PROFILE_VERSION
 
@@ -350,6 +398,14 @@ class RevisionMacroInventory:
     def expected_display_expectations(self) -> int:
         return sum(bool(expectation.text) for expectation in self.display_expectations)
 
+    @property
+    def exact_display_macro_instances(self) -> int:
+        return sum(expectation.macro_instances for expectation in self.display_expectations)
+
+    @property
+    def degraded_display_macro_instances(self) -> int:
+        return self.total - self.exact_display_macro_instances
+
     def as_dict(self) -> dict[str, object]:
         return {
             "profile": {
@@ -365,6 +421,9 @@ class RevisionMacroInventory:
             "expected_display_expectations": self.expected_display_expectations,
             "expected_blue_text_characters": self.expected_blue_text_characters,
             "expected_strike_text_characters": self.expected_strike_text_characters,
+            "exact_display_macro_instances": self.exact_display_macro_instances,
+            "degraded_display_macro_instances": self.degraded_display_macro_instances,
+            "display_degradation_calls": len(self.display_degradations),
         }
 
     def as_metrics(self) -> dict[str, int]:
@@ -383,6 +442,9 @@ class RevisionMacroInventory:
             "revision_display_expected_strike_text_characters": (
                 self.expected_strike_text_characters
             ),
+            "revision_display_exact_macro_instances": self.exact_display_macro_instances,
+            "revision_display_degraded_macro_instances": self.degraded_display_macro_instances,
+            "revision_display_degradation_calls": len(self.display_degradations),
         }
 
 
@@ -520,6 +582,7 @@ class _FileScanner:
         self._alias_audit_dynamic_depth = 0
         self._alias_audit_group_depth = 0
         self._display_expectations: list[RevisionDisplayExpectation] = []
+        self._display_degradations: list[RevisionDisplayDegradation] = []
 
     def scan(self, *, main_document: bool) -> None:
         self._scan_range(
@@ -980,13 +1043,23 @@ class _FileScanner:
         *,
         target: str | None,
         target_is_static: bool,
+        target_expression: str,
         index: int,
         definition_command: str,
         source_kind: str,
     ) -> None:
-        if target_is_static and target not in _CANONICAL_ARITY:
-            return
-        command_names = (target,) if target in _CANONICAL_ARITY else tuple(_CANONICAL_ARITY)
+        command_names: tuple[str, ...]
+        if target_is_static:
+            if target not in _CANONICAL_ARITY:
+                return
+            command_names = (target,)
+        else:
+            literal_prefix = target_expression.split("\\", 1)[0]
+            command_names = tuple(
+                name for name in _CANONICAL_ARITY if name.startswith(literal_prefix)
+            )
+            if not command_names:
+                return
         for command_name in command_names:
             self._record_canonical_source(
                 command_name=command_name,
@@ -1016,9 +1089,8 @@ class _FileScanner:
         arguments: int,
     ) -> int:
         target_group = self._argument_token(index, limit, label=f"\\{command} target name")
-        target, target_is_static = self._literal_named_control_sequence(
-            self._compact_range(target_group.body_start, target_group.body_end)
-        )
+        target_expression = self._compact_range(target_group.body_start, target_group.body_end)
+        target, target_is_static = self._literal_named_control_sequence(target_expression)
         if target_is_static and target == "input@path":
             self._record_package_search_override(
                 index=target_group.body_start,
@@ -1028,6 +1100,7 @@ class _FileScanner:
         self._record_computed_canonical_target(
             target=target,
             target_is_static=target_is_static,
+            target_expression=target_expression,
             index=target_group.body_start,
             definition_command=command,
             source_kind="computed_definition",
@@ -1048,9 +1121,8 @@ class _FileScanner:
         limit: int,
     ) -> int:
         target_group = self._argument_token(index, limit, label=f"\\{command} target name")
-        target, target_is_static = self._literal_named_control_sequence(
-            self._compact_range(target_group.body_start, target_group.body_end)
-        )
+        target_expression = self._compact_range(target_group.body_start, target_group.body_end)
+        target, target_is_static = self._literal_named_control_sequence(target_expression)
         if target_is_static and target == "input@path":
             self._record_package_search_override(
                 index=target_group.body_start,
@@ -1060,6 +1132,7 @@ class _FileScanner:
         self._record_computed_canonical_target(
             target=target,
             target_is_static=target_is_static,
+            target_expression=target_expression,
             index=target_group.body_start,
             definition_command=command,
             source_kind="computed_definition",
@@ -1089,6 +1162,7 @@ class _FileScanner:
     ) -> int:
         cursor = self._skip_space_and_comments(index, limit)
         target_index = cursor
+        target_expression = ""
         if cursor < limit and self._text[cursor] == "{":
             target_group = self._balanced(
                 cursor,
@@ -1096,12 +1170,12 @@ class _FileScanner:
                 opening="{",
                 label=f"\\{command} target",
             )
-            target, target_is_static = self._literal_command_control_sequence(
-                self._compact_range(target_group.body_start, target_group.body_end)
-            )
+            target_expression = self._compact_range(target_group.body_start, target_group.body_end)
+            target, target_is_static = self._literal_command_control_sequence(target_expression)
             cursor = target_group.end
         elif cursor < limit and self._text[cursor] == "\\":
             target, cursor = _command(self._text, cursor)
+            target_expression = f"\\{target}"
             target_is_static = True
         else:
             target = None
@@ -1116,6 +1190,7 @@ class _FileScanner:
         self._record_computed_canonical_target(
             target=target,
             target_is_static=target_is_static,
+            target_expression=target_expression,
             index=target_index,
             definition_command=command,
             source_kind="patch_definition",
@@ -1164,9 +1239,11 @@ class _FileScanner:
                             definition_command=f"expandafter/{command}",
                             source_kind="computed_definition",
                         )
+                    target_expression = self._compact_range(name_start, name_cursor)
                     self._record_computed_canonical_target(
                         target=target,
                         target_is_static=target_is_literal,
+                        target_expression=target_expression,
                         index=name_start,
                         definition_command=f"expandafter/{command}",
                         source_kind="computed_definition",
@@ -1540,12 +1617,7 @@ class _FileScanner:
                 continue
             if character in "\r\n":
                 if pending_line_break:
-                    self._error(
-                        "revision macro argument contains a paragraph break",
-                        cursor,
-                        command=revision_command,
-                        argument=argument_number,
-                    )
+                    raise _RevisionProjectionUnsupported(cursor, "paragraph", "paragraph-break")
                 pending_line_break = True
                 cursor += (
                     2
@@ -1577,14 +1649,10 @@ class _FileScanner:
                     )
                     cursor = content.end
                     continue
-                self._error(
-                    "revision macro argument contains an unsupported command",
+                raise _RevisionProjectionUnsupported(
                     command_start,
-                    command=revision_command,
-                    argument=argument_number,
-                    unsafe_command=(
-                        f"\\{inline_command}" if inline_command else "trailing backslash"
-                    ),
+                    "command",
+                    f"\\{inline_command}" if inline_command else "trailing-backslash",
                 )
             if character == "{":
                 content = self._balanced(
@@ -1602,14 +1670,15 @@ class _FileScanner:
                 )
                 cursor = content.end
                 continue
-            if character == "}" or character in _STRUCTURAL_TEXT_CHARACTERS:
+            if character == "}":
                 self._error(
-                    "revision macro argument contains unsupported structured content",
+                    "revision macro argument contains an unmatched closing brace",
                     cursor,
                     command=revision_command,
                     argument=argument_number,
-                    unsafe_token=character,
                 )
+            if character in _STRUCTURAL_TEXT_CHARACTERS:
+                raise _RevisionProjectionUnsupported(cursor, "structured", character)
             cursor += 1
 
     @staticmethod
@@ -1725,6 +1794,10 @@ class _FileScanner:
     @property
     def display_expectations(self) -> tuple[RevisionDisplayExpectation, ...]:
         return tuple(self._display_expectations)
+
+    @property
+    def display_degradations(self) -> tuple[RevisionDisplayDegradation, ...]:
+        return tuple(self._display_degradations)
 
     def _project_text_range(
         self,
@@ -2082,12 +2155,17 @@ class _FileScanner:
             arguments.append(group)
             cursor = group.end
 
+        projection_issue: _RevisionProjectionUnsupported | None = None
         for number, group in enumerate(arguments, start=1):
-            self._validate_revision_argument(
-                group,
-                revision_command=command,
-                argument_number=number,
-            )
+            try:
+                self._validate_revision_argument(
+                    group,
+                    revision_command=command,
+                    argument_number=number,
+                )
+            except _RevisionProjectionUnsupported as exc:
+                if projection_issue is None:
+                    projection_issue = exc
 
         after = self._skip_space_and_comments(cursor, limit)
         if after < limit and self._text[after] in "[{":
@@ -2099,31 +2177,57 @@ class _FileScanner:
             )
 
         if nesting == 0:
-            segments, projected_end, macro_instances = self._project_revision_macro(
-                command,
-                index,
-                limit,
-            )
-            if projected_end != cursor:
-                self._error(
-                    "revision display projection did not consume the parsed source call",
-                    command_start,
-                    command=command,
+            call_text = self._text[command_start:cursor]
+            call_sha256 = sha256_bytes(call_text.encode("utf-8"))
+            if projection_issue is None:
+                segments, projected_end, macro_instances = self._project_revision_macro(
+                    command,
+                    index,
+                    limit,
                 )
-            left_context, right_context = self._revision_context(command_start, cursor)
-            self._display_expectations.append(
-                RevisionDisplayExpectation(
-                    source_path=self._path,
-                    source_character_offset=command_start,
-                    source_call_sha256=sha256_bytes(
-                        self._text[command_start:cursor].encode("utf-8")
-                    ),
-                    segments=segments,
-                    macro_instances=macro_instances,
-                    left_context=left_context,
-                    right_context=right_context,
+                if projected_end != cursor:
+                    self._error(
+                        "revision display projection did not consume the parsed source call",
+                        command_start,
+                        command=command,
+                    )
+                if segments:
+                    left_context, right_context = self._revision_context(command_start, cursor)
+                    self._display_expectations.append(
+                        RevisionDisplayExpectation(
+                            source_path=self._path,
+                            source_character_offset=command_start,
+                            source_call_sha256=call_sha256,
+                            segments=segments,
+                            macro_instances=macro_instances,
+                            left_context=left_context,
+                            right_context=right_context,
+                        )
+                    )
+                else:
+                    projection_issue = _RevisionProjectionUnsupported(
+                        command_start,
+                        "empty",
+                        "empty-visible-projection",
+                    )
+            if projection_issue is not None:
+                issue_line, issue_column = self._line_column(command_start)
+                end_line, end_column = self._line_column(cursor)
+                self._display_degradations.append(
+                    RevisionDisplayDegradation(
+                        source_path=self._path,
+                        source_character_offset=command_start,
+                        source_character_end=cursor,
+                        source_call_sha256=call_sha256,
+                        line=issue_line,
+                        column=issue_column,
+                        end_line=end_line,
+                        end_column=end_column,
+                        command=command,
+                        reason=projection_issue.reason,
+                        token=projection_issue.token,
+                    )
                 )
-            )
 
         line, column = self._line_column(command_start)
         call = _AliasCall(
@@ -2496,6 +2600,7 @@ def scan_revision_macros(
     counts = _MutableCounts()
     tex_files = 0
     display_expectations: list[RevisionDisplayExpectation] = []
+    display_degradations: list[RevisionDisplayDegradation] = []
     for source_file in sorted(discovery.files, key=lambda item: item.path):
         if source_file.role not in {"class", "style", "tex"}:
             continue
@@ -2512,14 +2617,20 @@ def scan_revision_macros(
             tex_files += 1
             scanner.scan(main_document=source_file.path == discovery.main_document)
             display_expectations.extend(scanner.display_expectations)
+            display_degradations.extend(scanner.display_degradations)
     _require_discovery_binding(source_root, discovery)
     _validate_alias_sources(counts)
     _validate_canonical_sources(counts)
     covered_instances = sum(expectation.macro_instances for expectation in display_expectations)
-    if covered_instances != counts.total:
+    degraded_instances = counts.total - covered_instances
+    if (
+        degraded_instances < 0
+        or (degraded_instances > 0 and not display_degradations)
+        or (degraded_instances == 0 and display_degradations)
+    ):
         raise ContractError(
             ErrorCode.INTERNAL_INVARIANT,
-            "revision display expectations do not cover the source inventory",
+            "revision display evidence does not cover the source inventory",
         )
     return RevisionMacroInventory(
         source_tree_sha256=discovery.source_tree_sha256,
@@ -2535,6 +2646,7 @@ def scan_revision_macros(
         ),
         skipped_dynamic_regions=counts.skipped_dynamic_regions,
         display_expectations=tuple(display_expectations),
+        display_degradations=tuple(display_degradations),
     )
 
 
@@ -2603,6 +2715,7 @@ __all__ = [
     "REVISION_MACRO_PROFILE_NAME",
     "REVISION_MACRO_PROFILE_VERSION",
     "RevisionDisplayExpectation",
+    "RevisionDisplayDegradation",
     "RevisionDisplaySegment",
     "RevisionMacroInventory",
     "RevisionMacroMode",

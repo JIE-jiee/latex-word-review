@@ -36,8 +36,10 @@ from latex_word_review.app_presenter import (
 )
 from latex_word_review.app_views import APP_STYLESHEET_PATH, render_app_page
 from latex_word_review.application import ApplicationSession
-from latex_word_review.discovery import ProjectDiscovery, discover_project
+from latex_word_review.discovery import ExternalReference, ProjectDiscovery, discover_project
+from latex_word_review.domain_values import ACTION_DECISION_VALUE_SET
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export_limits import DEFAULT_EXPORT_TIMEOUT_SECONDS
 from latex_word_review.jsonio import read_contract_file
 from latex_word_review.paths import resolve_within, validate_relative_path
 from latex_word_review.support_bundle import (
@@ -68,8 +70,9 @@ _MAX_SCANNED_SESSIONS: Final = 1_000
 _MAX_HOME_SUMMARY_BYTES: Final = 4 * 1024 * 1024
 _MAX_DELETE_TREE_ENTRIES: Final = 250_000
 _MAX_PENDING_SUPPORT_DOWNLOADS: Final = 32
+_MAX_PREFLIGHT_REFERENCE_DETAILS: Final = 20
 _SELECTION_TTL_SECONDS: Final = 60 * 60
-_EXPORT_TIMEOUT_SECONDS: Final = 60.0
+
 _SESSION_KEY_RE: Final = re.compile(r"session_[0-9a-f]{32}")
 _SELECTION_KEY_RE: Final = re.compile(r"selection_[0-9a-f]{32}")
 _JOB_KEY_RE: Final = re.compile(r"job_[0-9a-f]{32}")
@@ -80,7 +83,7 @@ _SUPPORT_TOKEN_RE: Final = re.compile(
 )
 _ARTIFACT_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _FILTERS: Final = frozenset({"all", "pending", "safe", "manual", "conflict"})
-_DECISIONS: Final = frozenset({"accepted", "accepted_with_edit", "rejected", "manual", "conflict"})
+_DECISIONS = ACTION_DECISION_VALUE_SET
 _MAX_APPROVAL_PAGE_DIGITS: Final = 9
 _MAX_APPROVAL_PAGE: Final = 10**_MAX_APPROVAL_PAGE_DIGITS - 1
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
@@ -134,6 +137,19 @@ _DOWNLOADABLE_ARTIFACTS: Final = frozenset(
 )
 _SUPPORT_BUILD_IDENTIFIER: Final = f"windows-local-{__version__}"
 
+_PREFLIGHT_REFERENCE_KIND_LABELS: Final[dict[str, str]] = {
+    "bibliography": "参考文献",
+    "class": "文档类",
+    "graphic": "图片",
+    "graphicspath": "图片目录",
+    "include": "包含文件",
+    "input": "输入文件",
+    "other": "项目文件",
+    "package": "宏包",
+}
+_PREFLIGHT_RESOLUTION_REASONS: Final = frozenset({"ambiguous", "missing"})
+_REDACTED_REFERENCE_RE: Final = re.compile(r"unsafe-path:[0-9a-f]{16}")
+
 PathPicker = Callable[[Path | None], Path | None]
 PathOpener = Callable[[Path], None]
 BrowserOpener = Callable[[str], bool]
@@ -142,6 +158,108 @@ BrowserFailureNotifier = Callable[[str], None]
 
 def _default_browser_failure_notifier(url: str) -> None:
     show_browser_open_failure(url)
+
+
+def _bounded_preflight_reference(reference: str) -> str:
+    """Return a relative, bounded UI label without exposing rejected paths."""
+
+    if _REDACTED_REFERENCE_RE.fullmatch(reference) is not None:
+        return reference
+    try:
+        safe = validate_relative_path(reference)
+    except ContractError:
+        fingerprint = hashlib.sha256(reference.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return f"unsafe-path:{fingerprint[:16]}"
+    if len(safe) <= 160:
+        return safe
+    fingerprint = hashlib.sha256(safe.encode("utf-8")).hexdigest()
+    return f"{safe[:128]}…#{fingerprint[:12]}"
+
+
+def _preflight_reference_check(reference: ExternalReference) -> dict[str, str]:
+    display_reference = _bounded_preflight_reference(reference.reference)
+    kind = _PREFLIGHT_REFERENCE_KIND_LABELS.get(reference.kind, "项目文件")
+    if reference.reason == "missing":
+        return {
+            "status": "error",
+            "label": f"缺少{kind}",
+            "message": (
+                f"未找到引用“{display_reference}”。请核对文件名和扩展名，"
+                "或将该文件放回论文项目目录。"
+            ),
+        }
+    if reference.reason == "ambiguous":
+        return {
+            "status": "error",
+            "label": f"{kind}不唯一",
+            "message": (
+                f"引用“{display_reference}”对应多个候选文件。"
+                "请保留唯一文件，或在 LaTeX 中写明唯一的相对文件名。"
+            ),
+        }
+    if reference.reason == "link_escape":
+        suggestion = "请改用论文项目目录内的普通文件，移除符号链接或目录联接。"
+    elif reference.reason == "dynamic_or_unsafe":
+        suggestion = "请把动态命令改为可静态确认的项目内相对文件名。"
+    else:
+        suggestion = "请改用论文项目目录内、不含越界片段的相对文件名。"
+    return {
+        "status": "error",
+        "label": f"不安全的{kind}引用",
+        "message": f"引用“{display_reference}”无法安全限定在论文目录内。{suggestion}",
+    }
+
+
+def _preflight_dependency_checks(discovery: ProjectDiscovery) -> list[dict[str, str]]:
+    references = discovery.external_references
+    if not references:
+        total_bytes = sum(item.size_bytes for item in discovery.files)
+        return [
+            {
+                "status": "ok",
+                "label": "项目依赖",
+                "message": (
+                    f"已核对 {len(discovery.files)} 个文件，共 {total_bytes / 1024:.1f} KiB。"
+                ),
+            }
+        ]
+
+    resolution_count = sum(
+        reference.reason in _PREFLIGHT_RESOLUTION_REASONS for reference in references
+    )
+    unsafe_count = len(references) - resolution_count
+    if unsafe_count and resolution_count:
+        summary = (
+            f"发现 {len(references)} 个待处理依赖：{resolution_count} 个文件缺失或不唯一，"
+            f"{unsafe_count} 个引用涉及动态路径、越界或链接风险。"
+        )
+    elif unsafe_count:
+        summary = (
+            f"发现 {unsafe_count} 个动态、越界或链接引用，程序无法证明它们只会读取论文项目目录。"
+        )
+    else:
+        summary = (
+            f"发现 {resolution_count} 个缺失或无法唯一确定的文件。"
+            "这不表示论文含有越界引用，但程序尚不能确定应读取哪个文件。"
+        )
+    checks = [{"status": "error", "label": "项目依赖", "message": summary}]
+    checks.extend(
+        _preflight_reference_check(reference)
+        for reference in islice(references, _MAX_PREFLIGHT_REFERENCE_DETAILS)
+    )
+    hidden_count = len(references) - _MAX_PREFLIGHT_REFERENCE_DETAILS
+    if hidden_count > 0:
+        checks.append(
+            {
+                "status": "info",
+                "label": "其余依赖",
+                "message": (
+                    f"另有 {hidden_count} 个问题未在此页展开。"
+                    "请先处理以上同类问题，再重新选择论文复检。"
+                ),
+            }
+        )
+    return checks
 
 
 def _open_browser_or_notify(
@@ -754,22 +872,13 @@ class AppState:
     def preflight_view(self, token: str) -> dict[str, object]:
         selected = self.selected_project(token)
         discovery = selected.discovery
-        total_bytes = sum(item.size_bytes for item in discovery.files)
         checks: list[dict[str, str]] = [
             {
                 "status": "ok",
                 "label": "主文件",
                 "message": f"已识别 {discovery.main_document}，将以只读方式创建快照。",
             },
-            {
-                "status": "error" if discovery.blocked else "ok",
-                "label": "项目依赖",
-                "message": (
-                    f"发现 {len(discovery.external_references)} 个越界或不安全引用，必须先处理。"
-                    if discovery.blocked
-                    else f"已核对 {len(discovery.files)} 个文件，共 {total_bytes / 1024:.1f} KiB。"
-                ),
-            },
+            *_preflight_dependency_checks(discovery),
             {
                 "status": "info",
                 "label": "Word 与 PDF",
@@ -1048,7 +1157,7 @@ class AppState:
                 main_document=selected.main_file.name,
             )
             progress.update(50, "正在处理论文图片并生成审阅 Word")
-            status = session.export_review(timeout_s=_EXPORT_TIMEOUT_SECONDS)
+            status = session.export_review(timeout_s=DEFAULT_EXPORT_TIMEOUT_SECONDS)
             return {"session_key": session_key, "status": status}
 
         snapshot = self._submit_session_job(session_key, "export_review", task)
@@ -1066,7 +1175,7 @@ class AppState:
         def task(progress: ProgressReporter) -> Mapping[str, Any]:
             progress.update(20, "正在复核已有任务证据")
             progress.update(50, "正在处理论文图片并生成审阅 Word")
-            status = session.export_review(timeout_s=_EXPORT_TIMEOUT_SECONDS)
+            status = session.export_review(timeout_s=DEFAULT_EXPORT_TIMEOUT_SECONDS)
             return {"session_key": session_key, "status": status}
 
         snapshot = self._submit_session_job(session_key, "export_review", task)

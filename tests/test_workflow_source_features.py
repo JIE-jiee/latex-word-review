@@ -572,6 +572,42 @@ def test_resealed_label_preservation_cannot_invent_missing_final_docx_bookmark()
         )
 
 
+def test_label_output_gap_is_allowed_only_as_explicit_degradation() -> None:
+    payload = _payload()
+    expected_source, expected_output = _independent_metrics(payload)
+    labels = _result(payload, "labels")
+    labels["output_count"] = 0
+    labels["status"] = "degraded"
+    labels["diagnostic_ids"] = ["diag_labels_degraded"]
+    findings = payload["findings"]
+    assert isinstance(findings, list)
+    findings.append(_diagnostic("diag_labels_degraded"))
+
+    _validate(
+        payload,
+        source_interface=SOURCE_MANIFEST_INTERFACE_VERSION,
+        expected_source=expected_source,
+        expected_output=expected_output,
+        expected_feature_output={"labels": 0},
+    )
+
+    labels["status"] = "preserved"
+    labels["diagnostic_ids"] = []
+    payload["findings"] = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding.get("diagnostic_id") != "diag_labels_degraded"
+    ]
+    with pytest.raises(ContractError, match=ErrorCode.EXPORT_SILENT_LOSS.value):
+        _validate(
+            payload,
+            source_interface=SOURCE_MANIFEST_INTERFACE_VERSION,
+            expected_source=expected_source,
+            expected_output=expected_output,
+            expected_feature_output={"labels": 0},
+        )
+
+
 def test_resealed_citations_cannot_be_promoted_to_preserved_with_real_counts() -> None:
     payload = _payload()
     expected_source, expected_output = _independent_metrics(payload)

@@ -164,6 +164,45 @@ def test_untrusted_nested_command_argument_disables_file_v2_islands(
     assert all("VisibleSensitiveToken" not in unit.normalized_text for unit in units)
 
 
+def test_closed_bounded_metadata_does_not_disable_later_inline_islands(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    text = "\n".join(
+        [
+            r"\documentclass{article}",
+            r"\begin{document}",
+            r"\affiliation{organization={Universit\'{e} Example}, country={France}}",
+            r"\maketitle",
+            r"\linenumbers",
+            r"\added{Structured formula $x=1$ remains manual.}",
+            (
+                r"Visible prefix before \cite{private-key} continues at 2.0\% "
+                r"and ends near \figref{fig:private}."
+            ),
+            r"\nolinenumbers",
+            r"\bibliographystyle{plain}",
+            r"\end{document}",
+            "",
+        ]
+    )
+    (source / "main.tex").write_text(text, encoding="utf-8", newline="\n")
+    discovery = discover_project(source, main_document="main.tex")
+
+    units = scan_source_units(source, discovery)
+    normalized = [unit.normalized_text for unit in units]
+
+    assert normalized == [
+        "Visible prefix before",
+        "continues at 2.0",
+        "and ends near",
+    ]
+    assert all("private-key" not in item for item in normalized)
+    assert all("fig:private" not in item for item in normalized)
+    assert all("Structured formula" not in item for item in normalized)
+
+
 def test_multiline_commands_math_and_environments_never_become_source_units(
     tmp_path: Path,
 ) -> None:
