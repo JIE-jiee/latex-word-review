@@ -77,8 +77,7 @@ verified.
 Do not submit security-critical code that you cannot explain. Do not copy private papers, reviewer
 documents, credentials, personal prompt content, or unlicensed training examples into the
 repository. Maintainers may ask for a smaller reproducer, additional tests, or a human explanation
-before reviewing an AI-assisted change. See
-[`docs/development-provenance.md`](docs/development-provenance.md) for the project's own disclosure.
+before reviewing an AI-assisted change.
 
 By intentionally submitting a contribution for inclusion, you agree that it is licensed under
 Apache License 2.0 as described in Section 5 of `LICENSE`, unless you conspicuously designate it

@@ -159,8 +159,6 @@ LaTeX Word Review 是一个只在 Windows 本机运行的论文审阅助手。�
 
 “由 Vibe Coding 产生”是在说明开发过程，不是质量保证。项目仍可能存在未发现的问题，也会在后续版本继续修正。欢迎通过 [Issue](https://github.com/JIE-jiee/latex-word-review/issues) 报告可复现的问题，或通过 [Pull Request](https://github.com/JIE-jiee/latex-word-review/pulls) 改进兼容性、文档、测试和安全性。提交前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-[查看开发来源与 Vibe Coding 记录](docs/development-provenance.md)
-
 ## 项目状态
 
 [![CI](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml/badge.svg)](https://github.com/JIE-jiee/latex-word-review/actions/workflows/ci.yml)

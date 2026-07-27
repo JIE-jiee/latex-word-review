@@ -632,7 +632,6 @@ exact 普通正文候选，绝不覆盖已有决定。公式、结构、move、�
 继续阅读：
 
 - [English Windows Quick Start](quick-start-windows.md)
-- [开发来源与 Vibe Coding 记录](development-provenance.md)
 - [Windows 产品体验 ADR](adr/0003-windows-product-experience.md)
 - [安全威胁模型](security/threat-model.md)
 - [计划与安全应用](reference/plan-and-apply.md)

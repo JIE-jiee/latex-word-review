@@ -45,9 +45,6 @@ native dependency license/relink evidence described below is complete.
   decisions, security material, and maintainer evidence.
 - Add a detailed Chinese Windows guide covering installation, the two approval gates, PDF-page
   previews, verification, ledger creation, delivery staging, and offline audit-bundle verification.
-- Add a public development-provenance record that discloses the maintainer-driven Vibe Coding and
-  OpenAI Codex collaboration, separates human and AI responsibilities, and states the evidence and
-  limitations behind the project.
 - Add a loopback-only Chinese Windows application that turns the full lifecycle into four resumable
   steps, uses native file pickers and background jobs, reconstructs sealed state after restart, and
   keeps both approval gates under direct human control.
@@ -141,7 +138,9 @@ native dependency license/relink evidence described below is complete.
 ### Removed
 
 - Remove superseded implementation plans and historical decision snapshots after preserving their
-  current contracts in ADR, compatibility, reference, release, and provenance documentation.
+  current contracts in ADR, compatibility, reference, and release documentation.
+- Remove the standalone development-process page and its navigation links. The short Vibe Coding
+  disclosure and contribution invitation remain in the project home pages.
 
 ## [0.1.0b2] - 2026-07-17
 

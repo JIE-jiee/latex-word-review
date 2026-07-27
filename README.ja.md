@@ -168,8 +168,6 @@ Python、Git、uv を事前に用意する必要はありません。管理者�
 
 メンテナーが要件、方向、安全境界、公開の判断を担い、AI コーディング Agent が調査、実装、テスト、文書作成を支援しています。この開発方法を公開しているのは、AI を使ったことを品質保証の代わりにしないためです。現在、独立した第三者監査を受けた安定製品であるとは表明していません。
 
-経緯と分担は[開発経緯と Vibe Coding の記録](docs/development-provenance.md)にまとめています。
-
 ## 不具合報告と参加
 
 このプロジェクトは更新を続けています。再現可能な不具合は、個人情報や未公開論文を取り除いたうえで [GitHub Issues](https://github.com/JIE-jiee/latex-word-review/issues) へ投稿してください。コード、テスト、文書、互換性、安全性の改善は [Pull Requests](https://github.com/JIE-jiee/latex-word-review/pulls) で受け付けています。

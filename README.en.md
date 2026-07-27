@@ -232,7 +232,6 @@ Technical references:
 - [Windows product design](docs/adr/0003-windows-product-experience.md)
 - [Security threat model](docs/security/threat-model.md)
 - [Windows binary license audit](docs/reviews/windows-binary-license-audit-2026-07.md)
-- [Development provenance](docs/development-provenance.md)
 - [Contributing](CONTRIBUTING.md) and [Security policy](SECURITY.md)
 - [Apache License 2.0](LICENSE) and [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 

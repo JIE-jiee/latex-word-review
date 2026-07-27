@@ -8,8 +8,6 @@
 - [Windows 完整使用指南](guide.zh-CN.md)：Windows 本地安装、完整工作流、双 Word 文件分工与故障处理。
 - [English Windows Quick Start](quick-start-windows.md)：最短启动路径、双文件交接和返回稿选择。
 - [公开 E0 教程](tutorial-public-e0.md)：用自制 fixture 重跑核心或完整闭环。
-- [开发来源与 Vibe Coding 记录](development-provenance.md)：维护者与 AI 的分工、责任和验证边界。
-
 ## 工作流与公共接口
 
 - [高级 CLI 与运行目录](reference/cli.md)
