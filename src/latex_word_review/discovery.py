@@ -582,6 +582,56 @@ def _candidate_paths(
     return tuple(dict.fromkeys(candidates))
 
 
+def _explicit_graphic_extension_fallback_paths(
+    reference: str,
+    *,
+    graphic_directories: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return bounded same-root fallbacks for one missing explicit graphic.
+
+    Some real projects contain a duplicated final extension, for example a
+    source reference ``figure.pdf`` paired with ``figure.pdf.pdf``.  TeX's
+    graphics lookup can still resolve that shape.  We mirror only the static
+    local extension search here, and only after the exact explicit path did not
+    exist.  Normal containment, link and ambiguity checks remain authoritative.
+    """
+
+    if PurePosixPath(reference).suffix.casefold() not in _GRAPHIC_EXTENSIONS:
+        return ()
+    bases = ("", *graphic_directories)
+    candidates: list[str] = []
+    for search_base in bases:
+        for suffix in _GRAPHIC_EXTENSIONS:
+            referenced_path = f"{reference}{suffix}"
+            candidate = f"{search_base}/{referenced_path}" if search_base else referenced_path
+            candidates.append(validate_relative_path(candidate))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _existing_dependency_matches(
+    state: _DiscoveryState,
+    *,
+    candidates: tuple[str, ...],
+    kind: str,
+) -> tuple[str, ...] | None:
+    """Resolve candidate files, returning ``None`` after a link safety failure."""
+
+    matches: list[str] = []
+    for candidate in candidates:
+        try:
+            actual = _casefold_existing_file(state, candidate)
+        except ContractError as exc:
+            if exc.code is not ErrorCode.PATH_LINK_ESCAPE:
+                raise
+            state.external.add(
+                ExternalReference(_safe_reference_label(candidate), kind, "link_escape")
+            )
+            return None
+        if actual is not None:
+            matches.append(actual)
+    return tuple(dict.fromkeys(matches))
+
+
 def _resolve_dependency(
     state: _DiscoveryState,
     *,
@@ -614,19 +664,37 @@ def _resolve_dependency(
         )
         return None
 
-    matches: list[str] = []
-    for candidate in candidates:
+    resolved_matches = _existing_dependency_matches(
+        state,
+        candidates=candidates,
+        kind=kind,
+    )
+    if resolved_matches is None:
+        return None
+    matches = resolved_matches
+    if kind == "graphic" and not matches:
         try:
-            actual = _casefold_existing_file(state, candidate)
-        except ContractError as exc:
-            if exc.code is not ErrorCode.PATH_LINK_ESCAPE:
-                raise
+            fallbacks = _explicit_graphic_extension_fallback_paths(
+                normalized_reference,
+                graphic_directories=graphic_directories,
+            )
+        except ContractError:
             state.external.add(
-                ExternalReference(_safe_reference_label(candidate), kind, "link_escape")
+                ExternalReference(
+                    _safe_reference_label(normalized_reference),
+                    kind,
+                    "path_rejected",
+                )
             )
             return None
-        if actual is not None:
-            matches.append(actual)
+        fallback_matches = _existing_dependency_matches(
+            state,
+            candidates=fallbacks,
+            kind=kind,
+        )
+        if fallback_matches is None:
+            return None
+        matches = fallback_matches
     if len(matches) == 1:
         return matches[0]
     reason = "missing" if not matches else "ambiguous"

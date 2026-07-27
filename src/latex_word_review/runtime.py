@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import BinaryIO
 
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export_limits import (
+    DEFAULT_EXPORT_TIMEOUT_SECONDS,
+    validate_export_timeout,
+)
 from latex_word_review.frozen_runtime import internal_worker_command
 from latex_word_review.hashing import digest_bytes
 
@@ -517,23 +521,17 @@ def _run_command_with_environment(
         _close_windows_job(windows_job)
 
 
-def run_command(
+def _run_validated_command(
     executable: str | Path,
     arguments: Sequence[str],
     *,
     cwd: Path,
-    timeout_s: float = 5.0,
-    max_output_bytes: int = 1024 * 1024,
-    environment: Mapping[str, str] | None = None,
+    timeout_s: float,
+    max_output_bytes: int,
+    environment: Mapping[str, str] | None,
 ) -> CommandResult:
-    """Run one command without a shell and enforce time/output limits.
+    """Execute one command after its caller-specific timeout validation."""
 
-    The executable and cwd are intentionally absent from the returned object so
-    callers cannot accidentally serialize personal installation paths.
-    """
-
-    if not 0 < timeout_s <= 60:
-        raise ContractError(ErrorCode.SCHEMA_INVALID, "probe timeout must be in (0, 60]")
     if not 0 < max_output_bytes <= 16 * 1024 * 1024:
         raise ContractError(ErrorCode.SCHEMA_INVALID, "probe output limit is invalid")
     try:
@@ -571,4 +569,58 @@ def run_command(
         )
 
 
-__all__ = ["CommandResult", "minimal_environment", "run_command"]
+def run_command(
+    executable: str | Path,
+    arguments: Sequence[str],
+    *,
+    cwd: Path,
+    timeout_s: float = 5.0,
+    max_output_bytes: int = 1024 * 1024,
+    environment: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run one non-conversion command with the existing 60-second hard limit.
+
+    The executable and cwd are intentionally absent from the returned object so
+    callers cannot accidentally serialize personal installation paths.
+    """
+
+    if not 0 < timeout_s <= 60:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "probe timeout must be in (0, 60]")
+    return _run_validated_command(
+        executable,
+        arguments,
+        cwd=cwd,
+        timeout_s=timeout_s,
+        max_output_bytes=max_output_bytes,
+        environment=environment,
+    )
+
+
+def run_conversion_command(
+    executable: str | Path,
+    arguments: Sequence[str],
+    *,
+    cwd: Path,
+    timeout_s: float = DEFAULT_EXPORT_TIMEOUT_SECONDS,
+    max_output_bytes: int = 1024 * 1024,
+    environment: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run one LaTeX-to-Word conversion with the export-specific hard limit."""
+
+    validated_timeout = validate_export_timeout(timeout_s)
+    return _run_validated_command(
+        executable,
+        arguments,
+        cwd=cwd,
+        timeout_s=validated_timeout,
+        max_output_bytes=max_output_bytes,
+        environment=environment,
+    )
+
+
+__all__ = [
+    "CommandResult",
+    "minimal_environment",
+    "run_command",
+    "run_conversion_command",
+]

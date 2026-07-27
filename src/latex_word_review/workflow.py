@@ -28,13 +28,19 @@ from latex_word_review.backends import (
     PandocBackend,
     Tex2WordBackend,
 )
-from latex_word_review.canonical import compute_payload_sha256
+from latex_word_review.canonical import compute_payload_sha256, sha256_bytes, sha256_canonical
 from latex_word_review.contracts import load_contract_json
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.docx_reader import DocxPackage, read_docx_package
+from latex_word_review.domain_values import Confidentiality
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import ExportBindings, ExportOutcome, export_review_docx
+from latex_word_review.export_limits import (
+    DEFAULT_EXPORT_TIMEOUT_SECONDS,
+    validate_export_timeout,
+)
 from latex_word_review.export_models import (
+    ExportFinding,
     ExportReport,
     ReviewDocxArtifact,
     export_report_commitment,
@@ -59,6 +65,30 @@ from latex_word_review.revision_display import (
 )
 from latex_word_review.revision_macros import RevisionMacroInventory, scan_revision_macros
 from latex_word_review.revisions import build_changeset
+from latex_word_review.run_layout import (
+    EXISTING_CHANGES_DISPLAY_DOCX as _EXPORT_CHANGES_DISPLAY,
+)
+from latex_word_review.run_layout import (
+    EXPORT_DIR as _EXPORT,
+)
+from latex_word_review.run_layout import (
+    EXPORT_IMAGE_OVERLAY_DIR as _EXPORT_IMAGE_OVERLAY,
+)
+from latex_word_review.run_layout import (
+    RECEIVE_DIR as _RECEIVE,
+)
+from latex_word_review.run_layout import (
+    REVIEW_DOCX as _EXPORT_DOCX,
+)
+from latex_word_review.run_layout import (
+    SNAPSHOT_DIR as _SNAPSHOT,
+)
+from latex_word_review.run_layout import (
+    SOURCE_MANIFEST as _SOURCE_MANIFEST,
+)
+from latex_word_review.run_layout import (
+    STAGING_DIR as _STAGING,
+)
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
 from latex_word_review.source_features import (
     INVENTORY_PROFILE_VERSION,
@@ -82,22 +112,18 @@ from latex_word_review.workflow_objects import (
     utc_now,
 )
 
-Confidentiality = Literal["public_fixture", "local_private", "derived_private"]
 BackendName = Literal["tex2word", "pandoc"]
 
-_SOURCE_MANIFEST = "objects/source-manifest.json"
-_SNAPSHOT = "snapshot"
-_EXPORT = "export"
-_EXPORT_DOCX = "export/review.docx"
-_EXPORT_CHANGES_DISPLAY = "export/existing-changes-display.docx"
-_EXPORT_OBJECTS = "export/objects"
-_EXPORT_IMAGE_OVERLAY = "export/review.docx.image-overlay"
 _EXPORT_IMAGE_MANIFEST = f"{_EXPORT_IMAGE_OVERLAY}/{IMAGE_OVERLAY_MANIFEST}"
-_RECEIVE = "receive"
-_RETURNED_ARCHIVE = "receive/original"
-_READER = "receive/revision-reader.json"
-_CHANGESET = "receive/changeset.json"
-_STAGING = ".lwr-staging"
+_OPTIONAL_REVISION_DISPLAY_DEGRADED_MESSAGE = (
+    "the clean review Word was generated, but the optional blue "
+    "LaTeX-changes view could not be safely published"
+)
+_OPTIONAL_REVISION_DISPLAY_DEGRADED_REMEDIATION = (
+    "continue with review.docx; regenerate the optional display after "
+    "checking the structured revision items"
+)
+_PREVIOUS_REVISION_MACRO_PROFILE_VERSION = 2
 _MAX_DOCX_BYTES = 128 * 1024 * 1024
 _MAX_CONTRACT_BYTES = 16 * 1024 * 1024
 _WORD_SETTINGS_PART = "word/settings.xml"
@@ -841,6 +867,81 @@ def _revision_aliases_for_inventory(
     return tuple(aliases)
 
 
+def _revision_display_degradation_findings(
+    core: _CoreState,
+    inventory: RevisionMacroInventory,
+) -> tuple[ExportFinding, ...]:
+    """Bind each best-effort display item to its immutable snapshot slice."""
+
+    source_files = {item.path: item for item in core.discovery.files}
+    texts: dict[str, str] = {}
+    findings: list[ExportFinding] = []
+    for item in inventory.display_degradations:
+        source_file = source_files.get(item.source_path)
+        if source_file is None or source_file.encoding != "utf-8":
+            raise ContractError(
+                ErrorCode.INTERNAL_INVARIANT,
+                "structured revision evidence is not bound to one UTF-8 source file",
+            )
+        text = texts.get(item.source_path)
+        if text is None:
+            data = read_stable_bytes(
+                resolve_within(core.root / _SNAPSHOT, item.source_path),
+                max_bytes=max(1, source_file.size_bytes),
+            )
+            if len(data) != source_file.size_bytes:
+                raise ContractError(
+                    ErrorCode.HASH_SOURCE_MISMATCH,
+                    "structured revision source size changed",
+                )
+            text = data.decode("utf-8", errors="strict")
+            texts[item.source_path] = text
+        call = text[item.source_character_offset : item.source_character_end]
+        call_bytes = call.encode("utf-8")
+        if sha256_bytes(call_bytes) != item.source_call_sha256:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "structured revision source slice changed",
+            )
+        start_byte = len(text[: item.source_character_offset].encode("utf-8"))
+        end_byte = start_byte + len(call_bytes)
+        findings.append(
+            ExportFinding(
+                code=ErrorCode.REVISION_STRUCTURED_TEXT,
+                severity="warning",
+                phase="export",
+                message=(
+                    "a LaTeX revision cannot be represented as one exact visible "
+                    "plain-text change (for example, it contains structured content "
+                    "or no visible text); the clean review is authoritative and the "
+                    "blue changes view is best-effort for this item"
+                ),
+                recoverable=True,
+                fingerprint=sha256_canonical(
+                    {
+                        "path": item.source_path,
+                        "offset": item.source_character_offset,
+                        "call": item.source_call_sha256,
+                    }
+                ),
+                source_location={
+                    "path": item.source_path,
+                    "start_byte": start_byte,
+                    "end_byte": end_byte,
+                    "slice_sha256": item.source_call_sha256,
+                    "encoding": "utf-8",
+                    "newline": source_file.newline or "none",
+                    "start_line": item.line,
+                    "end_line": item.end_line,
+                    "start_column": item.column,
+                    "end_column": item.end_column,
+                },
+                remediation=("inspect the blue static view, but edit and return only review.docx"),
+            )
+        )
+    return tuple(findings)
+
+
 def _write_existing_changes_display(
     core: _CoreState,
     payload: Path,
@@ -858,6 +959,7 @@ def _write_existing_changes_display(
             ErrorCode.INTERNAL_INVARIANT,
             "revision display requested without revision macros",
         )
+    structured = inventory.degraded_display_macro_instances > 0
     overlay = outcome.image_overlay
     if overlay is None or not overlay.ready:
         raise ContractError(
@@ -914,7 +1016,7 @@ def _write_existing_changes_display(
                 "LaTeX revision display backend did not produce a DOCX",
                 details=details,
             )
-        if result.findings != outcome.backend_result.findings:
+        if not structured and result.findings != outcome.backend_result.findings:
             raise ContractError(
                 ErrorCode.EXPORT_SILENT_LOSS,
                 "LaTeX revision display backend findings differ from the clean review",
@@ -925,15 +1027,24 @@ def _write_existing_changes_display(
                 },
             )
         native_parity_keys = (
-            "error_count",
-            "math_image",
-            "math_omml",
-            "math_raw",
-            "reference_loaded",
-            "reference_profile",
-            "reference_sha256",
-            "warning_count",
-            "warning_constructs",
+            (
+                "error_count",
+                "reference_loaded",
+                "reference_profile",
+                "reference_sha256",
+            )
+            if structured
+            else (
+                "error_count",
+                "math_image",
+                "math_omml",
+                "math_raw",
+                "reference_loaded",
+                "reference_profile",
+                "reference_sha256",
+                "warning_count",
+                "warning_constructs",
+            )
         )
         if any(
             result.native_report.get(key) != outcome.backend_result.native_report.get(key)
@@ -978,7 +1089,7 @@ def _write_existing_changes_display(
             "relationships",
             "external_relationships",
         )
-        for metric in structural_metrics:
+        for metric in () if structured else structural_metrics:
             clean_value = getattr(clean_independent, metric)
             display_value = getattr(independent, metric)
             if clean_value != display_value:
@@ -993,7 +1104,7 @@ def _write_existing_changes_display(
                 )
         clean_package = read_docx_package(outcome.output_path)
         display_package = read_docx_package(marked_docx)
-        if clean_package.story_parts != display_package.story_parts:
+        if not structured and clean_package.story_parts != display_package.story_parts:
             raise ContractError(
                 ErrorCode.EXPORT_SILENT_LOSS,
                 "LaTeX revision display story parts differ from the clean review",
@@ -1046,8 +1157,7 @@ def _write_export_objects(
     confidentiality: Confidentiality,
     generated_at: str | None,
 ) -> dict[str, int]:
-    if timeout_s <= 0 or timeout_s > 3600:
-        raise ContractError(ErrorCode.SCHEMA_INVALID, "export timeout must be in (0, 3600]")
+    validate_export_timeout(timeout_s)
     objects = payload / "objects"
     objects.mkdir()
     output = payload / "review.docx"
@@ -1105,26 +1215,59 @@ def _write_export_objects(
         )
     display_artifact: ReviewDocxArtifact | None = None
     display_metrics: dict[str, int] = {"revision_display_available": 0}
+    display_findings = _revision_display_degradation_findings(core, revision_inventory)
     if revision_inventory.total:
-        display_artifact, observed_display_metrics = _write_existing_changes_display(
-            core,
-            payload,
-            backend=backend,
-            outcome=outcome,
-            inventory=revision_inventory,
-            timeout_s=timeout_s,
-            confidentiality=confidentiality,
-        )
-        display_metrics = {
-            "revision_display_available": 1,
-            **observed_display_metrics,
-        }
+        try:
+            display_artifact, observed_display_metrics = _write_existing_changes_display(
+                core,
+                payload,
+                backend=backend,
+                outcome=outcome,
+                inventory=revision_inventory,
+                timeout_s=timeout_s,
+                confidentiality=confidentiality,
+            )
+        except ContractError as exc:
+            recoverable_display_codes = {
+                ErrorCode.BACKEND_CAPABILITY_MISSING,
+                ErrorCode.BACKEND_FAILED,
+                ErrorCode.EXPORT_SILENT_LOSS,
+                ErrorCode.REVISION_VIEW_UNSUPPORTED,
+            }
+            if (
+                not revision_inventory.degraded_display_macro_instances
+                or exc.code not in recoverable_display_codes
+            ):
+                raise
+            display_findings += (
+                ExportFinding(
+                    code=ErrorCode.EXPORT_DEGRADED,
+                    severity="warning",
+                    phase="export",
+                    message=_OPTIONAL_REVISION_DISPLAY_DEGRADED_MESSAGE,
+                    recoverable=True,
+                    fingerprint=sha256_canonical(
+                        {
+                            "source_tree": revision_inventory.source_tree_sha256,
+                            "display_error": exc.code.value,
+                        }
+                    ),
+                    remediation=_OPTIONAL_REVISION_DISPLAY_DEGRADED_REMEDIATION,
+                ),
+            )
+        else:
+            display_metrics = {
+                "revision_display_available": 1,
+                **observed_display_metrics,
+            }
     outcome = replace(
         outcome,
         report=replace(
             outcome.report,
+            status="partial" if display_findings else outcome.report.status,
             source_map_sha256=None,
             existing_changes_display_docx=display_artifact,
+            findings=outcome.report.findings + display_findings,
             source_metrics={
                 **outcome.report.source_metrics,
                 **revision_inventory.as_metrics(),
@@ -1246,7 +1389,7 @@ def export_workflow(
     run_root: Path,
     *,
     backend: BackendName = "tex2word",
-    timeout_s: float = 60.0,
+    timeout_s: float = DEFAULT_EXPORT_TIMEOUT_SECONDS,
     confidentiality: Confidentiality = "derived_private",
     generated_at: str | None = None,
 ) -> dict[str, Any]:
@@ -1430,7 +1573,41 @@ def _validate_existing_changes_display(
     output_metrics = metrics.get("output")
     if not isinstance(source_metrics, dict) or not isinstance(output_metrics, dict):
         raise ContractError(ErrorCode.HASH_SOURCE_MISMATCH, "export metric groups are invalid")
-    for name, expected in revision_inventory.as_metrics().items():
+    current_revision_metrics = revision_inventory.as_metrics()
+    sealed_profile_version = source_metrics.get("revision_macro_inventory_version")
+    if not isinstance(sealed_profile_version, int) or isinstance(sealed_profile_version, bool):
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision macro inventory version is invalid",
+        )
+    expected_revision_metrics = dict(current_revision_metrics)
+    if sealed_profile_version == _PREVIOUS_REVISION_MACRO_PROFILE_VERSION:
+        if revision_inventory.degraded_display_macro_instances:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy revision macro evidence cannot represent structured display items",
+            )
+        expected_revision_metrics["revision_macro_inventory_version"] = (
+            _PREVIOUS_REVISION_MACRO_PROFILE_VERSION
+        )
+        current_only_metrics = {
+            "revision_display_exact_macro_instances",
+            "revision_display_degraded_macro_instances",
+            "revision_display_degradation_calls",
+        }
+        for name in current_only_metrics:
+            expected_revision_metrics.pop(name)
+        if current_only_metrics.intersection(source_metrics):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "legacy revision macro evidence contains current-only metrics",
+            )
+    elif sealed_profile_version != revision_inventory.profile_version:
+        raise ContractError(
+            ErrorCode.HASH_SOURCE_MISMATCH,
+            "revision macro inventory version is unsupported",
+        )
+    for name, expected in expected_revision_metrics.items():
         value = source_metrics.get(name)
         if value != expected or isinstance(value, bool):
             raise ContractError(
@@ -1440,17 +1617,45 @@ def _validate_existing_changes_display(
             )
 
     artifact = report_payload.get("existing_changes_display_docx")
-    expected_available = int(revision_inventory.total > 0)
-    if output_metrics.get("revision_display_available") != expected_available:
+    available = output_metrics.get("revision_display_available")
+    if not isinstance(available, int) or isinstance(available, bool) or available not in {0, 1}:
         raise ContractError(
             ErrorCode.HASH_SOURCE_MISMATCH,
-            "revision display availability metric differs",
+            "revision display availability metric is invalid",
         )
     if not revision_inventory.total:
-        if artifact is not None or display_exists:
+        if available != 0 or artifact is not None or display_exists:
             raise ContractError(
                 ErrorCode.HASH_SOURCE_MISMATCH,
                 "revision display exists without supported source macros",
+            )
+        return revision_inventory, {"revision_display_available": 0}, None
+
+    if available == 0:
+        if artifact is not None or display_exists:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "unavailable revision display has an artifact",
+            )
+        if not revision_inventory.degraded_display_macro_instances:
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "exact-only revision macros require a sealed display artifact",
+            )
+        findings = report_payload.get("findings")
+        if not isinstance(findings, list) or not any(
+            isinstance(finding, dict)
+            and finding.get("code") == ErrorCode.EXPORT_DEGRADED.value
+            and finding.get("severity") == "warning"
+            and finding.get("phase") == "export"
+            and finding.get("recoverable") is True
+            and finding.get("message") == _OPTIONAL_REVISION_DISPLAY_DEGRADED_MESSAGE
+            and finding.get("remediation") == _OPTIONAL_REVISION_DISPLAY_DEGRADED_REMEDIATION
+            for finding in findings
+        ):
+            raise ContractError(
+                ErrorCode.HASH_SOURCE_MISMATCH,
+                "structured revision display degradation warning is missing",
             )
         return revision_inventory, {"revision_display_available": 0}, None
 
@@ -1610,6 +1815,14 @@ def _validate_export(
         core.root / _SNAPSHOT,
         core.discovery,
         image_instances=source_image_instances,
+        revision_view=(
+            "clean" if revision_inventory is not None and revision_inventory.total else "source"
+        ),
+        revision_aliases=(
+            ()
+            if revision_inventory is None or not revision_inventory.total
+            else _revision_aliases_for_inventory(revision_inventory)
+        ),
     )
     tool = cast("dict[str, Any]", capabilities_payload["tool"])
     label_output_count = independently_observed_label_count(
@@ -1913,7 +2126,11 @@ def _validate_source_feature_report_payload(
                 details={"feature": feature},
             )
         expected_output_count = expected_output_counts.get(feature)
-        if expected_output_count is not None and expected_output_count < expected_source_count:
+        if (
+            feature != "labels"
+            and expected_output_count is not None
+            and expected_output_count < expected_source_count
+        ):
             raise ContractError(
                 ErrorCode.EXPORT_SILENT_LOSS,
                 "source feature output count is lower than the inventory count",

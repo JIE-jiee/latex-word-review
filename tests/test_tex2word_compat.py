@@ -10,8 +10,10 @@ from latex_word_review.image_overlay import (
     build_image_overlay,
 )
 from latex_word_review.tex2word_compat import (
+    normalize_tex2word_manual_figure_minipage_body,
     rewrite_tex2word_front_matter,
     rewrite_tex2word_layout_controls,
+    rewrite_tex2word_subcaptionboxes,
 )
 
 PROFILE = "tex2word-1.0.5-review-compat-v3"
@@ -258,3 +260,72 @@ def test_unbalanced_layout_control_is_left_unchanged() -> None:
 
     assert rewritten == source
     assert evidence == []
+
+
+def test_direct_static_subcaptionbox_is_normalized_without_nesting() -> None:
+    source = r"""\documentclass{article}
+\begin{document}
+\begin{figure}
+\subcaptionbox{Eligible panel\label{fig:eligible}}
+  {\includegraphics[width=.4\linewidth]{eligible.png}}
+\subcaptionbox[short]{Optional form\label{fig:optional}}{\includegraphics{optional.png}}
+\subcaptionbox{Extra content\label{fig:extra}}{text \includegraphics{extra.png}}
+\begin{subfigure}{.4\linewidth}
+\subcaptionbox{Nested panel\label{fig:nested}}{\includegraphics{nested.png}}
+\end{subfigure}
+\end{figure}
+\subcaptionbox{Outside figure\label{fig:outside}}{\includegraphics{outside.png}}
+\end{document}
+"""
+
+    rewritten, evidence = rewrite_tex2word_subcaptionboxes(
+        source,
+        source_path="main.tex",
+        profile=PROFILE,
+    )
+
+    assert rewritten.count("\\begin{subfigure}") == 2
+    assert "\\caption{Eligible panel}" in rewritten
+    assert "\\label{fig:eligible}" in rewritten
+    assert "\\includegraphics[width=.4\\linewidth]{eligible.png}" in rewritten
+    assert "\\subcaptionbox[short]{Optional form" in rewritten
+    assert "\\subcaptionbox{Extra content" in rewritten
+    assert "\\subcaptionbox{Nested panel" in rewritten
+    assert "\\subcaptionbox{Outside figure" in rewritten
+    assert len(evidence) == 1
+    assert evidence[0]["kind"] == "figure_subcaptionbox_normalization"
+    assert evidence[0]["command"] == "subcaptionbox"
+    assert evidence[0]["source_path"] == "main.tex"
+    original_sha256 = evidence[0]["original_block_sha256"]
+    derived_sha256 = evidence[0]["derived_block_sha256"]
+    assert isinstance(original_sha256, str) and original_sha256.startswith("sha256:")
+    assert isinstance(derived_sha256, str) and derived_sha256.startswith("sha256:")
+
+
+def test_manual_figure_counter_minipage_body_is_narrowly_normalized() -> None:
+    body = r"""[t]{0.48\textwidth}
+\centering
+\includegraphics[height=5.5cm]{panel.png}
+\par\vspace{4pt}
+\refstepcounter{figure}\label{fig:panel}
+{\small\bfseries Fig.~\thefigure:} {\small Public panel~\protect\cite{public}}
+\par
+\addcontentsline{lof}{figure}{\protect\numberline{\thefigure}Public panel}
+"""
+
+    normalized = normalize_tex2word_manual_figure_minipage_body(body)
+
+    assert normalized is not None
+    derived, label, caption = normalized
+    assert label == "fig:panel"
+    assert caption == r"Public panel~\protect\cite{public}"
+    assert "\\includegraphics[height=5.5cm]{panel.png}" in derived
+    assert "\\caption{Public panel~\\protect\\cite{public}}" in derived
+    assert "\\label{fig:panel}" in derived
+    assert "\\refstepcounter" not in derived
+    assert "\\addcontentsline" not in derived
+    assert normalize_tex2word_manual_figure_minipage_body(body + "extra") is None
+    assert (
+        normalize_tex2word_manual_figure_minipage_body(body.replace("figure}", "table}", 1)) is None
+    )
+    assert normalize_tex2word_manual_figure_minipage_body("% comment\n" + body) is None

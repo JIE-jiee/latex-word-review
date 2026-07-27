@@ -5,17 +5,11 @@ candidate: public contracts and safety invariants take precedence over adding co
 
 ## Development setup
 
-Use Python 3.12 or 3.13 and a recent `uv` release. From the repository root:
+Use Python 3.12 or 3.13 and the pinned-compatible `uv` release. From the repository root:
 
 ```console
 uv sync --frozen --group fixture --extra pdf-figures --python 3.12
 uv run --frozen latex-word-review --version
-uv run --frozen pytest --cov=latex_word_review --cov-report=term-missing
-uv run --frozen ruff check .
-uv run --frozen ruff format --check .
-uv run --frozen mypy
-uv run --frozen python -m build --no-isolation
-uv run --frozen twine check dist/*
 ```
 
 The lock file is authoritative for development and CI. Official artifacts are built with
@@ -23,6 +17,31 @@ The lock file is authoritative for development and CI. Official artifacts are bu
 backend. Change dependencies with `uv lock`, then include the resulting `uv.lock` diff in the same
 pull request. Do not remove upper bounds from a public extra without adding 3.12/3.13 resolution
 and installation evidence.
+
+The repository has one Windows maintenance entry point:
+
+```powershell
+.\scripts\check.ps1 -Profile Quick
+.\scripts\check.ps1 -Profile Full
+```
+
+Use `Quick` while editing. It selects tests from the unstaged, staged, and untracked paths and does
+not launch real Microsoft Word, a system browser, or an installer. Use `Full` before opening or
+updating a pull request; it runs the offline lock, repository-boundary, lint, format, type, release
+tool self-tests, and complete branch-coverage suite. See
+[`docs/architecture/code-map.md`](docs/architecture/code-map.md) for module ownership,
+change-to-test mapping, and the dependency direction.
+
+Do not treat the release profile as a build shortcut. After following the documented Windows
+candidate build process, maintainers can delegate verification of the existing candidate to the
+authoritative script:
+
+```powershell
+.\scripts\check.ps1 -Profile Release -ReleaseRoot build\windows-release
+```
+
+This intentionally calls `scripts/verify-windows-release.ps1`; it does not duplicate candidate
+construction, installer testing, licensing review, or release promotion.
 
 ## Safety and test material
 
@@ -43,7 +62,8 @@ and installation evidence.
 2. Keep changes focused and add tests that fail without the change.
 3. Update `CHANGELOG.md` for user-visible behavior and the relevant ADR or compatibility document
    for contract decisions.
-4. Run the quality, test, and package commands above on a clean checkout.
+4. Run `.\scripts\check.ps1 -Profile Full` on a clean checkout. Follow the separate release process
+   only when producing a Windows candidate.
 5. Describe security implications, fallback behavior, and any untested platform in the pull
    request template.
 

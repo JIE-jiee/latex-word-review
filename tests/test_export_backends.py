@@ -259,7 +259,7 @@ def test_tex2word_worker_timeout_preserves_output_and_cleans_owned_stages(
         stage.write_bytes(b"partial")
         return CommandResult(-9, "", "", True, False, 4, "sha256:" + "c" * 64)
 
-    monkeypatch.setattr(tex2word_module, "run_command", fake_run_command)
+    monkeypatch.setattr(tex2word_module, "run_conversion_command", fake_run_command)
     result = Tex2WordBackend().export(BackendRequest(source, "main.tex", output, timeout_s=0.05))
 
     assert not result.succeeded
@@ -690,7 +690,7 @@ def test_pandoc_forces_source_root_cwd_and_fixed_argv(
         shutil.copyfile(FIXTURE_ROOT / "base/review-base.docx", stage)
         return CommandResult(0, "", "", False, False, 1, "sha256:" + "b" * 64)
 
-    monkeypatch.setattr(pandoc_module, "run_command", fake_run_command)
+    monkeypatch.setattr(pandoc_module, "run_conversion_command", fake_run_command)
     result = PandocBackend(version_override="test").export(
         BackendRequest(source, "main.tex", output)
     )

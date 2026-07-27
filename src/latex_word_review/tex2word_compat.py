@@ -31,9 +31,18 @@ _KEYWORDS_END_RE = re.compile(r"\\end\s*\{keywords\}")
 _LAYOUT_CONTROL_RE = re.compile(r"\\(?P<name>captionsetup|linenumbers|nolinenumbers)\b")
 _CENTER_BLOCK_RE = re.compile(r"\\begin\s*\{center\}(?P<body>.*?)\\end\s*\{center\}", re.DOTALL)
 _CAPTIONOF_RE = re.compile(r"\\captionof\b")
+_SUBCAPTIONBOX_RE = re.compile(r"\\subcaptionbox(?=[^A-Za-z@]|$)")
 _INCLUDEGRAPHICS_RE = re.compile(r"\\includegraphics(?:\*)?(?=[^A-Za-z@]|$)")
 _LABEL_RE = re.compile(r"\\label\b")
 _CENTERING_RE = re.compile(r"\\centering\b")
+_STATIC_LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}\Z")
+_ENVIRONMENT_MARKER_RE = re.compile(r"\\(begin|end)\s*\{([A-Za-z*@]+)\}")
+_CENTERING_COMMAND_RE = re.compile(r"\\centering(?=[^A-Za-z@]|$)")
+_PAR_COMMAND_RE = re.compile(r"\\par(?=[^A-Za-z@]|$)")
+_VSPACE_COMMAND_RE = re.compile(r"\\vspace\*?(?=[^A-Za-z@]|$)")
+_REFSTEP_COUNTER_RE = re.compile(r"\\refstepcounter(?=[^A-Za-z@]|$)")
+_ADD_CONTENTS_LINE_RE = re.compile(r"\\addcontentsline(?=[^A-Za-z@]|$)")
+_SMALL_COMMAND_RE = re.compile(r"\\small(?=[^A-Za-z@]|$)")
 _CAPTION_STYLE_KEYS = frozenset({"font"})
 _CAPTION_STYLE_SELECTORS = frozenset({"table", "figure", "subfigure"})
 _WRAPPER_NAMES = frozenset({"orgdiv", "orgname", "orgaddress", "state", "country", "email"})
@@ -538,6 +547,31 @@ def _parse_required_argument(masked: str, match: re.Match[str], limit: int) -> i
     return None if argument is None else argument[1] + 1
 
 
+def _parse_command_groups(
+    masked: str,
+    match: re.Match[str],
+    *,
+    count: int,
+    limit: int,
+) -> tuple[int, tuple[tuple[int, int], ...]] | None:
+    cursor = match.end()
+    groups: list[tuple[int, int]] = []
+    for _ in range(count):
+        cursor = _skip_space(masked, cursor, limit)
+        group = _balanced_group(
+            masked,
+            cursor,
+            opening="{",
+            closing="}",
+            limit=limit,
+        )
+        if group is None:
+            return None
+        groups.append(group)
+        cursor = group[1] + 1
+    return cursor, tuple(groups)
+
+
 def _blank_relative_span(characters: list[str], start: int, end: int, offset: int) -> None:
     for index in range(start - offset, end - offset):
         characters[index] = " "
@@ -620,12 +654,142 @@ def _scan_center_captionof_figures(text: str) -> tuple[_DerivedRewriteSpan, ...]
     return tuple(rewrites)
 
 
+def _scan_subcaptionboxes(text: str) -> tuple[_DerivedRewriteSpan, ...]:
+    r"""Normalize only static one-image ``subcaptionbox`` commands.
+
+    tex2word 1.0.5 does not register ``\subcaptionbox`` but does understand a
+    ``subfigure`` environment. The accepted shape is deliberately narrow: one
+    required caption group containing exactly one static ``\label`` and one
+    required content group containing exactly one complete
+    ``\includegraphics`` command and otherwise only whitespace.
+    """
+
+    masked = _mask_tex_comments(text)
+    bounds = _document_body_bounds(masked)
+    if bounds is None:
+        return ()
+    lower, upper = bounds
+    rewrites: list[_DerivedRewriteSpan] = []
+    occupied_until = lower
+    environment_events = tuple(_ENVIRONMENT_MARKER_RE.finditer(masked, lower, upper))
+    environment_index = 0
+    environment_stack: list[str] = []
+    for match in _SUBCAPTIONBOX_RE.finditer(masked, lower, upper):
+        while (
+            environment_index < len(environment_events)
+            and environment_events[environment_index].start() < match.start()
+        ):
+            event = environment_events[environment_index]
+            environment_index += 1
+            if event.group(1) == "begin":
+                environment_stack.append(event.group(2))
+            elif not environment_stack or environment_stack.pop() != event.group(2):
+                return ()
+        if match.start() < occupied_until:
+            continue
+        if not environment_stack or environment_stack[-1].rstrip("*") != "figure":
+            # Never create a nested subfigure or reinterpret a box outside a
+            # direct figure body.
+            continue
+        cursor = _skip_space(masked, match.end(), upper)
+        if cursor >= upper or masked[cursor] != "{":
+            continue
+        caption = _balanced_group(
+            masked,
+            cursor,
+            opening="{",
+            closing="}",
+            limit=upper,
+        )
+        if caption is None:
+            continue
+        cursor = _skip_space(masked, caption[1] + 1, upper)
+        if cursor >= upper or masked[cursor] != "{":
+            # Optional subcaptionbox arguments are intentionally unsupported.
+            continue
+        content = _balanced_group(
+            masked,
+            cursor,
+            opening="{",
+            closing="}",
+            limit=upper,
+        )
+        if content is None:
+            continue
+
+        labels = tuple(_LABEL_RE.finditer(masked, caption[0], caption[1]))
+        images = tuple(_INCLUDEGRAPHICS_RE.finditer(masked, content[0], content[1]))
+        if len(labels) != 1 or len(images) != 1:
+            continue
+        label_end = _parse_required_argument(masked, labels[0], caption[1])
+        image_end = _parse_includegraphics(masked, images[0], content[1])
+        if label_end is None or image_end is None:
+            continue
+
+        label_cursor = _skip_space(masked, labels[0].end(), caption[1])
+        label_group = _balanced_group(
+            masked,
+            label_cursor,
+            opening="{",
+            closing="}",
+            limit=caption[1],
+        )
+        if label_group is None or label_group[1] + 1 != label_end:
+            continue
+        label = text[label_group[0] : label_group[1]].strip()
+        if _STATIC_LABEL_VALUE_RE.fullmatch(label) is None:
+            continue
+
+        caption_remaining = list(masked[caption[0] : caption[1]])
+        _blank_relative_span(
+            caption_remaining,
+            labels[0].start(),
+            label_end,
+            caption[0],
+        )
+        caption_text = (text[caption[0] : labels[0].start()] + text[label_end : caption[1]]).strip()
+        if not caption_text or not "".join(caption_remaining).strip():
+            continue
+
+        content_remaining = list(masked[content[0] : content[1]])
+        _blank_relative_span(
+            content_remaining,
+            images[0].start(),
+            image_end,
+            content[0],
+        )
+        if "".join(content_remaining).strip():
+            continue
+        image_text = text[images[0].start() : image_end]
+        replacement = (
+            "\\begin{subfigure}{\\linewidth}\n"
+            "\\centering\n"
+            f"{image_text}\n"
+            f"\\caption{{{caption_text}}}\n"
+            f"\\label{{{label}}}\n"
+            "\\end{subfigure}"
+        )
+        rewrites.append(
+            _DerivedRewriteSpan(
+                name="subcaptionbox",
+                start=match.start(),
+                end=content[1] + 1,
+                replacement=replacement,
+                line=text.count("\n", 0, match.start()) + 1,
+            )
+        )
+        occupied_until = content[1] + 1
+    return tuple(rewrites)
+
+
 def _apply_derived_rewrites(
     text: str,
     spans: tuple[_DerivedRewriteSpan, ...],
     *,
     source_path: str,
     profile: str,
+    kind: str = "tex2word_layout_control_normalization",
+    span_basis: str = "derived_overlay_after_image_rewrite",
 ) -> tuple[str, list[dict[str, object]]]:
     result = text
     evidence: list[dict[str, object]] = []
@@ -651,8 +815,8 @@ def _apply_derived_rewrites(
             {
                 "profile": profile,
                 "source_path": source_path,
-                "span_basis": "derived_overlay_after_image_rewrite",
-                "kind": "tex2word_layout_control_normalization",
+                "span_basis": span_basis,
+                "kind": kind,
                 "command": span.name,
                 "start_utf8": start_utf8,
                 "end_utf8": end_utf8,
@@ -663,10 +827,10 @@ def _apply_derived_rewrites(
         evidence.append(
             {
                 "transformation_id": transformation_id,
-                "kind": "tex2word_layout_control_normalization",
+                "kind": kind,
                 "command": span.name,
                 "source_path": source_path,
-                "span_basis": "derived_overlay_after_image_rewrite",
+                "span_basis": span_basis,
                 "derived_span": {
                     "start_char": span.start,
                     "end_char": span.end,
@@ -681,6 +845,167 @@ def _apply_derived_rewrites(
         previous_start = span.start
     evidence.reverse()
     return result, evidence
+
+
+def rewrite_tex2word_subcaptionboxes(
+    text: str,
+    *,
+    source_path: str,
+    profile: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Expose static one-image ``subcaptionbox`` content to tex2word."""
+
+    validate_relative_path(source_path)
+    if not profile:
+        raise ContractError(ErrorCode.SCHEMA_INVALID, "compatibility profile is empty")
+    return _apply_derived_rewrites(
+        text,
+        _scan_subcaptionboxes(text),
+        source_path=source_path,
+        profile=profile,
+        kind="figure_subcaptionbox_normalization",
+    )
+
+
+def normalize_tex2word_manual_figure_minipage_body(
+    text: str,
+) -> tuple[str, str, str] | None:
+    """Normalize one exact, independently numbered minipage figure body.
+
+    The bounded shape is ``includegraphics`` followed by ``par``/``vspace``,
+    ``refstepcounter{figure}``, one static label, a ``Fig. thefigure`` display,
+    a small caption, and one ``addcontentsline{lof}{figure}``. Any additional
+    content, optional construct, comment, or malformed group is left untouched.
+    """
+
+    masked = _mask_tex_comments(text)
+    if masked != text:
+        return None
+    limit = len(text)
+    cursor = _skip_space(masked, 0, limit)
+    if cursor < limit and masked[cursor] == "[":
+        placement = _balanced_group(
+            masked,
+            cursor,
+            opening="[",
+            closing="]",
+            limit=limit,
+        )
+        if placement is None:
+            return None
+        cursor = _skip_space(masked, placement[1] + 1, limit)
+    width = _balanced_group(
+        masked,
+        cursor,
+        opening="{",
+        closing="}",
+        limit=limit,
+    )
+    if width is None or not masked[width[0] : width[1]].strip():
+        return None
+    if width[1] - width[0] > 256:
+        return None
+    cursor = _skip_space(masked, width[1] + 1, limit)
+    centering = _CENTERING_COMMAND_RE.match(masked, cursor, limit)
+    if centering is None:
+        return None
+    cursor = _skip_space(masked, centering.end(), limit)
+
+    image = _INCLUDEGRAPHICS_RE.match(masked, cursor, limit)
+    if image is None:
+        return None
+    image_end = _parse_includegraphics(masked, image, limit)
+    if image_end is None:
+        return None
+    cursor = _skip_space(masked, image_end, limit)
+    paragraph = _PAR_COMMAND_RE.match(masked, cursor, limit)
+    if paragraph is None:
+        return None
+    cursor = _skip_space(masked, paragraph.end(), limit)
+    vspace = _VSPACE_COMMAND_RE.match(masked, cursor, limit)
+    if vspace is None:
+        return None
+    parsed = _parse_command_groups(masked, vspace, count=1, limit=limit)
+    if parsed is None or not masked[parsed[1][0][0] : parsed[1][0][1]].strip():
+        return None
+    cursor = _skip_space(masked, parsed[0], limit)
+
+    refstep = _REFSTEP_COUNTER_RE.match(masked, cursor, limit)
+    if refstep is None:
+        return None
+    parsed = _parse_command_groups(masked, refstep, count=1, limit=limit)
+    if parsed is None or masked[parsed[1][0][0] : parsed[1][0][1]].strip() != "figure":
+        return None
+    cursor = _skip_space(masked, parsed[0], limit)
+    label_match = _LABEL_RE.match(masked, cursor, limit)
+    if label_match is None:
+        return None
+    parsed = _parse_command_groups(masked, label_match, count=1, limit=limit)
+    if parsed is None:
+        return None
+    label = text[parsed[1][0][0] : parsed[1][0][1]].strip()
+    if _STATIC_LABEL_VALUE_RE.fullmatch(label) is None:
+        return None
+    cursor = _skip_space(masked, parsed[0], limit)
+
+    display = _balanced_group(
+        masked,
+        cursor,
+        opening="{",
+        closing="}",
+        limit=limit,
+    )
+    if display is None:
+        return None
+    display_text = re.sub(r"\s+", "", masked[display[0] : display[1]])
+    if display_text != r"\small\bfseriesFig.~\thefigure:":
+        return None
+    cursor = _skip_space(masked, display[1] + 1, limit)
+    caption_group = _balanced_group(
+        masked,
+        cursor,
+        opening="{",
+        closing="}",
+        limit=limit,
+    )
+    if caption_group is None:
+        return None
+    caption_cursor = _skip_space(masked, caption_group[0], caption_group[1])
+    small = _SMALL_COMMAND_RE.match(masked, caption_cursor, caption_group[1])
+    if small is None:
+        return None
+    caption = text[small.end() : caption_group[1]].strip()
+    if not caption:
+        return None
+    cursor = _skip_space(masked, caption_group[1] + 1, limit)
+    paragraph = _PAR_COMMAND_RE.match(masked, cursor, limit)
+    if paragraph is None:
+        return None
+    cursor = _skip_space(masked, paragraph.end(), limit)
+
+    add_contents = _ADD_CONTENTS_LINE_RE.match(masked, cursor, limit)
+    if add_contents is None:
+        return None
+    parsed = _parse_command_groups(masked, add_contents, count=3, limit=limit)
+    if parsed is None:
+        return None
+    groups = parsed[1]
+    if masked[groups[0][0] : groups[0][1]].strip() != "lof":
+        return None
+    if masked[groups[1][0] : groups[1][1]].strip() != "figure":
+        return None
+    list_entry = re.sub(r"\s+", "", masked[groups[2][0] : groups[2][1]])
+    if not list_entry.startswith(r"\protect\numberline{\thefigure}"):
+        return None
+    if list_entry == r"\protect\numberline{\thefigure}":
+        return None
+    if _skip_space(masked, parsed[0], limit) != limit:
+        return None
+
+    normalized = (
+        text[:image_end].rstrip() + "\n" + f"\\caption{{{caption}}}\n" + f"\\label{{{label}}}\n"
+    )
+    return normalized, label, caption
 
 
 def rewrite_tex2word_layout_controls(

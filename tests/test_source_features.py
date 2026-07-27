@@ -382,12 +382,6 @@ def test_skipped_dynamic_regions_are_explicit_recoverable_degradation() -> None:
             {"ref_fields": 0},
             {},
         ),
-        (
-            "labels",
-            {"label_instances": 1, "static_labels": ("sec:intro",)},
-            {"bookmark_names": ()},
-            {},
-        ),
         ("images", {"image_instances": 1}, {"image_instances": 0}, {}),
     ],
 )
@@ -526,6 +520,167 @@ def test_unbalanced_feature_group_stops_after_one_bounded_scan(
     assert balanced_calls == 2
 
 
+def test_clean_revision_projection_inventories_only_rendered_features(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        r"""\documentclass{article}
+\begin{document}
+Visible $base$.
+\added[\cite{metadata}]{Added $new$ and \cite{new-a}.}
+\deleted{\[old-display\]\label{old:deleted}\cite{old-a}}
+\replaced{Current \eqref{eq:current}.}{Old $old$ \cite{old-b}.}
+\add{Alias $alias-new$ \ref{eq:current}.}
+\delete{Alias old $alias-old$ \cite{old-c}.}
+\label{eq:current}
+\end{document}
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+
+    source_inventory = scan_source_features(source, discovery, image_instances=0)
+    clean_inventory = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="clean",
+        revision_aliases=("add", "delete"),
+    )
+    display_inventory = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="display",
+        revision_aliases=("add", "delete"),
+    )
+
+    assert source_inventory.math_objects == 6
+    assert source_inventory.reference_instances == 2
+    assert source_inventory.label_instances == 2
+    assert source_inventory.citation_instances == 5
+    assert clean_inventory.math_objects == 3
+    assert clean_inventory.reference_instances == 2
+    assert clean_inventory.label_instances == 1
+    assert clean_inventory.static_labels == ("eq:current",)
+    assert clean_inventory.citation_instances == 1
+    assert display_inventory.math_objects == 6
+    assert display_inventory.reference_instances == 2
+    assert display_inventory.label_instances == 2
+    assert display_inventory.citation_instances == 4
+
+
+def test_clean_revision_projection_avoids_false_math_and_reference_loss(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        r"""\documentclass{article}
+\begin{document}
+\added{$new$}
+\deleted{$old$ \ref{old}}
+\replaced{$current$ \ref{current}}{$prior$ \ref{prior}}
+\label{current}
+\end{document}
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    source_inventory = scan_source_features(source, discovery, image_instances=0)
+    clean_inventory = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="clean",
+    )
+    inspection = _inspection(
+        omml_objects=2,
+        ref_fields=1,
+        bookmark_names=("current",),
+    )
+    backend = _backend_result(math_omml=2)
+
+    source_reconciliation = reconcile_source_features(source_inventory, inspection, backend)
+    clean_reconciliation = reconcile_source_features(clean_inventory, inspection, backend)
+
+    assert source_inventory.math_objects == 4
+    assert source_inventory.reference_instances == 3
+    assert clean_inventory.math_objects == 2
+    assert clean_inventory.reference_instances == 1
+    assert source_reconciliation.failed
+    assert not clean_reconciliation.failed
+    assert all(result.status == "preserved" for result in clean_reconciliation.feature_results)
+
+
+def test_clean_revision_projection_preserves_original_feature_offsets(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    source_text = r"""\documentclass{article}
+\begin{document}
+\added{Now \replaced{$x$}{\cite{old}}}
+\deleted{\label{gone}\added{$hidden$}}
+\replaced{\ref{kept}}{\ref{old}}
+\end{document}
+"""
+    (source / "main.tex").write_text(source_text, encoding="utf-8", newline="\n")
+    discovery = discover_project(source, main_document="main.tex")
+
+    inventory = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="clean",
+    )
+
+    assert inventory.math_objects == 1
+    assert inventory.reference_instances == 1
+    assert inventory.label_instances == 0
+    assert inventory.citation_instances == 0
+    math_location = inventory.location_for("math")
+    assert math_location is not None
+    source_bytes = source_text.encode("utf-8")
+    assert source_bytes[math_location.start_byte : math_location.end_byte] == b"$"
+    assert math_location.start_byte == source_bytes.index(b"$x$")
+
+
+def test_clean_revision_alias_projection_requires_explicit_opt_in(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\delete{\\cite{old-alias}}\n"
+        "\\end{document}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+
+    conservative = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="clean",
+    )
+    projected = scan_source_features(
+        source,
+        discovery,
+        image_instances=0,
+        revision_view="clean",
+        revision_aliases=("delete",),
+    )
+
+    assert conservative.citation_instances == 1
+    assert projected.citation_instances == 0
+
+
 @pytest.mark.parametrize("source_count", [1, 2])
 def test_reference_warning_cannot_account_for_any_missing_instance(source_count: int) -> None:
     reconciliation = reconcile_source_features(
@@ -563,7 +718,7 @@ def test_reference_warning_cannot_account_for_any_missing_instance(source_count:
         ),
     ],
 )
-def test_dynamic_or_colliding_labels_do_not_mask_missing_unique_bookmarks(
+def test_missing_unique_label_bookmarks_are_recoverable_for_locked_backend(
     inventory_changes: dict[str, Any],
     bookmark_names: tuple[str, ...],
 ) -> None:
@@ -574,8 +729,12 @@ def test_dynamic_or_colliding_labels_do_not_mask_missing_unique_bookmarks(
     )
 
     result = next(item for item in reconciliation.feature_results if item.feature == "labels")
-    assert reconciliation.failed
-    assert result.status == "failed"
+    assert not reconciliation.failed
+    assert result.status == "degraded"
+    assert any(
+        finding.code is ErrorCode.EXPORT_DEGRADED and finding.recoverable
+        for finding in reconciliation.findings
+    )
 
 
 def test_colliding_labels_remain_recoverable_when_all_unique_bookmarks_exist() -> None:

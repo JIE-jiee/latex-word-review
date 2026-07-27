@@ -22,6 +22,7 @@ from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.hashing import digest_bytes, read_stable_bytes
 from latex_word_review.jsonio import read_contract_file
 from latex_word_review.paths import resolve_within, validate_relative_path
+from latex_word_review.run_layout import EXPORT_REPORT
 from latex_word_review.user_messages import (
     RecoveryAction,
     format_safe_technical_details,
@@ -304,7 +305,7 @@ def _waiting_view(
             "save_copy_action": "/session/save-existing-changes-copy",
         }
     export_report = read_contract_file(
-        resolve_within(run_root, validate_relative_path("export/objects/export-report.json")),
+        resolve_within(run_root, validate_relative_path(EXPORT_REPORT)),
         expected_schema="ExportReport",
     )
     exported_at = _string(export_report.get("generated_at"), "ExportReport.generated_at")

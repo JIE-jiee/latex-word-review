@@ -38,7 +38,9 @@ from latex_word_review.bundle import (
 from latex_word_review.canonical import canonical_json, compute_payload_sha256
 from latex_word_review.contracts import validate_contract
 from latex_word_review.discovery import discover_project
+from latex_word_review.domain_values import Confidentiality
 from latex_word_review.errors import ContractError, ErrorCode
+from latex_word_review.export_limits import DEFAULT_EXPORT_TIMEOUT_SECONDS
 from latex_word_review.hashing import FileDigest, digest_bytes, digest_file, read_stable_bytes
 from latex_word_review.ids import derive_artifact_id
 from latex_word_review.jsonio import read_contract_file, write_new_bytes, write_new_json
@@ -46,10 +48,66 @@ from latex_word_review.latex_verify import VerificationPolicy, verify_latex_proj
 from latex_word_review.ledger import LedgerOutput, build_ledger
 from latex_word_review.paths import resolve_within, validate_relative_path
 from latex_word_review.planner import PatchPlanResult, plan_patch, verify_plan_identity
+from latex_word_review.run_layout import (
+    APPROVALS_DIR as _APPROVALS,
+)
+from latex_word_review.run_layout import (
+    AUDIT_BUNDLE as _AUDIT_BUNDLE,
+)
+from latex_word_review.run_layout import (
+    BACKEND_CAPABILITIES as _BACKEND_CAPABILITIES,
+)
+from latex_word_review.run_layout import (
+    CHANGESET as _CHANGESET,
+)
+from latex_word_review.run_layout import (
+    DELIVERY_DIR as _DELIVERY,
+)
+from latex_word_review.run_layout import (
+    EXISTING_CHANGES_DISPLAY_DOCX as _EXISTING_CHANGES_DISPLAY_DOCX,
+)
+from latex_word_review.run_layout import (
+    EXPORT_REPORT as _EXPORT_REPORT,
+)
+from latex_word_review.run_layout import (
+    LEDGER_DIR as _LEDGER,
+)
+from latex_word_review.run_layout import (
+    PLANS_DIR as _PLANS,
+)
+from latex_word_review.run_layout import (
+    RETURNED_ORIGINAL_DOCX as _RETURNED_ORIGINAL,
+)
+from latex_word_review.run_layout import (
+    REVIEW_DOCX as _REVIEW_DOCX,
+)
+from latex_word_review.run_layout import (
+    REVIEW_IR as _REVIEW_IR,
+)
+from latex_word_review.run_layout import (
+    REVISED_DIR as _REVISED,
+)
+from latex_word_review.run_layout import (
+    REVISION_READER as _REVISION_READER,
+)
+from latex_word_review.run_layout import (
+    SNAPSHOT_DIR as _SNAPSHOT,
+)
+from latex_word_review.run_layout import (
+    SOURCE_MANIFEST as _SOURCE_MANIFEST,
+)
+from latex_word_review.run_layout import (
+    SOURCE_MAP as _SOURCE_MAP,
+)
+from latex_word_review.run_layout import (
+    VERIFICATION_DIR as _VERIFICATION,
+)
+from latex_word_review.run_layout import (
+    VERIFICATION_RETRIES_DIR as _VERIFICATION_RETRIES,
+)
 from latex_word_review.session_status import SessionStatus
 from latex_word_review.workflow import (
     BackendName,
-    Confidentiality,
     export_workflow,
     initialize_workflow,
     receive_workflow,
@@ -57,23 +115,8 @@ from latex_word_review.workflow import (
 )
 from latex_word_review.workflow_objects import build_run_manifest_document, utc_now
 
-_SOURCE_MANIFEST: Final = "objects/source-manifest.json"
-_SNAPSHOT: Final = "snapshot"
-_REVIEW_DOCX: Final = "export/review.docx"
-_EXPORT_REPORT: Final = "export/objects/export-report.json"
-_EXISTING_CHANGES_DISPLAY_DOCX: Final = "export/existing-changes-display.docx"
 _EXISTING_CHANGES_DISPLAY_ROLE: Final = "latex_changes_display_docx"
 _DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-_CHANGESET: Final = "receive/changeset.json"
-_RETURNED_ORIGINAL: Final = "receive/original/returned-original.docx"
-_APPROVALS: Final = "approvals"
-_PLANS: Final = "plans"
-_REVISED: Final = "revised-clean"
-_VERIFICATION: Final = "verification"
-_VERIFICATION_RETRIES: Final = "verification-retries"
-_LEDGER: Final = "ledger"
-_DELIVERY: Final = "delivery"
-_AUDIT_BUNDLE: Final = "audit.zip"
 _MAX_CONTRACT_BYTES: Final = 16 * 1024 * 1024
 _MAX_ARTIFACT_BYTES: Final = 512 * 1024 * 1024
 _APPROVAL_RE: Final = re.compile(r"approval-r([1-9][0-9]*)\.json")
@@ -554,7 +597,7 @@ class ApplicationSession:
         self,
         *,
         backend: BackendName = "tex2word",
-        timeout_s: float = 60.0,
+        timeout_s: float = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         confidentiality: Confidentiality = "local_private",
         generated_at: str | None = None,
     ) -> dict[str, Any]:
@@ -1836,22 +1879,18 @@ class ApplicationSession:
             validate_relative_path(verification_directory),
         )
         export_capabilities = read_contract_file(
-            self._run_root / "export/objects/backend-capabilities.json",
+            self._run_root / _BACKEND_CAPABILITIES,
             expected_schema="BackendCapabilities",
         )
         reader_capabilities = read_contract_file(
-            self._run_root / "receive/revision-reader.json",
+            self._run_root / _REVISION_READER,
             expected_schema="BackendCapabilities",
         )
         objects = [
+            read_contract_file(self._run_root / _REVIEW_IR, expected_schema="ReviewIR"),
+            read_contract_file(self._run_root / _SOURCE_MAP, expected_schema="SourceMap"),
             read_contract_file(
-                self._run_root / "export/objects/review-ir.json", expected_schema="ReviewIR"
-            ),
-            read_contract_file(
-                self._run_root / "export/objects/source-map.json", expected_schema="SourceMap"
-            ),
-            read_contract_file(
-                self._run_root / "export/objects/export-report.json",
+                self._run_root / _EXPORT_REPORT,
                 expected_schema="ExportReport",
             ),
             changeset,

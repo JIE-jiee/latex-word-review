@@ -81,6 +81,30 @@ _BOUNDED_COMMAND_MANDATORY_GROUPS = {
     "textcolor": 2,
     "url": 1,
     "vref": 1,
+    # Common journal metadata and review commands. Their complete argument
+    # groups are skipped and never become auto-patchable source units.
+    "affiliation": 1,
+    "author": 1,
+    "cormark": 0,
+    "cortext": 1,
+    "credit": 1,
+    "ead": 1,
+    "linenumbers": 0,
+    "maketitle": 0,
+    "nolinenumbers": 0,
+    "printcredits": 0,
+    "shortauthors": 1,
+    "shorttitle": 1,
+    "title": 1,
+    "bibliography": 1,
+    "bibliographystyle": 1,
+    "figref": 1,
+    "tblref": 1,
+    "added": 1,
+    "deleted": 1,
+    "replaced": 2,
+    "add": 1,
+    "delete": 1,
 }
 
 
@@ -302,7 +326,8 @@ def source_unit_profile() -> dict[str, str]:
         "version": SOURCE_UNIT_PROFILE_VERSION,
         "strategy": (
             "complete-plain-paragraphs-plus-byte-exact-inline-text-islands;"
-            "reject-structural-environments-and-unbounded-commands"
+            "reject-structural-environments-and-unbounded-commands;"
+            "resume-after-closed-bounded-metadata"
         ),
     }
     return {
@@ -693,7 +718,30 @@ def _plain_line_eligibility(
             state,
         )
         end_allows_plain = _state_allows_plain_text(state)
-        eligibility.append(start_allows_plain and end_allows_plain and not touched_environment)
+        line_v2_unsafe = state.v2_unsafe
+        eligibility.append(
+            start_allows_plain
+            and end_allows_plain
+            and not touched_environment
+            and not line_v2_unsafe
+        )
+        synchronized = (
+            state.pending_mandatory_groups == 0
+            and state.pending_group_opening is None
+            and state.pending_group_depth == 0
+            and state.pending_group_math_closer is None
+            and state.math_closer is None
+            and not state.environments
+            and state.brace_depth == 0
+            and state.bracket_depth == 0
+            and not state.unit_scan_unsafe
+            and not state.invalid
+            and not state.stopped
+        )
+        if line_v2_unsafe and synchronized:
+            # An opaque nested construct invalidates its own line only. Once
+            # every bounded group is closed, later lines can be proven again.
+            state.v2_unsafe = False
         if len(eligibility) > MAX_SOURCE_LINES:
             raise ContractError(
                 ErrorCode.SCHEMA_INVALID,
@@ -775,6 +823,10 @@ def _command_extent(
     else:
         name = text[cursor]
         cursor += 1
+        # TeX control symbols consume exactly one character.  They cannot
+        # own a following bracket/group, so return before optional-argument
+        # parsing (for example ``\% [\ref{...}]``).
+        return name, cursor, (), False
     if cursor < len(text) and text[cursor] == "*":
         cursor += 1
     while cursor < len(text) and text[cursor].isspace():
@@ -827,7 +879,10 @@ def _plain_text_island_char_spans(text: str) -> tuple[tuple[int, int], ...] | No
             name, command_end, groups, bounded = _command_extent(text, cursor)
             mandatory = [group for group in groups if group[0] == "{"]
             expected_mandatory = _BOUNDED_COMMAND_MANDATORY_GROUPS.get(name)
-            if not bounded or expected_mandatory is None or len(mandatory) != expected_mandatory:
+            if expected_mandatory is None:
+                if name not in _SAFE_CONTROL_SYMBOLS or groups:
+                    return None
+            elif len(mandatory) != expected_mandatory or (expected_mandatory > 0 and not bounded):
                 return None
             if name in _INLINE_TEXT_COMMANDS:
                 inner = _trimmed_char_span(text, mandatory[0][1], mandatory[0][2])

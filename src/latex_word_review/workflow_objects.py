@@ -13,6 +13,7 @@ from latex_word_review.backends.base import BackendCapabilities
 from latex_word_review.canonical import sha256_canonical
 from latex_word_review.contracts import make_envelope, validate_contract
 from latex_word_review.discovery import ProjectDiscovery
+from latex_word_review.domain_values import Confidentiality
 from latex_word_review.errors import ContractError, ErrorCode
 from latex_word_review.export import AnchoringResult, ExportOutcome
 from latex_word_review.export_models import export_report_commitment
@@ -23,7 +24,6 @@ from latex_word_review.planner import POLICY_SHA256
 from latex_word_review.revisions import BookmarkBinding
 from latex_word_review.source_units import TextProvenanceSegment, review_ir_payload
 
-Confidentiality = Literal["public_fixture", "local_private", "derived_private"]
 SOURCE_MANIFEST_INTERFACE_VERSION = "source-manifest-builder-v2"
 SOURCE_MAP_INTERFACE_VERSION = "source-map-builder-v2"
 PREVIOUS_EXPORT_REPORT_INTERFACE_VERSION = "export-report-builder-v2"

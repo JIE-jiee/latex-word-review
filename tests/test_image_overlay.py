@@ -779,3 +779,102 @@ def test_tex2word_profile_preserves_split_figure_reference_targets(tmp_path: Pat
     }
     assert len(targets) == 2
     assert targets.issubset(set(inspection.bookmark_names))
+
+
+def test_locked_tex2word_preserves_subcaptionboxes_and_manual_minipage_images(
+    tmp_path: Path,
+) -> None:
+    backend = Tex2WordBackend()
+    if backend.capabilities().tool_version != "1.0.5":
+        pytest.skip("locked tex2word runtime is unavailable")
+    source = tmp_path / "source"
+    (source / "figures").mkdir(parents=True)
+    _write_png(source / "figures/panel.png")
+
+    def manual_child(label: str, caption: str) -> str:
+        return (
+            "\\begin{minipage}[t]{0.48\\textwidth}\n"
+            "\\centering\n"
+            "\\includegraphics[width=\\linewidth]{figures/panel.png}\n"
+            "\\par\\vspace{4pt}\n"
+            f"\\refstepcounter{{figure}}\\label{{{label}}}\n"
+            f"{{\\small\\bfseries Fig.~\\thefigure:}} {{\\small {caption}}}\\par\n"
+            "\\addcontentsline{lof}{figure}"
+            f"{{\\protect\\numberline{{\\thefigure}}{caption}}}\n"
+            "\\end{minipage}\n"
+        )
+
+    subcaptionboxes = "".join(
+        f"\\subcaptionbox{{Panel {index}\\label{{fig:sub{index}}}}}"
+        "{\\includegraphics[width=.2\\linewidth]{figures/panel.png}}\n"
+        for index in range(1, 5)
+    )
+    source_text = (
+        "\\documentclass{article}\n"
+        "\\usepackage{graphicx}\n"
+        "\\usepackage{subcaption}\n"
+        "\\begin{document}\n"
+        "\\begin{figure}\n\\centering\n"
+        + subcaptionboxes
+        + "\\caption{Four public panels}\\label{fig:panels}\n\\end{figure}\n"
+        + "\\begin{figure}\n\\centering\n"
+        + manual_child("fig:left-a", "Left A")
+        + "\\hfill\n"
+        + manual_child("fig:right-a", "Right A")
+        + "\\end{figure}\n"
+        + "\\begin{figure}\n\\centering\n"
+        + manual_child("fig:left-b", "Left B")
+        + "\\hfill\n"
+        + manual_child("fig:right-b", "Right B")
+        + "\\end{figure}\n"
+        + "\\end{document}\n"
+    )
+    (source / "main.tex").write_text(
+        source_text,
+        encoding="utf-8",
+        newline="\n",
+    )
+    discovery = discover_project(source, main_document="main.tex")
+    original = _snapshot_bytes(source)
+
+    overlay = build_image_overlay(
+        source,
+        tmp_path / "overlay",
+        discovery,
+        compatibility_profile=TEX2WORD_COMPATIBILITY_PROFILE,
+    )
+
+    assert overlay.ready
+    assert overlay.source_image_instances == 8
+    assert overlay.passthrough_raster_instances == 8
+    assert overlay.compatibility_transformations == 6
+    assert _snapshot_bytes(source) == original
+    derived = (overlay.derived_root / "main.tex").read_text(encoding="utf-8")
+    assert derived.count("\\begin{subfigure}") == 4
+    assert derived.count("\\begin{figure}") == 5
+    assert "\\subcaptionbox" not in derived
+    assert "\\refstepcounter" not in derived
+    assert "\\addcontentsline" not in derived
+    assert derived.count("\\caption{") == 9
+    manifest = json.loads(overlay.manifest_path.read_text(encoding="utf-8"))
+    transformations = manifest["compatibility"]["transformations"]
+    assert (
+        sum(item["kind"] == "figure_subcaptionbox_normalization" for item in transformations) == 4
+    )
+    split = [item for item in transformations if item["kind"] == "figure_minipage_split"]
+    assert len(split) == 2
+    assert all(item["manual_caption_normalizations"] == 2 for item in split)
+    assert all(item["source_caption_count"] == 0 for item in split)
+    assert {label for item in split for label in item["labels"]} == {
+        "fig:left-a",
+        "fig:right-a",
+        "fig:left-b",
+        "fig:right-b",
+    }
+
+    output = tmp_path / "output/review.docx"
+    result = backend.export(BackendRequest(overlay.derived_root, "main.tex", output))
+    assert result.succeeded
+    inspection = inspect_docx(output)
+    assert inspection.image_instances == 8
+    assert inspection.seq_fields == 5

@@ -20,7 +20,7 @@ from latex_word_review.review_reference import (
     REFERENCE_DOCX_SHA256,
 )
 from latex_word_review.revision_macros import REVISION_MACRO_PROFILE_ID
-from latex_word_review.runtime import minimal_environment, run_command
+from latex_word_review.runtime import minimal_environment, run_conversion_command
 
 from .base import (
     BackendCapabilities,
@@ -275,7 +275,7 @@ class Tex2WordBackend:
                     revision_alias_selector,
                 ),
             )
-            result = run_command(
+            result = run_conversion_command(
                 worker.executable,
                 worker.arguments,
                 cwd=prepared.source_root,

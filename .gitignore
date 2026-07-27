@@ -8,6 +8,7 @@ __pycache__/
 # Local Codex/task control files. Public project guidance lives in repository docs.
 /AGENTS.md
 /任务说明.md
+/docs/local/
 
 .coverage
 .coverage.*

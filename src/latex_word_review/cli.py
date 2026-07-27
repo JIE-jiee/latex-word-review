@@ -27,8 +27,10 @@ from latex_word_review.canonical import canonical_json, compute_payload_sha256
 from latex_word_review.contracts import validate_contract
 from latex_word_review.discovery import discover_project
 from latex_word_review.doctor import diagnose_environment
+from latex_word_review.domain_values import CONFIDENTIALITY_VALUES, DECISION_VALUES
 from latex_word_review.errors import ContractError, ErrorCode, ExitCode
 from latex_word_review.export import ExportBindings, export_review_docx
+from latex_word_review.export_limits import DEFAULT_EXPORT_TIMEOUT_SECONDS
 from latex_word_review.hashing import digest_bytes, read_stable_bytes
 from latex_word_review.ids import derive_artifact_id
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
@@ -45,6 +47,7 @@ from latex_word_review.paths import resolve_within, validate_relative_path
 from latex_word_review.planner import plan_patch
 from latex_word_review.review_server import create_review_server
 from latex_word_review.revisions import build_changeset
+from latex_word_review.run_layout import REVIEW_DOCX, SNAPSHOT_DIR
 from latex_word_review.snapshot import SNAPSHOT_MANIFEST, snapshot_project
 from latex_word_review.workflow import (
     clean_workflow,
@@ -66,16 +69,9 @@ from latex_word_review.workflow_objects import (
 )
 
 Handler = Callable[[argparse.Namespace], int]
-_CONFIDENTIALITY = ("public_fixture", "local_private", "derived_private")
+_CONFIDENTIALITY = CONFIDENTIALITY_VALUES
 _RUN_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
-_DECISIONS = (
-    "pending",
-    "accepted",
-    "accepted_with_edit",
-    "rejected",
-    "manual",
-    "conflict",
-)
+_DECISIONS = DECISION_VALUES
 
 
 def _emit(document: object, *, error: bool = False) -> None:
@@ -809,7 +805,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow_export.add_argument("run_root", type=Path)
     workflow_export.add_argument("--backend", choices=("tex2word", "pandoc"), default="tex2word")
-    workflow_export.add_argument("--timeout", type=float, default=60.0)
+    workflow_export.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_EXPORT_TIMEOUT_SECONDS,
+        help="seconds allowed for each conversion; default 300, maximum 600",
+    )
     workflow_export.add_argument(
         "--confidentiality", choices=_CONFIDENTIALITY, default="derived_private"
     )
@@ -850,7 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--main")
     snapshot.add_argument("--run-id", required=True)
     snapshot.add_argument("--manifest-out", type=Path, required=True)
-    snapshot.add_argument("--artifact-path", default="snapshot/snapshot-manifest.json")
+    snapshot.add_argument("--artifact-path", default=f"{SNAPSHOT_DIR}/{SNAPSHOT_MANIFEST}")
     snapshot.add_argument("--confidentiality", choices=_CONFIDENTIALITY, default="derived_private")
     _add_generated_at(snapshot)
     snapshot.set_defaults(handler=_handle_snapshot)
@@ -861,9 +862,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("output", type=Path)
     export.add_argument("objects_dir", type=Path)
     export.add_argument("--backend", choices=("tex2word", "pandoc"), default="tex2word")
-    export.add_argument("--artifact-path", default="export/review.docx")
+    export.add_argument("--artifact-path", default=REVIEW_DOCX)
     export.add_argument("--confidentiality", choices=_CONFIDENTIALITY, default="derived_private")
-    export.add_argument("--timeout", type=float, default=60.0)
+    export.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_EXPORT_TIMEOUT_SECONDS,
+        help="seconds allowed for this conversion; default 300, maximum 600",
+    )
     _add_generated_at(export)
     export.set_defaults(handler=_handle_export)
 

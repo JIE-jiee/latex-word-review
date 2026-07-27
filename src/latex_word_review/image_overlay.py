@@ -41,14 +41,16 @@ from latex_word_review.image_materializer import (
 )
 from latex_word_review.paths import ensure_disjoint_roots, resolve_within, validate_relative_path
 from latex_word_review.tex2word_compat import (
+    normalize_tex2word_manual_figure_minipage_body,
     rewrite_tex2word_front_matter,
     rewrite_tex2word_layout_controls,
+    rewrite_tex2word_subcaptionboxes,
 )
 
 IMAGE_OVERLAY_MANIFEST: Final[str] = "image-overlay-manifest.json"
 IMAGE_OVERLAY_ROOT: Final[str] = "lwr-images"
 IMAGE_OVERLAY_FORMAT: Final[str] = "latex-word-review-image-overlay-v1"
-TEX2WORD_COMPATIBILITY_PROFILE: Final[str] = "tex2word-1.0.5-review-compat-v4"
+TEX2WORD_COMPATIBILITY_PROFILE: Final[str] = "tex2word-1.0.5-review-compat-v5"
 _RASTER_FORMATS: Final[frozenset[str]] = frozenset({"png", "jpg", "jpeg"})
 _LAYOUT_OPTIONS: Final[frozenset[str]] = frozenset(
     {"width", "height", "totalheight", "scale", "keepaspectratio"}
@@ -404,6 +406,8 @@ class _DirectMinipage:
     end_command_end: int
     line: int
     labels: tuple[str, ...]
+    caption_mode: Literal["caption", "manual_figure_counter"]
+    normalized_body: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,16 +505,26 @@ def _tex2word_minipage_candidates(
         opened = stack.pop()
         if opened.name == "minipage" and opened.parent in {"figure", "figure*"}:
             body = scanned[opened.body_start : match.start()]
+            body_text = text[opened.body_start : match.start()]
             labels = tuple(item.group(1) for item in _LABEL_VALUE_RE.finditer(body))
+            caption_count = len(_CAPTION_RE.findall(body))
+            manual = normalize_tex2word_manual_figure_minipage_body(body_text)
             if (
                 len(_INCLUDE_GRAPHICS_RE.findall(body)) != 1
-                or len(_CAPTION_RE.findall(body)) != 1
                 or len(_LABEL_COMMAND_RE.findall(body)) != len(labels)
                 or len(labels) > 1
                 or _SUBFIGURE_CONSTRUCT_RE.search(body) is not None
                 or _ENVIRONMENT_RE.search(body) is not None
                 or not stack
             ):
+                continue
+            if caption_count == 1:
+                caption_mode: Literal["caption", "manual_figure_counter"] = "caption"
+                normalized_body = None
+            elif caption_count == 0 and manual is not None and labels == (manual[1],):
+                caption_mode = "manual_figure_counter"
+                normalized_body = manual[0]
+            else:
                 continue
             direct_children.setdefault(stack[-1].begin_start, []).append(
                 _DirectMinipage(
@@ -520,6 +534,8 @@ def _tex2word_minipage_candidates(
                     end_command_end=match.end(),
                     line=text.count("\n", 0, opened.begin_start) + 1,
                     labels=labels,
+                    caption_mode=caption_mode,
+                    normalized_body=normalized_body,
                 )
             )
             continue
@@ -578,7 +594,14 @@ def _rewrite_tex2word_minipages(
         end_command = text[candidate.end_start : candidate.end_command_end]
         derived_figures: list[str] = []
         for child in candidate.children:
-            child_block = text[child.begin_start : child.end_command_end]
+            if child.normalized_body is None:
+                child_block = text[child.begin_start : child.end_command_end]
+            else:
+                child_block = (
+                    text[child.begin_start : child.body_start]
+                    + child.normalized_body
+                    + text[child.end_start : child.end_command_end]
+                )
             centering = "\n  \\centering" if candidate.copy_centering else ""
             derived_figures.append(f"{begin_command}{centering}\n{child_block}\n{end_command}")
         normalized_block = "\n".join(derived_figures)
@@ -614,6 +637,14 @@ def _rewrite_tex2word_minipages(
                 "direct_child_count": len(candidate.children),
                 "includegraphics_count": len(candidate.children),
                 "caption_count": len(candidate.children),
+                "source_caption_count": sum(
+                    1 for child in candidate.children if child.caption_mode == "caption"
+                ),
+                "manual_caption_normalizations": sum(
+                    1
+                    for child in candidate.children
+                    if child.caption_mode == "manual_figure_counter"
+                ),
                 "label_count": len(labels),
                 "labels": labels,
                 "nested_subfigure_constructs": 0,
@@ -1027,6 +1058,12 @@ def build_image_overlay(
 
             rewritten = _rewrite_text(text, replacements)
             if compatibility_profile == TEX2WORD_COMPATIBILITY_PROFILE:
+                rewritten, subcaptionbox_transformations = rewrite_tex2word_subcaptionboxes(
+                    rewritten,
+                    source_path=source_file.path,
+                    profile=compatibility_profile,
+                )
+                compatibility_transformations.extend(subcaptionbox_transformations)
                 rewritten, file_transformations = _rewrite_tex2word_minipages(
                     rewritten,
                     source_path=source_file.path,

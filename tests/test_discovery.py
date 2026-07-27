@@ -360,6 +360,100 @@ def test_dotted_graphic_basename_with_two_real_candidates_is_ambiguous(
     assert discovery.external_references[0].reason == "ambiguous"
 
 
+def test_explicit_graphic_extension_uses_unique_same_root_fallback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Figure").mkdir()
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\graphicspath{{Figure/}}\n"
+        "\\begin{document}"
+        "\\includegraphics{Geometry of the specimen.pdf}"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+    fallback = "Figure/Geometry of the specimen.pdf.pdf"
+    (tmp_path / fallback).write_bytes(b"fixture")
+
+    discovery = discover_project(tmp_path)
+
+    assert {item.path for item in discovery.files} == {"main.tex", fallback}
+    assert {(edge.kind, edge.target) for edge in discovery.dependency_edges} == {
+        ("graphic", fallback)
+    }
+    assert discovery.external_references == ()
+
+
+def test_exact_explicit_graphic_wins_without_probing_extension_fallback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Figure").mkdir()
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\graphicspath{{Figure/}}\n"
+        "\\begin{document}\\includegraphics{plot.pdf}\\end{document}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Figure" / "plot.pdf").write_bytes(b"exact")
+    (tmp_path / "Figure" / "plot.pdf.pdf").write_bytes(b"fallback")
+
+    discovery = discover_project(tmp_path)
+
+    assert {item.path for item in discovery.files} == {
+        "Figure/plot.pdf",
+        "main.tex",
+    }
+    assert discovery.external_references == ()
+
+
+def test_explicit_graphic_extension_fallback_must_be_unique(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Figure").mkdir()
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\graphicspath{{Figure/}}\n"
+        "\\begin{document}\\includegraphics{plot.pdf}\\end{document}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Figure" / "plot.pdf.pdf").write_bytes(b"pdf")
+    (tmp_path / "Figure" / "plot.pdf.png").write_bytes(b"png")
+
+    discovery = discover_project(tmp_path)
+
+    assert discovery.blocked is True
+    assert [(item.kind, item.reason, item.reference) for item in discovery.external_references] == [
+        ("graphic", "ambiguous", "plot.pdf")
+    ]
+
+
+def test_explicit_graphic_extension_fallback_still_rejects_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "Figure").mkdir()
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        "\\graphicspath{{Figure/}}\n"
+        "\\begin{document}\\includegraphics{plot.pdf}\\end{document}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Figure" / "plot.pdf.pdf").write_bytes(b"fixture")
+    real_link_probe = discovery_module._is_link_or_junction
+
+    def simulate_link(path: Path) -> bool:
+        return path.name == "plot.pdf.pdf" or real_link_probe(path)
+
+    monkeypatch.setattr(discovery_module, "_is_link_or_junction", simulate_link)
+
+    discovery = discover_project(tmp_path)
+
+    assert discovery.blocked is True
+    assert [(item.kind, item.reason) for item in discovery.external_references] == [
+        ("graphic", "link_escape")
+    ]
+
+
 def test_plain_graphic_reference_in_included_file_is_source_root_relative(
     tmp_path: Path,
 ) -> None:

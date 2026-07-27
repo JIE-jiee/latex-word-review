@@ -54,12 +54,17 @@ argument vector equivalent to:
 pandoc main.tex --from=latex --to=docx --standalone --output=<owned-stage.docx> --resource-path=.
 ```
 
-The process always runs with `cwd` equal to the validated source root. The S3
-bounded runtime uses no shell, provides a small UTF-8 environment, closes
-stdin, limits stdout/stderr, enforces a timeout of at most 60 seconds, and
-kills a process that exceeds either bound. Executable paths and raw process
-output are not serialized into reports. A missing Pandoc installation is a
-clear blocked/skip condition, never a simulated pass.
+The process always runs with `cwd` equal to the validated source root. The
+conversion runtime uses no shell, provides a small UTF-8 environment, closes
+stdin, limits stdout/stderr, defaults to 300 seconds, and enforces a hard
+maximum of 600 seconds for each conversion invocation. When a clean review and
+an existing-changes display are both requested, each conversion receives its
+own full budget; elapsed time from the clean conversion is not subtracted from
+the display conversion. The Pandoc version probe, image renderer, Word COM
+refresh, and other non-conversion commands retain their narrower existing
+limits (at most 60 seconds). Executable paths and raw process output are not
+serialized into reports. A missing Pandoc installation is a clear blocked/skip
+condition, never a simulated pass.
 
 Both adapters rediscover the derived input after conversion. Derived-input or
 authoritative-source drift fails the run. They write only an owned sibling

@@ -1065,7 +1065,7 @@ def test_display_rejects_added_simple_field(
     assert error.violation.details["evidence_kind"] == "field instructions"
 
 
-def test_workflow_rejects_empty_revision_macro_display(tmp_path: Path) -> None:
+def test_workflow_keeps_clean_review_for_empty_revision_macro(tmp_path: Path) -> None:
     origin = tmp_path / "origin"
     run = tmp_path / "run"
     origin.mkdir()
@@ -1087,15 +1087,14 @@ def test_workflow_rejects_empty_revision_macro_display(tmp_path: Path) -> None:
         generated_at=TIME,
     )
 
-    with pytest.raises(ContractError) as caught:
-        export_workflow(
-            run,
-            confidentiality="public_fixture",
-            generated_at=TIME,
-        )
-
-    assert caught.value.code is ErrorCode.SCHEMA_INVALID
-    assert (
-        caught.value.violation.message == "revision display expectations must contain visible text"
+    result = export_workflow(
+        run,
+        confidentiality="public_fixture",
+        generated_at=TIME,
     )
-    assert not (run / "export").exists()
+
+    assert result["phase"] == "exported"
+    assert result["counts"]["revision_macro_instances"] == 1
+    assert result["counts"]["revision_display_available"] == 1
+    assert (run / "export/review.docx").is_file()
+    assert (run / "export/existing-changes-display.docx").is_file()
