@@ -74,7 +74,7 @@ dev = [
   "pip>=25,<27",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
-  "ruff>=0.9,<1",
+  "ruff>=0.16.1,<1",
   "setuptools==83.0.0",
   "twine>=6,<8",
   "types-jsonschema>=4.26.0.20260518,<4.27",
