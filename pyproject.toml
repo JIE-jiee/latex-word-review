@@ -85,7 +85,7 @@ fixture = [
   "python-docx>=1.2,<2",
 ]
 browser-e2e = [
-  "playwright==1.61.0",
+  "playwright==1.62.0",
   "pytest>=8.3,<10",
 ]
 release = [
