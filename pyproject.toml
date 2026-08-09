@@ -59,7 +59,7 @@ math-fallback = [
 ]
 pdf-figures = [
   "pillow>=12,<13",
-  "pypdfium2>=5,<6",
+  "pypdfium2>=5.12.1,<6",
   "tex2word[pdf]==1.0.6",
 ]
 
