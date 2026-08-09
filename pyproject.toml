@@ -48,7 +48,7 @@ Changelog = "https://github.com/JIE-jiee/latex-word-review/blob/main/CHANGELOG.m
 
 [project.optional-dependencies]
 citations = [
-  "citeproc-py>=0.10,<0.11",
+  "citeproc-py>=0.10.4,<0.11",
   "tex2word[csl]==1.0.6",
 ]
 math-fallback = [

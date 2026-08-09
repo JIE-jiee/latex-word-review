@@ -147,14 +147,14 @@ wheels = [
 
 [[package]]
 name = "citeproc-py"
-version = "0.10.1"
+version = "0.10.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lxml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/05/e6/f97aa815a7d8e6fbed1923f755defa3dd2fa49af99698dce8822be7bc397/citeproc_py-0.10.1.tar.gz", hash = "sha256:41e7247ae90fd185b2432e1484776507ac8542ddf491ceec1d9937b3a4c25843", size = 267348, upload-time = "2026-07-08T22:06:09.807Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/88/28fedf9948261653143a6ab4fa28e33675598abd83f0bad79bc57e6a54c1/citeproc_py-0.10.4.tar.gz", hash = "sha256:da66ca7228a18d23aacb5994320683c52e49f0d9fc5e2644ad7cca774247404e", size = 275298, upload-time = "2026-08-05T15:34:57.763Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/80/bacafa527858774f53271224ca83e5fc22e4b116c1bfe7e4d4f9dfb3e305/citeproc_py-0.10.1-py3-none-any.whl", hash = "sha256:9058b231603fdd71566c85cb5b9d30c507d0bbdbca833acfcdbd972d1030f889", size = 356183, upload-time = "2026-07-08T22:06:08.558Z" },
+    { url = "https://files.pythonhosted.org/packages/45/81/81d5d815ab3ed07cd6fff2aed538b5e72ad5abd5fe848cb53cb338671e71/citeproc_py-0.10.4-py3-none-any.whl", hash = "sha256:b170c87940e89b5732ec9e8771a6124ca681b531be071c2c031cf9a25308a075", size = 386508, upload-time = "2026-08-05T15:34:56.311Z" },
 ]
 
 [[package]]
@@ -593,7 +593,7 @@ release = [
 
 [package.metadata]
 requires-dist = [
-    { name = "citeproc-py", marker = "extra == 'citations'", specifier = ">=0.10,<0.11" },
+    { name = "citeproc-py", marker = "extra == 'citations'", specifier = ">=0.10.4,<0.11" },
     { name = "jsonschema", specifier = ">=4.26,<5" },
     { name = "kiwisolver", marker = "extra == 'math-fallback'", specifier = ">=1.4.8,<1.6" },
     { name = "latex2mathml", marker = "extra == 'math-fallback'", specifier = ">=3.77,<4" },
