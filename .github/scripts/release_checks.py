@@ -40,10 +40,10 @@ EXPECTED_REQUIRES_DIST = frozenset(
         "tex2word[csl]==1.0.6; extra == 'citations'",
         "kiwisolver<1.6,>=1.4.8; extra == 'math-fallback'",
         "latex2mathml<4,>=3.77; extra == 'math-fallback'",
-        "matplotlib<3.12,>=3.10; extra == 'math-fallback'",
+        "matplotlib<3.12,>=3.11.1; extra == 'math-fallback'",
         "tex2word[mathimg,mathml]==1.0.6; extra == 'math-fallback'",
         "pillow<13,>=12; extra == 'pdf-figures'",
-        "pypdfium2<6,>=5; extra == 'pdf-figures'",
+        "pypdfium2<6,>=5.12.1; extra == 'pdf-figures'",
         "tex2word[pdf]==1.0.6; extra == 'pdf-figures'",
     }
 )

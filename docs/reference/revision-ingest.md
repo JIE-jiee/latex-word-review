@@ -21,10 +21,10 @@ from pathlib import Path
 from latex_word_review.ingest import archive_returned_docx, verify_returned_archive
 
 archive = archive_returned_docx(
-    Path('received/review.docx'),
-    Path('run/returned'),
-    run_id='run_019b0000-0000-7000-8000-000000000001',
-    exported_docx_sha256='sha256:' + 'a' * 64,
+    Path("received/review.docx"),
+    Path("run/returned"),
+    run_id="run_019b0000-0000-7000-8000-000000000001",
+    exported_docx_sha256="sha256:" + "a" * 64,
 )
 verified = verify_returned_archive(
     archive.directory,

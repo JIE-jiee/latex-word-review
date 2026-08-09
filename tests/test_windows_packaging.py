@@ -80,7 +80,7 @@ def _write_synthetic_release(root: Path) -> tuple[Path, Path, Path]:
         "lxml-6.1.1.dist-info": ("licenses/LICENSE.txt", "licenses/LICENSES.txt"),
         "pillow-12.3.0.dist-info": ("licenses/LICENSE",),
         "pylatexenc-2.10.dist-info": ("licenses/LICENSE.txt",),
-        "pypdfium2-5.12.0.dist-info": (
+        "pypdfium2-5.12.1.dist-info": (
             "licenses/LICENSES/Apache-2.0.txt",
             "licenses/LICENSES/BSD-3-Clause.txt",
             "licenses/LICENSES/CC-BY-4.0.txt",
