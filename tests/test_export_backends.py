@@ -140,7 +140,7 @@ def test_tex2word_real_e0_contract_on_a_copy(tmp_path: Path) -> None:
     inspection = inspect_docx(output)
 
     assert result.succeeded
-    assert result.capabilities.tool_version == "1.0.5"
+    assert result.capabilities.tool_version == "1.0.6"
     assert result.capabilities.interface_version == tex2word_module.TEX2WORD_INTERFACE_VERSION
     assert result.native_report["reference_loaded"] is True
     assert result.native_report["reference_profile"] == "academic-review-v1"
@@ -179,7 +179,7 @@ def test_real_tex2word_embeds_selected_pdf_page_as_related_png(
 ) -> None:
     _require_pdf_runtime()
     backend = Tex2WordBackend()
-    if backend.capabilities().tool_version != "1.0.5":
+    if backend.capabilities().tool_version != "1.0.6":
         pytest.skip("locked tex2word runtime is unavailable")
     source = tmp_path / "source"
     (source / "figures").mkdir(parents=True)

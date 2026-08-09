@@ -16,7 +16,10 @@ from typing import Literal, cast
 from lxml import etree  # type: ignore[import-untyped]
 
 from latex_word_review.backends.base import BackendRequest, BackendResult, ExportBackend
-from latex_word_review.backends.tex2word import TEX2WORD_INTERFACE_VERSION
+from latex_word_review.backends.tex2word import (
+    SUPPORTED_TEX2WORD_VERSION,
+    TEX2WORD_INTERFACE_VERSION,
+)
 from latex_word_review.canonical import sha256_canonical
 from latex_word_review.discovery import ProjectDiscovery, discover_project
 from latex_word_review.docx_anchor import AnchorReason, insert_unique_source_bookmarks
@@ -654,7 +657,7 @@ def export_review_docx(
         if (
             backend_capabilities.backend_id == "tex2word-public-api"
             and backend_capabilities.tool_name == "tex2word"
-            and backend_capabilities.tool_version == "1.0.5"
+            and backend_capabilities.tool_version == SUPPORTED_TEX2WORD_VERSION
             and backend_capabilities.interface_version == TEX2WORD_INTERFACE_VERSION
         )
         else None

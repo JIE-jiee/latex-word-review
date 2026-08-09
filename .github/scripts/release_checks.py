@@ -17,7 +17,7 @@ import unicodedata
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 MAX_SCAN_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
@@ -35,16 +35,16 @@ EXPECTED_REQUIRES_DIST = frozenset(
         "referencing<1,>=0.37",
         "regex<2027,>=2026.7.10",
         "rfc8785<0.2,>=0.1.4",
-        "tex2word==1.0.5",
+        "tex2word==1.0.6",
         "citeproc-py<0.11,>=0.10; extra == 'citations'",
-        "tex2word[csl]==1.0.5; extra == 'citations'",
+        "tex2word[csl]==1.0.6; extra == 'citations'",
         "kiwisolver<1.6,>=1.4.8; extra == 'math-fallback'",
         "latex2mathml<4,>=3.77; extra == 'math-fallback'",
         "matplotlib<3.12,>=3.10; extra == 'math-fallback'",
-        "tex2word[mathimg,mathml]==1.0.5; extra == 'math-fallback'",
+        "tex2word[mathimg,mathml]==1.0.6; extra == 'math-fallback'",
         "pillow<13,>=12; extra == 'pdf-figures'",
         "pypdfium2<6,>=5; extra == 'pdf-figures'",
-        "tex2word[pdf]==1.0.5; extra == 'pdf-figures'",
+        "tex2word[pdf]==1.0.6; extra == 'pdf-figures'",
     }
 )
 PRIVATE_PATH_RE = re.compile(
@@ -669,8 +669,8 @@ def check_sdist(path: Path, expected_version: str) -> None:
             path.open("rb") as compressed,
             gzip.GzipFile(fileobj=compressed, mode="rb") as decompressed,
         ):
-            bounded = _BoundedReader(decompressed, MAX_ARCHIVE_STREAM_BYTES)
-            with tarfile.open(fileobj=bounded, mode="r|") as archive:
+            bounded = _BoundedReader(cast(BinaryIO, decompressed), MAX_ARCHIVE_STREAM_BYTES)
+            with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="r|") as archive:
                 for member in archive:
                     if len(names) >= MAX_ARCHIVE_MEMBERS:
                         raise ReleaseCheckError("sdist member count exceeds its limit")
@@ -1014,7 +1014,7 @@ def project_version(path: Path) -> str:
     matches = re.findall(r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$', text, re.MULTILINE)
     if len(matches) != 1:
         raise ReleaseCheckError("could not read exactly one package version")
-    return matches[0]
+    return str(matches[0])
 
 
 def command_version(args: argparse.Namespace) -> None:

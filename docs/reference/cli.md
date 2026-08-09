@@ -51,7 +51,7 @@ portable-path、root containment、symlink/junction、普通文件、64 MiB 上�
 RunManifest `payload.artifacts`，供 AuditBundle selector 离线复核。
 
 Pandoc 适配器目前是显式选择的 baseline/degraded 后端，而不是与固定
-`tex2word==1.0.5` 同等级的持续验证默认值；缺少 Pandoc 或 pandoc-crossref 时必须由
+`tex2word==1.0.6` 同等级的持续验证默认值；缺少 Pandoc 或 pandoc-crossref 时必须由
 `doctor` 和能力对象报告，不能静默降级。
 
 ## 首选 CLI 高层工作流

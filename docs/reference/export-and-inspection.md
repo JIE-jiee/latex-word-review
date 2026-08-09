@@ -20,13 +20,13 @@ public entry points are:
 
 ## Backend isolation
 
-`Tex2WordBackend` is locked to tex2word 1.0.5 and calls only the public
+`Tex2WordBackend` is locked to tex2word 1.0.6 and calls only the public
 `convert_source()` API. It passes the validated source root as `base_dir`, uses
 the pure frontend, and disables tex2word's timestamped embedded manifest. The
 adapter consumes only returned DOCX bytes and public report counters. It does
 not copy or import tex2word parser, IR, writer, or OMML internals.
 
-The worker also uses tex2word 1.0.5's public `reference_doc` parameter. The
+The worker also uses tex2word 1.0.6's public `reference_doc` parameter. The
 `academic-review-v1` DOCX is generated from five fixed OPC/XML members with
 fixed ZIP metadata, verified against a pinned SHA-256, materialized only in the
 owned conversion stage, and removed in `finally`. It is not a wheel asset. The
@@ -41,7 +41,7 @@ live fields. Before sealing the reviewer-facing copy, the field finalizer
 reapplies deterministic table/image geometry and restores only trusted
 paragraph/run/table properties by stable style name. Word's IDs and document
 references are retained, while the pre-refresh style defaults are restored.
-tex2word 1.0.5 can expose a report entry's severity either as its enum object
+tex2word 1.0.6 can expose a report entry's severity either as its enum object
 or as the enum's string value, depending on the construct. The isolated worker
 normalizes both documented runtime shapes before counting warnings and errors;
 unknown non-string values fail closed instead of escaping into the parent
@@ -135,7 +135,7 @@ closed with `E_SCHEMA_INVALID` instead of treating a clean-looking Word file as 
 
 ### Two conversion profiles
 
-The project injects in-memory macro definitions and wraps the locked `tex2word==1.0.5` macro expansion, intermediate representation, `textcolor` / `sout` handling, and Word writer.
+The project injects in-memory macro definitions and wraps the locked `tex2word==1.0.6` macro expansion, intermediate representation, `textcolor` / `sout` handling, and Word writer.
 
 | Profile | Semantics | Artifact |
 |---|---|---|
@@ -229,7 +229,7 @@ input share one future, while manifest entries remain in original LaTeX order
 regardless of completion order. This bounds Windows memory use and avoids
 rendering the same PDF page twice without weakening per-occurrence evidence.
 
-tex2word 1.0.5 has one narrowly version-gated compatibility profile for a
+tex2word 1.0.6 has one narrowly version-gated compatibility profile for a
 known parser loss: several direct `minipage` children of `figure` can otherwise
 collapse to the final image. In the derived tree only, a `minipage` is renamed
 to `subfigure` only when it is a direct `figure`/`figure*` child, contains
@@ -422,7 +422,7 @@ package/structure acceptance all succeed.
 
 ## E0 contract evidence
 
-With tex2word 1.0.5, the public E0 source produces 34 total paragraphs, 5 OMML
+With tex2word 1.0.6, the public E0 source produces 34 total paragraphs, 5 OMML
 objects, 1 image, 1 table, 9 upstream bookmarks, and 11 live fields (5 `SEQ`,
 6 `REF`, 0 `PAGEREF`). The v2 scanner exposes 23 byte-exact plain-text units:
 19 receive exact Word anchors and 4 deliberately remain ambiguous with

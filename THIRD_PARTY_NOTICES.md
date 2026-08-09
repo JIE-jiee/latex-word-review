@@ -70,7 +70,7 @@ Windows recipe even though it is exposed as the `pdf-figures` extra to normal Py
 | [regex](https://github.com/mrabarnett/mrab-regex) | `2026.7.10` | Direct | [Apache-2.0 AND CNRI-Python](https://github.com/mrabarnett/mrab-regex/blob/hg/LICENSE.txt); copied `regex-*.dist-info/licenses/LICENSE.txt` |
 | [rfc8785](https://github.com/trailofbits/rfc8785.py) | `0.1.4` | Direct | [Apache-2.0](https://github.com/trailofbits/rfc8785.py/blob/main/LICENSE). Its current wheel declares the license but does not carry a `License-File`; this notice links it and the bundled project `LICENSE` contains the same Apache-2.0 terms. |
 | [rpds-py](https://github.com/crate-py/rpds) | `2026.6.3` | Transitive through `jsonschema` / `referencing` | [MIT](https://github.com/crate-py/rpds/blob/main/LICENSE); copied `rpds_py-*.dist-info/licenses/LICENSE` |
-| [tex2word](https://github.com/yfyang86/tex2word) | `1.0.5` | Direct preferred conversion backend | [MIT](https://github.com/yfyang86/tex2word/blob/main/LICENSE); copied `tex2word-*.dist-info/licenses/LICENSE` |
+| [tex2word](https://github.com/yfyang86/tex2word) | `1.0.6` | Direct preferred conversion backend | [MIT](https://github.com/yfyang86/tex2word/blob/main/LICENSE); copied `tex2word-*.dist-info/licenses/LICENSE` |
 | [typing-extensions](https://github.com/python/typing_extensions) | `4.16.0` | Transitive from `referencing` on Python `<3.13`; metadata is explicitly copied by the current frozen recipe | [PSF-2.0](https://github.com/python/typing_extensions/blob/main/LICENSE); copied `typing_extensions-*.dist-info/licenses/LICENSE` |
 
 The `latex-word-review-*.dist-info` directory is also copied for runtime metadata, but it describes

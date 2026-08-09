@@ -50,7 +50,7 @@ from latex_word_review.tex2word_compat import (
 IMAGE_OVERLAY_MANIFEST: Final[str] = "image-overlay-manifest.json"
 IMAGE_OVERLAY_ROOT: Final[str] = "lwr-images"
 IMAGE_OVERLAY_FORMAT: Final[str] = "latex-word-review-image-overlay-v1"
-TEX2WORD_COMPATIBILITY_PROFILE: Final[str] = "tex2word-1.0.5-review-compat-v5"
+TEX2WORD_COMPATIBILITY_PROFILE: Final[str] = "tex2word-1.0.6-review-compat-v6"
 _RASTER_FORMATS: Final[frozenset[str]] = frozenset({"png", "jpg", "jpeg"})
 _LAYOUT_OPTIONS: Final[frozenset[str]] = frozenset(
     {"width", "height", "totalheight", "scale", "keepaspectratio"}
@@ -474,7 +474,7 @@ def _tex2word_minipage_candidates(
 ) -> tuple[_FigureMinipageSplitCandidate, ...]:
     """Find only complete multi-minipage figures that are safe to split.
 
-    tex2word 1.0.5 drops figure-number bookmarks when an uncaptioned outer
+    The locked tex2word 1.0.6 release drops figure-number bookmarks when an uncaptioned outer
     figure is converted through its subfigure path.  The source semantics of
     the supported shape are several independent minipage captions, so the
     derived overlay presents each minipage as its own consecutive figure.

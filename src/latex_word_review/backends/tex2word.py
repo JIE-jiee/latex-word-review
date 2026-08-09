@@ -1,4 +1,4 @@
-"""Bounded tex2word 1.0.5 adapter using its documented public Python API."""
+"""Bounded tex2word 1.0.6 adapter using its documented public Python API."""
 
 from __future__ import annotations
 
@@ -37,13 +37,15 @@ from .base import (
     successful_result,
 )
 
-SUPPORTED_TEX2WORD_VERSION = "1.0.5"
+SUPPORTED_TEX2WORD_VERSION = "1.0.6"
 TEX2WORD_INTERFACE_VERSION = "python-api-convert-source-v3-revision-view"
 _REPORT_PREFIX = ".lwr-t2w-report-"
 
 
 def _evidence(label: str) -> str:
-    return sha256_canonical({"backend": "tex2word", "version": "1.0.5", "evidence": label})
+    return sha256_canonical(
+        {"backend": "tex2word", "version": SUPPORTED_TEX2WORD_VERSION, "evidence": label}
+    )
 
 
 def _capabilities(version: str | None) -> BackendCapabilities:
@@ -58,7 +60,7 @@ def _capabilities(version: str | None) -> BackendCapabilities:
         tool_name="tex2word",
         tool_version=version,
         interface_version=TEX2WORD_INTERFACE_VERSION,
-        distribution="PyPI tex2word==1.0.5",
+        distribution=f"PyPI tex2word=={SUPPORTED_TEX2WORD_VERSION}",
         configuration_sha256=runtime_configuration_sha256(
             "tex2word",
             {
@@ -253,7 +255,9 @@ class Tex2WordBackend:
             return failed_result(
                 capabilities,
                 code=ErrorCode.TOOL_VERSION_UNSUPPORTED,
-                message="the locked tex2word 1.0.5 backend is unavailable",
+                message=(
+                    f"the locked tex2word {SUPPORTED_TEX2WORD_VERSION} backend is unavailable"
+                ),
             )
         prepared = prepare_export(request, owner="tex2word")
         report_path = self._prepare_report_path(prepared.output_path.parent)

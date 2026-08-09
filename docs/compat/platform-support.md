@@ -30,7 +30,7 @@ they are not Linux or macOS support promises.
 
 | Component | Supported/checked combination | Support statement |
 |---|---|---|
-| `tex2word` | Python package `1.0.5` on supported Windows/Python combinations | pinned default conversion backend; executed in the project's bounded worker and covered by public-fixture tests |
+| `tex2word` | Python package `1.0.6` on supported Windows/Python combinations | pinned default conversion backend; executed in the project's bounded worker and covered by public-fixture tests |
 | Pandoc baseline | Pandoc `3.9.0.2` plus `pandoc-crossref 0.3.24a` on Windows | documented compatible pair; external executables are not bundled and must be detected by `doctor` |
 | Pandoc without crossref | separately detected Windows Pandoc executable | baseline/degraded backend only; capability loss must be reported |
 | MiKTeX / XeLaTeX | official Setup Utility `miktexsetup-5.5.0+1763023-x64.zip`, SHA-256 `0571e90f6d94353089b4f189fd82a532f9fe559a388c7e7f1102b14b3c1ae27d` | required Windows distribution bootstrap for the hosted real-TeX gate; the gate must record actual identity and resolve `ctex.sty` plus `FandolSong-Regular.otf` before compiling |

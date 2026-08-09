@@ -105,7 +105,7 @@ def _write_synthetic_release(root: Path) -> tuple[Path, Path, Path]:
         "regex-2026.7.10.dist-info": ("licenses/LICENSE.txt",),
         "rfc8785-0.1.4.dist-info": ("LICENSE",),
         "rpds_py-2026.6.3.dist-info": ("licenses/LICENSE",),
-        "tex2word-1.0.5.dist-info": ("licenses/LICENSE",),
+        "tex2word-1.0.6.dist-info": ("licenses/LICENSE",),
         "typing_extensions-4.16.0.dist-info": ("licenses/LICENSE",),
     }
     for metadata_name, license_paths in metadata_licenses.items():
