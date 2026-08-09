@@ -54,12 +54,12 @@ citations = [
 math-fallback = [
   "kiwisolver>=1.4.8,<1.6",
   "latex2mathml>=3.77,<4",
-  "matplotlib>=3.10,<3.12",
+  "matplotlib>=3.11.1,<3.12",
   "tex2word[mathimg,mathml]==1.0.6",
 ]
 pdf-figures = [
   "pillow>=12,<13",
-  "pypdfium2>=5,<6",
+  "pypdfium2>=5.12.1,<6",
   "tex2word[pdf]==1.0.6",
 ]
 
@@ -74,7 +74,7 @@ dev = [
   "pip>=25,<27",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
-  "ruff>=0.9,<1",
+  "ruff>=0.16.1,<1",
   "setuptools==83.0.0",
   "twine>=6,<8",
   "types-jsonschema>=4.26.0.20260518,<4.27",
@@ -85,7 +85,7 @@ fixture = [
   "python-docx>=1.2,<2",
 ]
 browser-e2e = [
-  "playwright==1.61.0",
+  "playwright==1.62.0",
   "pytest>=8.3,<10",
 ]
 release = [

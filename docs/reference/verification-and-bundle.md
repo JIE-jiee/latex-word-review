@@ -170,8 +170,8 @@ commands[]
 from latex_word_review.ledger import build_ledger
 
 ledger = build_ledger(changeset, approval_set, patch_plan, verification_report)
-ledger.json_bytes   # RFC 8785 canonical JSON + LF
-ledger.html_bytes   # 单文件 UTF-8 HTML
+ledger.json_bytes  # RFC 8785 canonical JSON + LF
+ledger.html_bytes  # 单文件 UTF-8 HTML
 ```
 
 账本是四个 sealed 对象的确定性只读投影。构造前会复核 run/source/change/approval/

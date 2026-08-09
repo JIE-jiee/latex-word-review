@@ -65,7 +65,7 @@ Windows recipe even though it is exposed as the `pdf-figures` extra to normal Py
 | [lxml](https://github.com/lxml/lxml) | `6.1.1` | Direct | [BSD-3-Clause](https://github.com/lxml/lxml/blob/lxml-6.1.1/LICENSE.txt). The copied 6.1.1 [`LICENSES.txt`](https://github.com/lxml/lxml/blob/lxml-6.1.1/LICENSES.txt) covers lxml code/resource exceptions only; it does **not** contain the bundled native libraries' terms. See the [candidate audit](docs/reviews/windows-binary-license-audit-2026-07.md). |
 | [Pillow](https://github.com/python-pillow/Pillow) | `12.3.0` | Frozen PDF support | [MIT-CMU plus component-specific licenses](https://github.com/python-pillow/Pillow/blob/main/LICENSE); the wheel's complete `pillow-*.dist-info/licenses/LICENSE` is copied |
 | [pylatexenc](https://github.com/phfaist/pylatexenc) | `2.10` | Transitive through `tex2word` | [MIT](https://github.com/phfaist/pylatexenc/blob/main/LICENSE.txt); copied `pylatexenc-*.dist-info/licenses/LICENSE.txt` |
-| [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | `5.12.0` | Frozen PDF support | [Apache-2.0 / BSD-3-Clause for pypdfium2, with separate data/build dependency licenses](https://github.com/pypdfium2-team/pypdfium2#licensing); the full `pypdfium2-*.dist-info/licenses/` tree is copied |
+| [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | `5.12.1` | Frozen PDF support | [Apache-2.0 / BSD-3-Clause for pypdfium2, with separate data/build dependency licenses](https://github.com/pypdfium2-team/pypdfium2#licensing); the full `pypdfium2-*.dist-info/licenses/` tree is copied |
 | [referencing](https://github.com/python-jsonschema/referencing) | `0.37.0` | Direct and transitive | [MIT](https://github.com/python-jsonschema/referencing/blob/main/COPYING); copied `referencing-*.dist-info/licenses/COPYING` |
 | [regex](https://github.com/mrabarnett/mrab-regex) | `2026.7.10` | Direct | [Apache-2.0 AND CNRI-Python](https://github.com/mrabarnett/mrab-regex/blob/hg/LICENSE.txt); copied `regex-*.dist-info/licenses/LICENSE.txt` |
 | [rfc8785](https://github.com/trailofbits/rfc8785.py) | `0.1.4` | Direct | [Apache-2.0](https://github.com/trailofbits/rfc8785.py/blob/main/LICENSE). Its current wheel declares the license but does not carry a `License-File`; this notice links it and the bundled project `LICENSE` contains the same Apache-2.0 terms. |
@@ -98,7 +98,7 @@ must not be assumed complete:
   `libwebp`, `openjpeg`, `tiff`, `xz`, and `zlib-ng` components. Their terms are not all
   MIT-CMU. The complete, unabridged wheel file is copied as
   `pillow-*.dist-info/licenses/LICENSE` and controls over this summary.
-- The pypdfium2 5.12.0 Windows wheel supplies the `pypdfium2_raw` module and `pdfium.dll`; there
+- The pypdfium2 5.12.1 Windows wheel supplies the `pypdfium2_raw` module and `pdfium.dll`; there
   is no separate `pypdfium2_raw` Python distribution. The inspected wheel identifies PDFium
   `152.0.7947.0`, sourced from `pdfium-binaries`. PDFium's current
   [official license](https://pdfium.googlesource.com/pdfium/+/refs/heads/main/LICENSE) and the
