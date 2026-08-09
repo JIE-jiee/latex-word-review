@@ -3,7 +3,7 @@
 The scanner is deliberately not a TeX engine.  It recognizes a small,
 versioned surface for ``changes``-style inline revision commands while
 skipping inert or dynamically selected source regions.  The injection helper
-does not touch disk; it appends definitions that tex2word 1.0.5 collects before
+does not touch disk; it appends definitions that the locked tex2word release collects before
 expanding the complete source.
 """
 

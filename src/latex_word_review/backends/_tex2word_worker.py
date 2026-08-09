@@ -24,6 +24,8 @@ from latex_word_review.review_reference import (
 )
 from latex_word_review.revision_macros import inject_revision_macros
 
+_SUPPORTED_TEX2WORD_VERSION = "1.0.6"
+
 
 class _Severity(Protocol):
     value: str
@@ -113,7 +115,7 @@ def _bounded_constructs(entries: tuple[_ReportEntry, ...]) -> list[str]:
 
 
 def _severity_value(entry: _ReportEntry) -> str:
-    """Normalize both report shapes emitted by tex2word 1.0.5."""
+    """Normalize both report shapes emitted by the locked tex2word release."""
 
     severity = entry.severity
     value = severity if isinstance(severity, str) else severity.value
@@ -128,7 +130,7 @@ def _windows_image_path_compat(module: object) -> Iterator[None]:
     if os.name != "nt":
         yield
         return
-    if getattr(module, "__version__", None) != "1.0.5":
+    if getattr(module, "__version__", None) != _SUPPORTED_TEX2WORD_VERSION:
         raise RuntimeError("tex2word image-path compatibility version mismatch")
     document_module = importlib.import_module("tex2word.backend.document")
     writer = getattr(document_module, "DocumentWriter", None)

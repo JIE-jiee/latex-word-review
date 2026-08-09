@@ -168,7 +168,7 @@ serializable = report.as_dict()
 ```
 
 默认必需项是 `tex2word` 可执行文件、`tex2word` Python 包和 `lxml` Python 包。
-`tex2word 1.0.5` 没有 `--version` 选项，因此其可执行入口用无副作用的 `--help`
+`tex2word 1.0.6` 没有 `--version` 选项，因此其可执行入口用无副作用的 `--help`
 探活，精确版本由同一环境的 distribution metadata 提供。Pandoc、
 `pandoc-crossref`、`latexmk`、`latexdiff`、TeX 引擎、Biber、Tectonic 和 LibreOffice
 作为可选能力报告。必需项缺失时状态为 `blocked`；仅可选项缺失时为 `degraded`；全部

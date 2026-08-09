@@ -92,7 +92,7 @@ class DoctorReport:
 
 
 DEFAULT_TOOL_SPECS: tuple[ToolSpec, ...] = (
-    # tex2word 1.0.5 exposes no --version option.  Probe its executable with
+    # The locked tex2word release exposes no --version option. Probe its executable with
     # --help and bind the actual release through the required package probe.
     ToolSpec("tex2word", ("tex2word",), version_arguments=("--help",), required=True),
     ToolSpec("pandoc", ("pandoc",)),

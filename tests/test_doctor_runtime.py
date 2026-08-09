@@ -496,7 +496,7 @@ def test_frozen_doctor_uses_bundled_tex2word_instead_of_external_cli(
     probed_tools: list[str] = []
 
     def fake_package(name: str, *, required: bool) -> PackageProbe:
-        return PackageProbe(name, required, "available", "1.0.5", None)
+        return PackageProbe(name, required, "available", "1.0.6", None)
 
     def fake_tool(spec: ToolSpec, *, cwd: Path) -> ToolProbe:
         assert cwd == tmp_path
@@ -512,7 +512,7 @@ def test_frozen_doctor_uses_bundled_tex2word_instead_of_external_cli(
     embedded = report.tools[0]
     assert embedded.name == "tex2word"
     assert embedded.status == "available"
-    assert embedded.version == "1.0.5"
+    assert embedded.version == "1.0.6"
     assert "tex2word" not in probed_tools
     assert report.status == "pass"
 

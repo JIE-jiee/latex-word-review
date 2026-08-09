@@ -1,6 +1,6 @@
 # E0 上游依赖、许可证与接口证据矩阵
 
-> 核验快照：2026-07-18T04:20:00Z。本文只记录官方 GitHub 仓库、GitHub Release、版本标签源码、PyPI 元数据或项目官方文档中的证据。README 中的功能声明仅作为接口线索；尚未通过本项目 fixture 实测的能力均标为“待契约测试”。
+> 核验快照：2026-08-09。本文只记录官方 GitHub 仓库、GitHub Release、版本标签源码、PyPI 元数据或项目官方文档中的证据。README 中的功能声明仅作为接口线索；尚未通过本项目 fixture 实测的能力均标为“待契约测试”。
 >
 > 当前项目支持范围由 ADR-0002 收敛为 Windows-only。本文关于上游提供 Linux/macOS
 > 二进制的描述仅是上游事实，不构成本项目的平台支持、CI 或维护承诺。
@@ -9,7 +9,7 @@
 
 | 上游 | 当前核验版本 | 最低运行环境 | 许可证 | E0 决策 | 生产边界 |
 |---|---:|---|---|---|---|
-| [`yfyang86/tex2word`](https://github.com/yfyang86/tex2word) | GitHub `v1.0.5` / PyPI `1.0.5` | Python `>=3.12`；基础依赖 `lxml>=5.0`、`pylatexenc>=2.10` | MIT | **adopt + wrap + contribute** | 主转换后端候选。只通过公开 Python API/CLI 适配，不复制 IR、OMML、活字段、OOXML package builder 或 round-trip 实现；审阅账本由本项目实现 |
+| [`yfyang86/tex2word`](https://github.com/yfyang86/tex2word) | GitHub `v1.0.6` / PyPI `1.0.6` | Python `>=3.12`；基础依赖 `lxml>=5.0`、`pylatexenc>=2.10` | MIT | **adopt + wrap + contribute** | 主转换后端候选。只通过公开 Python API/CLI 适配，不复制 IR、OMML、活字段、OOXML package builder 或 round-trip 实现；审阅账本由本项目实现 |
 | [`jgm/pandoc`](https://github.com/jgm/pandoc) | `3.10` | 无 Python 要求；优先使用官方预编译可执行文件。源码构建版本测试 GHC 9.6.7/9.8.4/9.10.3/9.12.2 | GPL-2.0-or-later | **adopt + wrap** | 独立外部进程，作为转换基线和修订读取对照；不把 Pandoc AST 变成本项目公共 Schema，不随 wheel 捆绑 |
 | [`lierdakil/pandoc-crossref`](https://github.com/lierdakil/pandoc-crossref) | Release `v0.3.24a`，程序版本 `0.3.24` | 无 Python 要求；最新预编译件按 Pandoc `3.9.0.2`、GHC `9.8.4` 构建 | 上游元数据 `GPL-2` | **adopt as optional + wrap** | 仅属于 Pandoc 后端，外部进程，不随 wheel 捆绑；必须与 Pandoc 精确成对验证 |
 | [`Mingzefei/latex2word`](https://github.com/Mingzefei/latex2word) / PyPI `tex2docx` | `v1.3.0` / `1.3.0` | Python `>=3.8`；外部 Pandoc；crossref 缺失会降级；子图路径调用 XeLaTeX、`pdftocairo` 且启用 `-shell-escape` | MIT | **reference + optional wrap** | 借鉴预处理、Lua、模板和 fixture；不设为默认依赖。只在不可变快照、显式许可和隔离环境运行高风险子图路径 |
@@ -18,7 +18,7 @@
 
 推荐的 v0.1 组合是：
 
-1. 主转换后端先固定 `tex2word==1.0.5`；上游最低 Python 是 `>=3.12`，而本项目发布
+1. 主转换后端固定 `tex2word==1.0.6`；上游最低 Python 是 `>=3.12`，而本项目发布
    元数据收紧为 `>=3.12,<3.14` 并以 CI 阻塞验证 3.12/3.13。这个项目上限不改写上游
    事实；它避免仅凭上游无上限约束就误称本项目支持 3.14。
 2. Pandoc + pandoc-crossref 基线不能使用“当前 latest/latest”。当前 crossref `v0.3.24a` 的包约束是 `pandoc >=3.8.2,<3.10`，Release 说明其预编译件按 Pandoc `3.9.0.2` 构建；因此首轮成对实验应固定 **Pandoc 3.9.0.2 + pandoc-crossref 0.3.24a**。Pandoc 3.10 可另做“不带 crossref”的对照，直到 crossref 有兼容发行。
@@ -59,48 +59,49 @@ Pandoc 声明 [`GPL-2.0-or-later`](https://github.com/jgm/pandoc/blob/3.10/pando
 
 ## 3. 逐项官方证据与接口边界
 
-### 3.1 tex2word 1.0.5
+### 3.1 tex2word 1.0.5 基线与 1.0.6 复核
 
 **仓库、发行与运行时**
 
 - 官方仓库：[`yfyang86/tex2word`](https://github.com/yfyang86/tex2word)。
-- 最新 GitHub Release：[`v1.0.5`](https://github.com/yfyang86/tex2word/releases/tag/v1.0.5)，发布于 2026-07-12。
-- PyPI：[`tex2word 1.0.5`](https://pypi.org/project/tex2word/1.0.5/)，`requires-python = ">=3.12"`，发行状态分类为 Beta。
-- [`pyproject.toml`](https://github.com/yfyang86/tex2word/blob/v1.0.5/pyproject.toml#L1-L37) 声明 MIT、基础依赖 `lxml>=5.0` 和 `pylatexenc>=2.10`；PDF、MathML、公式图片和 CSL 是可选 extras。
-- [`LICENSE`](https://github.com/yfyang86/tex2word/blob/v1.0.5/LICENSE) 为 MIT。
+- 当前 GitHub Release：[`v1.0.6`](https://github.com/yfyang86/tex2word/releases/tag/v1.0.6)，发布于 2026-07-23；[`v1.0.5...v1.0.6`](https://github.com/yfyang86/tex2word/compare/v1.0.5...v1.0.6) 为一个发布提交。
+- PyPI：[`tex2word 1.0.6`](https://pypi.org/project/tex2word/1.0.6/)，`requires-python = ">=3.12"`，发行状态分类为 Beta。
+- [`pyproject.toml`](https://github.com/yfyang86/tex2word/blob/v1.0.6/pyproject.toml#L1-L37) 继续声明 MIT、基础依赖 `lxml>=5.0` 和 `pylatexenc>=2.10`；PDF、MathML、公式图片和 CSL 是可选 extras。
+- [`LICENSE`](https://github.com/yfyang86/tex2word/blob/v1.0.6/LICENSE) 为 MIT。
+- 1.0.6 保持 `convert_source`、`convert_file` 和 `ConversionResult` 公共接口；新增 exam 类结构、纯布局 TikZ 内容恢复、plain-TeX `\halign`/`\cr` 数学和若干符号支持。本项目仍只包装公开接口，并重新验证既有 Windows 私有图像路径兼容点。
 
 **可包装的公开接口**
 
-- [`tex2word.__init__`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/__init__.py) 明确导出 `convert_source`、`convert_file`、`ConversionResult`。
-- [`ConversionResult`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/pipeline.py#L18-L40) 包含 IR `document`、`ConversionReport` 和 DOCX bytes，适合适配成统一 `ExportReport`，但本项目不得把其类直接暴露为公共 Schema。
-- [`convert_file`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/pipeline.py#L208-L235) 是文件级 API；CLI 提供 `convert --report`、`coverage`、`benchmark` 和 `to-latex`。
+- [`tex2word.__init__`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/__init__.py) 明确导出 `convert_source`、`convert_file`、`ConversionResult`。
+- [`ConversionResult`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/pipeline.py#L18-L40) 包含 IR `document`、`ConversionReport` 和 DOCX bytes，适合适配成统一 `ExportReport`，但本项目不得把其类直接暴露为公共 Schema。
+- [`convert_file`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/pipeline.py#L208-L235) 是文件级 API；CLI 提供 `convert --report`、`coverage`、`benchmark` 和 `to-latex`。
 - `convert_source`/`convert_file` 的公开 `reference_doc` 参数会导入标准 Word 样式、页面尺寸和
   页边距；本项目据此采用内置 `academic-review-v1`，不再自研第二套 DOCX 样式引擎。
-- [`roundtrip.py`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/roundtrip.py#L23-L104) 提供 manifest v1、`read_manifest`、`recover_ir` 与 manifest-biased `to_latex(reconcile=True)`。
+- [`roundtrip.py`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/roundtrip.py#L23-L104) 提供 manifest v1、`read_manifest`、`recover_ir` 与 manifest-biased `to_latex(reconcile=True)`。
 
 **为何不能把 round-trip 当审阅账本**
 
-- [`docx_reader._runs`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/frontend/docx_reader.py#L412-L430) 明确把 `w:ins`/`w:moveTo` 当作已接受内容，把 `w:del`/`w:moveFrom` 丢弃；它产出的是接受所有修订后的文档视图，不是修订事件流。
-- [`_read_comments`](https://github.com/yfyang86/tex2word/blob/v1.0.5/src/tex2word/frontend/docx_reader.py#L155-L168) 当前只返回 `(author, plain text)`，没有评论日期、范围锚点、回复/解决状态和原 XML 证据。
+- [`docx_reader._runs`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/frontend/docx_reader.py#L412-L430) 明确把 `w:ins`/`w:moveTo` 当作已接受内容，把 `w:del`/`w:moveFrom` 丢弃；它产出的是接受所有修订后的文档视图，不是修订事件流。
+- [`_read_comments`](https://github.com/yfyang86/tex2word/blob/v1.0.6/src/tex2word/frontend/docx_reader.py#L155-L168) 当前只返回 `(author, plain text)`，没有评论日期、范围锚点、回复/解决状态和原 XML 证据。
 - reconcile 的目标是保守恢复/合并 LaTeX，不提供逐项 change ID、原文/新文、作者/时间、审批状态或只应用批准项的补丁计划。
 
-**本地契约测试发现的 1.0.5 转换缺口**
+**从 1.0.5 延续并在 1.0.6 重新验证的转换边界**
 
 - `figure` 直接包含多个 `minipage`、且每个列中有一张图和一个 caption 时，
   1.0.5 的 figure 解析会反复覆盖单一图片槽，最终 DOCX 可能只保留最后一张图。
 - raster 图片通过 `\graphicspath` 找到且原命令省略目录时，直接保留原目标会让后端
   无法定位资源。
-- 本项目不复制或修改上游 parser。wrapper 只在能力精确匹配 1.0.5 时，对派生树中
+- 本项目不复制或修改上游 parser。wrapper 只在能力精确匹配 1.0.6 时，对派生树中
   可证明安全的 direct-minipage 形态做带 span/hash 证据的 `subfigure` 归一化，并把
   raster 命令改为已验证的根相对路径；原始 LaTeX 始终不变。任何未覆盖形态仍由
   DOCX 图片计数门禁阻断，而不是猜测补图。后续优先把最小复现和多图数据模型建议
   贡献给上游。
-- On Windows with the legacy long-path policy, tex2word 1.0.5 joins `base_dir`
+- On Windows with the legacy long-path policy, tex2word 1.0.6 joins `base_dir`
   and LaTeX forward-slash image paths before `os.path.isfile()`. Images beyond
   MAX_PATH are reported as missing even when conversion returns success. The real
   stress test retained only 1/64 images, and the project silent-loss gate blocked it.
 - The only temporary private-API exception is confined to the isolated worker and
-  guarded by Windows plus the exact `tex2word==1.0.5` version. It supplies an
+  guarded by Windows plus the exact `tex2word==1.0.6` version. It supplies an
   extended absolute path only while resolving an image and applies
   `os.path.normpath()` immediately before the upstream resolver. The conversion
   `base_dir` remains relative so `input`/`include` preprocessing keeps working.
@@ -240,7 +241,7 @@ Pandoc 声明 [`GPL-2.0-or-later`](https://github.com/jgm/pandoc/blob/3.10/pando
 
 ## 4. 现有上游仍缺失的审阅账本能力
 
-| 本项目 `ChangeSet` 要求 | tex2word 1.0.5 | Pandoc 3.10 | docx-revisions 0.1.5 | docx-mcp-server 0.7.4 | v0.1 责任归属 |
+| 本项目 `ChangeSet` 要求 | tex2word 1.0.6 | Pandoc 3.10 | docx-revisions 0.1.5 | docx-mcp-server 0.7.4 | v0.1 责任归属 |
 |---|---|---|---|---|---|
 | 插入/删除原始事件、作者、时间 | reader 会直接形成“全部接受”视图 | `--track-changes=all` 有 spans、作者、时间 | 有 `w:ins`/`w:del`、作者、时间 | main document 的直接 `w:ins`/`w:del` 有 | 本项目 raw OOXML canonical reader；其他实现作 oracle |
 | moveFrom/moveTo 成对事件 | 被折叠为接受视图 | 官方接口未承诺完整 move pair | 无公开类型 | 无公开事件 | **self-build**，必要时 contribute |
@@ -258,7 +259,7 @@ Pandoc 声明 [`GPL-2.0-or-later`](https://github.com/jgm/pandoc/blob/3.10/pando
 
 ### Python 依赖
 
-- `tex2word`：若作为默认主后端，按经测试的小版本范围固定；首轮用 `==1.0.5`。通过正式依赖解析安装，不 vendor 源码。
+- `tex2word`：作为默认主后端按经测试的小版本精确固定；当前使用 `==1.0.6`。通过正式依赖解析安装，不 vendor 源码。
 - `docx-revisions`：仅在契约测试证明有价值后进入 optional extra；首轮固定 `==0.1.5`。
 - `docx-mcp-server`：不进入 core 或默认 extra；若未来提供 MCP adapter，由用户显式安装和配置。
 - `tex2docx`：不进入默认依赖；E0 可在独立环境固定 `==1.3.0` 做对照。
@@ -288,7 +289,7 @@ RevisionReader
 
 ## 6. 尚待最小契约实验回答的问题
 
-1. `tex2word 1.0.5` 在 Python 3.12/3.13、受支持 Windows 环境上的确定性 DOCX、manifest 和报告表现。
+1. `tex2word 1.0.6` 在 Python 3.12/3.13、受支持 Windows 环境上的确定性 DOCX、manifest 和报告表现。
 2. `tex2word` 公共 API 与 CLI 在同一 fixture 上是否生成等价报告；API 失败时 CLI 是否足以作为稳定 fallback。
 3. Pandoc 3.9.0.2 + crossref 0.3.24a 的结构计数，以及 Pandoc 3.10 不带 crossref 的差异。
 4. Pandoc `--track-changes=all` 对 move、段落级删除、范围评论、多审阅者和嵌套表格的实际 AST。

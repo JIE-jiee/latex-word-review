@@ -657,7 +657,7 @@ def _scan_center_captionof_figures(text: str) -> tuple[_DerivedRewriteSpan, ...]
 def _scan_subcaptionboxes(text: str) -> tuple[_DerivedRewriteSpan, ...]:
     r"""Normalize only static one-image ``subcaptionbox`` commands.
 
-    tex2word 1.0.5 does not register ``\subcaptionbox`` but does understand a
+    The locked tex2word release does not register ``\subcaptionbox`` but understands a
     ``subfigure`` environment. The accepted shape is deliberately narrow: one
     required caption group containing exactly one static ``\label`` and one
     required content group containing exactly one complete

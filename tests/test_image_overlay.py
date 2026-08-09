@@ -270,7 +270,7 @@ def test_export_backend_receives_only_the_derived_root_and_source_map_uses_snaps
 
     class CapturingBackend:
         def capabilities(self) -> BackendCapabilities:
-            return replace(Tex2WordBackend().capabilities(), tool_version="1.0.5")
+            return replace(Tex2WordBackend().capabilities(), tool_version="1.0.6")
 
         def export(self, request: BackendRequest) -> BackendResult:
             observed["source_root"] = request.source_root
@@ -719,7 +719,7 @@ def test_redundant_literal_group_is_rewritten_only_in_the_derived_overlay(
 
 def test_tex2word_profile_preserves_split_figure_reference_targets(tmp_path: Path) -> None:
     backend = Tex2WordBackend()
-    if backend.capabilities().tool_version != "1.0.5":
+    if backend.capabilities().tool_version != "1.0.6":
         pytest.skip("locked tex2word runtime is unavailable")
     source = tmp_path / "source"
     (source / "figures").mkdir(parents=True)
@@ -785,7 +785,7 @@ def test_locked_tex2word_preserves_subcaptionboxes_and_manual_minipage_images(
     tmp_path: Path,
 ) -> None:
     backend = Tex2WordBackend()
-    if backend.capabilities().tool_version != "1.0.5":
+    if backend.capabilities().tool_version != "1.0.6":
         pytest.skip("locked tex2word runtime is unavailable")
     source = tmp_path / "source"
     (source / "figures").mkdir(parents=True)

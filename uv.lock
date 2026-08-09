@@ -604,10 +604,10 @@ requires-dist = [
     { name = "referencing", specifier = ">=0.37,<1" },
     { name = "regex", specifier = ">=2026.7.10,<2027" },
     { name = "rfc8785", specifier = ">=0.1.4,<0.2" },
-    { name = "tex2word", specifier = "==1.0.5" },
-    { name = "tex2word", extras = ["csl"], marker = "extra == 'citations'", specifier = "==1.0.5" },
-    { name = "tex2word", extras = ["mathimg", "mathml"], marker = "extra == 'math-fallback'", specifier = "==1.0.5" },
-    { name = "tex2word", extras = ["pdf"], marker = "extra == 'pdf-figures'", specifier = "==1.0.5" },
+    { name = "tex2word", specifier = "==1.0.6" },
+    { name = "tex2word", extras = ["csl"], marker = "extra == 'citations'", specifier = "==1.0.6" },
+    { name = "tex2word", extras = ["mathimg", "mathml"], marker = "extra == 'math-fallback'", specifier = "==1.0.6" },
+    { name = "tex2word", extras = ["pdf"], marker = "extra == 'pdf-figures'", specifier = "==1.0.6" },
 ]
 provides-extras = ["citations", "math-fallback", "pdf-figures"]
 
@@ -1416,15 +1416,15 @@ wheels = [
 
 [[package]]
 name = "tex2word"
-version = "1.0.5"
+version = "1.0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lxml" },
     { name = "pylatexenc" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/66/53/b322fe2c4751b3b62d69d70464cd76d3dcfea497fc6a485bff866737d160/tex2word-1.0.5.tar.gz", hash = "sha256:294bdc241b8f107752843a28bd7175706993958b5d5b0fe71de24a2c0fd67fd2", size = 150422, upload-time = "2026-07-12T15:56:58.336Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/34/34eb9a87b1c3a3c6b9a58407fd9bbb539ca89b97d5b3cc94a927e7b78429/tex2word-1.0.6.tar.gz", hash = "sha256:27312870ece2e6928e7ce973769e5ab4c8632003353923ff80b2445d3f5f419b", size = 153442, upload-time = "2026-07-23T08:11:38.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/68/e9/43dc2bb1afe892d66b22631337b42c31d4d54efd5c86caf2d62c2afca9c9/tex2word-1.0.5-py3-none-any.whl", hash = "sha256:d09b22db18983acef0b278246126fe7f5ff40f7aa9ea945fe3817e1942bc7da4", size = 171637, upload-time = "2026-07-12T15:56:56.863Z" },
+    { url = "https://files.pythonhosted.org/packages/12/7c/aebc476a58290c66411af183c6e2311c774b0ef486c3428b0e61bf7d41e3/tex2word-1.0.6-py3-none-any.whl", hash = "sha256:70d3f04c507b3c9f7bdf143281a5334a0ae20bcbdd3f44e8ae52aded201e2852", size = 174727, upload-time = "2026-07-23T08:11:37.149Z" },
 ]
 
 [package.optional-dependencies]
