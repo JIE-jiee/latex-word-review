@@ -89,7 +89,7 @@ browser-e2e = [
   "pytest>=8.3,<10",
 ]
 release = [
-  "pyinstaller==6.21.0",
+  "pyinstaller==6.22.2",
 ]
 
 [tool.hatch.version]
